@@ -1,0 +1,49 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ===== 运行产物（不入库） =====
+api/runs/
+api/results/
+api/outputs/
+*.log
+
+# ===== 前端 =====
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.local
+npm-debug.log*
+
+# ===== 环境变量 / 密钥（严禁入库） =====
+.env
+.env.*
+!.env.example
+
+# ===== 影像大文件（真实数据走本地磁盘/MinIO，不进 Git，避免仓库膨胀）=====
+# manifest.json 不在此列，会保留为元数据
+data/**/*.tif
+data/**/*.tiff
+data/**/*.jp2
+data/**/*.SAFE
+data/**/*.zip
+data/**/*.tar.gz
+
+# ===== 编辑器 / 系统 =====
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
