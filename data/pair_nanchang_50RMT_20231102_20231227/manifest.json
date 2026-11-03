@@ -1,0 +1,39 @@
+{
+  "aoi_wgs84": [
+    116.485,
+    29.2842,
+    116.585,
+    29.3842
+  ],
+  "aoi_span_deg": 0.1,
+  "scenes": {
+    "t1_20231102": {
+      "source_id": "S2B_50RMT_20231102_0_L2A",
+      "cloud_cover": 0.005861,
+      "processing_baseline": "05.09",
+      "datetime": "2023-11-02T02:59:48.485000Z",
+      "satellite": "sentinel-2b",
+      "local_files": [
+        "t1_20231102_B02.tif",
+        "t1_20231102_B03.tif",
+        "t1_20231102_B04.tif",
+        "t1_20231102_B08.tif",
+        "t1_20231102_SCL.tif"
+      ]
+    },
+    "t2_20231227": {
+      "source_id": "S2A_50RMT_20231227_0_L2A",
+      "cloud_cover": 0.863699,
+      "processing_baseline": "05.10",
+      "datetime": "2023-12-27T02:59:42.912000Z",
+      "satellite": "sentinel-2a",
+      "local_files": [
+        "t2_20231227_B02.tif",
+        "t2_20231227_B03.tif",
+        "t2_20231227_B04.tif",
+        "t2_20231227_B08.tif",
+        "t2_20231227_SCL.tif"
+      ]
+    }
+  }
+}
