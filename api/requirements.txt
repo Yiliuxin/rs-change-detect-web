@@ -1,0 +1,14 @@
+# 遥感影像处理与地表变化检测 Web 平台 —— 后端 Python 依赖清单
+# 对应 HLD 2.1 四层架构之服务层（FastAPI）与算法层（rasterio / numpy / scikit-*）
+# 版本固定以支撑 REQ-14 结果可复现（run_id + 参数 + commit 三要素）
+fastapi==0.162.0
+uvicorn[standard]==0.54.0
+rasterio==1.5.2
+numpy==2.2.6
+scikit-image==0.24.0
+scikit-learn==1.6.1
+psycopg2-binary==2.9.13
+minio==7.2.20
+reportlab==5.1.0
+pytest==9.1.1
+httpx==0.28.1
