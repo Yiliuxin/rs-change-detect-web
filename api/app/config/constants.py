@@ -78,8 +78,18 @@ VALID_SENSORS: Final[Tuple[str, ...]] = (SENSOR_S2, SENSOR_L8, SENSOR_L9)
 # Sentinel-2 处理基线最低版次（BOA_ADD_OFFSET = −1000 起）。来源：REQ-04 / SRS 6.1 / HLD 3.7
 S2_BASELINE_MIN: Final[str] = "04.00"
 
-# Sentinel-2 L2A 反射率公式：ρ = (DN − 1000) / 10000。来源：REQ-04 / NF5 / HLD 3.7
-S2_FORMULA: Final[str] = "rho=(DN-1000)/10000"
+# Sentinel-2 L2A 反射率公式。来源：REQ-04 / NF5 / HLD 3.7
+#
+# 规范式（ESA 原始 SAFE/JP2，DN 未应用 BOA_ADD_OFFSET）：ρ = (DN − 1000) / 10000
+# 本项目 COG 数据源（AWS sentinel-s2-l2a-cogs）已在生产环节把 BOA_ADD_OFFSET 应用进 DN，
+# 故实际取 ρ = DN / 10000。判定依据（实测，见 README「辐射口径」）：
+#   1) 按规范式再减 1000，农田 t1 的 NIR/R 比值变负（1836 / −477），植被不可能；
+#   2) 鄱阳湖枯水期 NDVI 中位数被压到 −0.92、25% 像元饱和到 ±1，与实况矛盾；
+#   3) 改用 ρ = DN/10000 后两组 NDVI 零饱和，且季相/水情方向全部吻合。
+# 若日后改用 ESA 原始 JP2（DN 含 offset），把 S2_DN_OFFSET_APPLIED 置 False 即可，其余代码无需改动。
+S2_DN_OFFSET_APPLIED: Final[bool] = True
+S2_FORMULA_ESA: Final[str] = "rho=(DN-1000)/10000"
+S2_FORMULA: Final[str] = "rho=DN/10000" if S2_DN_OFFSET_APPLIED else S2_FORMULA_ESA
 S2_DN_OFFSET: Final[float] = 1000.0
 S2_DN_SCALE: Final[float] = 10000.0
 
@@ -91,7 +101,13 @@ LS_COLLECTION: Final[str] = "C2L2"
 
 
 def s2_reflectance(dn):
-    """Sentinel-2 L2A：ρ = (DN − 1000) / 10000。来源：REQ-04 / NF5。"""
+    """Sentinel-2 L2A 反射率。来源：REQ-04 / NF5。
+
+    DN 已应用 BOA_ADD_OFFSET 时 ρ = DN / 10000；否则回落到规范式 ρ = (DN − 1000) / 10000。
+    由 ``S2_DN_OFFSET_APPLIED`` 统一开关，调用方无需感知数据源差异。
+    """
+    if S2_DN_OFFSET_APPLIED:
+        return dn / S2_DN_SCALE
     return (dn - S2_DN_OFFSET) / S2_DN_SCALE
 
 

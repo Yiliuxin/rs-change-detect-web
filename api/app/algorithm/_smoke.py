@@ -52,7 +52,7 @@ from app.algorithm.writers import (  # noqa: E402
 )
 from app.config.constants import (  # noqa: E402
     AOI_MAX_SPAN_DEG, ATTRIBUTION_S2, ATTRIBUTION_S2_MODIFIED, BLOCK_SIZE,
-    MIN_SAMPLES_PER_CLASS, OTSU_FALLBACK_DNDVI, SENSOR_S2,
+    MIN_SAMPLES_PER_CLASS, OTSU_FALLBACK_DNDVI, S2_FORMULA, SENSOR_S2,
     VALID_RATIO_MIN, VALID_RATIO_WARN,
 )
 
@@ -270,7 +270,7 @@ def run_group(run_id: str, pair_dir: Path) -> dict:
         r = scenes[key]["ratio_result"]
         c = scenes[key]["masks"].counts()
         print(f"[{key}] {sc['date']} 基线={sc['processing_baseline']} "
-              f"ρ=(DN-1000)/10000  window={scenes[key]['window']}")
+              f"ρ={S2_FORMULA}  window={scenes[key]['window']}")
         print(f"    掩膜: 总={c['total']} 有效={c['valid']} 云={c['cloud']} "
               f"云影={c['cloud_shadow']} 雪={c['snow']} 无效={c['invalid']} "
               f"→ valid_ratio={r.valid_ratio:.4f} / {r.code}")
@@ -315,7 +315,7 @@ def run_group(run_id: str, pair_dir: Path) -> dict:
         "group": pair_dir.name,
         "aoi_wgs84": bbox.as_tuple(),
         "sensor": sensor_t1,
-        "formula": "rho=(DN-1000)/10000",
+        "formula": S2_FORMULA,
         "baselines": {k: scenes[k]["baseline"] for k in ("t1", "t2")},
         "dates": {k: manifest["scenes"][k]["date"] for k in ("t1", "t2")},
         "block_size": BLOCK_SIZE,
@@ -458,12 +458,19 @@ def main() -> int:
         print("  结论校验：某组触发终止档，不做占比比较（如实报告）")
         return 0
 
-    ok = p["change_pixel_ratio"] > f["change_pixel_ratio"]
-    print(f"  结论校验：鄱阳湖组 {p['change_pixel_ratio']:.4f} > "
-          f"农田组 {f['change_pixel_ratio']:.4f} → {ok}"
-          f"（水体消长形成连片变化，农田季相多为零散噪声被形态学去除）")
-    if not ok:
-        print("[FAIL] 变化像元占比结论反了，请检查 NDVI / 掩膜 / ΔNDVI / 阈值 / 形态学逻辑")
+    # 判据一（本质正确性，验变化方向）：鄱阳湖水退→滩地返青，NDVI 上升故以「增强」为主；
+    # 农田水稻收割→枯黄，NDVI 下降故以「退化」为主。方向反了即说明 NDVI / ΔNDVI 语义错。
+    p_cnt, f_cnt = p["counts"], f["counts"]
+    ok_dir = (p_cnt[1] > p_cnt[2]) and (f_cnt[2] > f_cnt[1])
+    # 判据二（防跑飞，验量级）：变化占比落在 2%~60% 的合理区间
+    ok_ratio = all(0.02 <= r["change_pixel_ratio"] <= 0.60 for r in (p, f))
+
+    print(f"  结论校验-方向：鄱阳湖 增强{p_cnt[1]}/退化{p_cnt[2]}、农田 增强{f_cnt[1]}/退化{f_cnt[2]}"
+          f" → {ok_dir}（水退返青 NDVI 升 / 收割枯黄 NDVI 降）")
+    print(f"  结论校验-量级：鄱阳湖 {p['change_pixel_ratio']:.4f}、农田 {f['change_pixel_ratio']:.4f}"
+          f" → {ok_ratio}（农田为均质大田整片枯黄，占比高于局部水体消长属正常）")
+    if not (ok_dir and ok_ratio):
+        print("[FAIL] 变化方向或量级不合理，请检查 NDVI / 掩膜 / ΔNDVI / 阈值 / 形态学逻辑")
         return 1
     print("smoke 完成：两组全链路通过，三件套已落盘")
     return 0

@@ -76,10 +76,14 @@ def _apply_valid(arr: np.ndarray, valid_mask: Optional[np.ndarray]) -> np.ndarra
 
 
 def ndvi(red, nir, valid_mask: Optional[np.ndarray] = None) -> np.ndarray:
-    """NDVI = (NIR − R) / (NIR + R)，返回 float32；无效像元为 NaN（REQ-06）。"""
+    """NDVI = (NIR − R) / (NIR + R)，返回 float32；无效像元为 NaN（REQ-06）。
+
+    结果强制约束回物理定义域 [-1, 1]：低反射率像元（暗水体 / 阴影）的
+    NIR + R 可以趋近 0，比值在数学上正确但会放大到 ±数十，属数值伪影。
+    """
     r = _as_f32(red)
     n = _as_f32(nir)
-    result = _safe_ratio(n - r, n + r)
+    result = clip_index(_safe_ratio(n - r, n + r))
     return _apply_valid(result, valid_mask)
 
 
@@ -87,7 +91,7 @@ def ndwi(green, nir, valid_mask: Optional[np.ndarray] = None) -> np.ndarray:
     """NDWI（McFeeters）= (G − NIR) / (G + NIR)，返回 float32；无效像元为 NaN。"""
     g = _as_f32(green)
     n = _as_f32(nir)
-    result = _safe_ratio(g - n, g + n)
+    result = clip_index(_safe_ratio(g - n, g + n))
     return _apply_valid(result, valid_mask)
 
 
