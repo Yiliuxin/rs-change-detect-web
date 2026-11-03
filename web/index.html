@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="遥感影像处理与地表变化检测 Web 平台 · 表现层 UI-01~05" />
+    <title>遥感变化检测平台 · UI-01~05</title>
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark">RS</span>
+          <div class="brand-text">
+            <strong>遥感影像变化检测平台</strong>
+            <small>表现层 · HLD 4.x · MapLibre 离线空白底图</small>
+          </div>
+        </div>
+        <div class="topbar-right">
+          <span id="demo-badge" class="badge badge-demo" hidden>演示数据</span>
+          <span class="badge badge-req">REQ-01 ~ REQ-15</span>
+          <span class="badge badge-env">MVP 离线</span>
+        </div>
+      </header>
+
+      <nav id="steps" class="steps" aria-label="5 步流程"></nav>
+
+      <main class="layout">
+        <aside id="panel" class="panel"></aside>
+        <section class="map-area">
+          <div id="map"></div>
+          <div id="map-legend" class="map-legend" hidden></div>
+          <div id="map-hint" class="map-hint"></div>
+          <div id="map-mode" class="map-mode"></div>
+        </section>
+      </main>
+
+      <div id="banner" class="banner" hidden></div>
+      <div id="toasts" class="toasts" aria-live="polite"></div>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

@@ -1,0 +1,19 @@
+{
+  "name": "rs-change-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "遥感影像变化检测平台 前端 UI-01~05（Vite + MapLibre GL JS + ECharts，离线空白底图）",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "echarts": "^5.5.1",
+    "maplibre-gl": "^4.7.1"
+  },
+  "devDependencies": {
+    "vite": "^5.4.11"
+  }
+}
