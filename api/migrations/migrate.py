@@ -6,30 +6,24 @@
     python migrations/migrate.py down    # 逆序回滚（005→001）
     python migrations/migrate.py status  # 打印待执行脚本清单
 
-依赖：psycopg2 + PostgreSQL/PostGIS；DSN 由环境变量组装（见 :func:`dsn`）。
+依赖：psycopg2 + PostgreSQL/PostGIS；连接串取自 api/.env（见 app.config.env.postgres_dsn）。
 """
 from __future__ import annotations
 
-import os
 import re
 import sys
 from pathlib import Path
 
 import psycopg2
 
+# 允许以脚本方式直接运行：把 api/ 加入搜索路径，复用 app.config.env 的 .env 加载与 DSN 组装
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from app.config.env import postgres_dsn  # noqa: E402
+
 HERE = Path(__file__).resolve().parent
 UP_RE = re.compile(r"^\d{3}_.*\.up\.sql$")
 DOWN_RE = re.compile(r"^\d{3}_.*\.down\.sql$")
-
-
-def dsn() -> str:
-    """组装 PostgreSQL DSN（默认值对应本地 PostGIS 容器）。"""
-    host = os.getenv("PGHOST", "localhost")
-    port = os.getenv("PGPORT", "5432")
-    db = os.getenv("PGDATABASE", "rs_change")
-    user = os.getenv("PGUSER", "postgres")
-    password = os.getenv("PGPASSWORD", "postgres")
-    return f"host={host} port={port} dbname={db} user={user} password={password}"
 
 
 def _scripts(pattern) -> list[Path]:
@@ -37,7 +31,7 @@ def _scripts(pattern) -> list[Path]:
 
 
 def run(paths: list[Path]) -> None:
-    conn = psycopg2.connect(dsn())
+    conn = psycopg2.connect(postgres_dsn())
     conn.autocommit = False
     try:
         with conn.cursor() as cur:

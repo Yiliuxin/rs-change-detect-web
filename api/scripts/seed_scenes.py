@@ -31,6 +31,7 @@ from app.config.constants import (  # noqa: E402
     RADIOMETRIC_FORMULAS,
     SENSOR_S2,
 )
+from app.config.env import postgres_dsn  # noqa: E402
 from app.config.storage import (  # noqa: E402
     StorageSettings,
     ensure_buckets,
@@ -140,15 +141,6 @@ def parse_group(pair_dir: Path) -> GroupPlan:
 # --------------------------------------------------------------------------- #
 # 数据库
 # --------------------------------------------------------------------------- #
-def dsn() -> str:
-    host = os.getenv("PGHOST", "localhost")
-    port = os.getenv("PGPORT", "5432")
-    db = os.getenv("PGDATABASE", "rs_change")
-    user = os.getenv("PGUSER", "postgres")
-    password = os.getenv("PGPASSWORD", "postgres")
-    return f"host={host} port={port} dbname={db} user={user} password={password}"
-
-
 def upsert_aoi(cur, plan: GroupPlan) -> None:
     minx, miny, maxx, maxy = plan.bbox
     cur.execute(
@@ -222,7 +214,7 @@ def main() -> int:
     # 2) 数据库写入
     written: List[Tuple[str, str, str]] = []  # (group, tag, scene_id)
     if not args.dry_run:
-        conn = psycopg2.connect(dsn())
+        conn = psycopg2.connect(postgres_dsn())
         try:
             with conn.cursor() as cur:
                 for plan in plans:
@@ -252,9 +244,12 @@ def main() -> int:
     lines.append(f"合计：scene 记录 {len(written)} 条，MinIO 对象 {len(uploaded)} 个")
 
     report = "\n".join(lines)
+    print(report)
+    if args.dry_run:
+        print("\n[report] dry-run 模式：仅打印，不落盘")
+        return 0
     out = Path(__file__).resolve().parent / "seed_report.md"
     out.write_text(report, encoding="utf-8")
-    print(report)
     print(f"\n[report] 已写入 {out}")
     return 0
 

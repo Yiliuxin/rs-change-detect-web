@@ -9,6 +9,7 @@ scikit-image==0.24.0
 scikit-learn==1.6.1
 psycopg2-binary==2.9.13
 minio==7.2.20
+python-dotenv==1.1.0
 reportlab==5.1.0
 pytest==9.1.1
 httpx==0.28.1
