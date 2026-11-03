@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""路由：POST /api/v1/aoi/select（HLD 2.2.3.1，REQ-01/02）。
+"""路由：POST /api/v1/aoi/select（HLD 2.2.3.1，REQ-01/02/14）。
 
-骨架阶段：只定义路径、HTTP 方法、Pydantic 请求/响应契约与占位返回值。
-后续由 AoiService 完成跨度校验与 SceneRepository 完成 PostGIS 空间相交检索。
+薄封装：Pydantic 校验 + 调 aoi_service + 统一异常封装（由 errors.install 全局处理）。
+业务逻辑（GeoJSON/EX1/run_id/参数快照/写 aoi+task/空间相交 EX2）全在 service 层。
 """
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from app.api.v1.schemas import ErrorResponse, SceneVO
 from app.config.constants import AOI_MAX_SPAN_DEG
+from app.service import aoi_service
 
 router = APIRouter(prefix="/aoi", tags=["AOI"])
 
@@ -27,7 +28,7 @@ class AoiSelectRequest(BaseModel):
 
 
 class AoiSelectResponse(BaseModel):
-    """AOI 提交响应（REQ-01/02）。"""
+    """AOI 提交响应（REQ-01/02/14）。"""
 
     aoi_id: str = Field(..., description="AOI 主键 UUID")
     run_id: str = Field(..., description="运行标识（REQ-14）")
@@ -43,18 +44,10 @@ class AoiSelectResponse(BaseModel):
     summary="AOI 提交与预置影像对匹配",
 )
 def select_aoi(payload: AoiSelectRequest) -> AoiSelectResponse:
-    """AOI 提交与预置影像对匹配（REQ-01/02）。
+    """AOI 提交与预置影像对匹配（REQ-01/02/14）。
 
-    TODO(HLD 2.2.3.1)：
-      1) AoiService.validate：闭合校验、跨度 ≤ {AOI_MAX_SPAN_DEG}° 校验（超限 EX1）；
-      2) SceneRepository.findByAoi：PostGIS ST_Intersects 检索（无匹配 EX2）；
-      3) 生成 run_id 与参数快照并写 aoi / task 表（REQ-14）。
+    service 完成：闭合/合法校验、跨度 ≤ {AOI_MAX_SPAN_DEG}°（EX1）、PostGIS
+    ST_Intersects 检索（EX2）、生成 run_id/参数快照并写 aoi/task。
     """
-    # 占位返回值（骨架）：不连数据库、不做计算
-    _ = (payload, AOI_MAX_SPAN_DEG)
-    return AoiSelectResponse(
-        aoi_id="",
-        run_id="",
-        area_deg2=0.0,
-        matched_scenes=[],
-    )
+    result = aoi_service.select(payload.aoi_geom, payload.t1, payload.t2)
+    return AoiSelectResponse(**result)

@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """路由：POST /api/v1/result/change（HLD 2.2.3.3，REQ-05/06/07/08）。
 
-骨架阶段：只定义路径、HTTP 方法、Pydantic 请求/响应契约与占位返回值。
-后续由 ChangeService 编排"掩膜 → 指数 → ΔNDVI + Otsu + 形态学 → 三类分类"。
+薄封装：Pydantic 校验 + 调 change_service + 统一异常封装。
+全链路编排（EX3/EX11 终止、EX5 告警、EX4/EX8/EX9/SYS-*、写库、三件套）在 service 层。
 """
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from app.api.v1.schemas import ErrorResponse, StatItem
 from app.config.constants import BLOCK_SIZE, OTSU_FALLBACK_DNDVI
+from app.service import change_service
 
 router = APIRouter(prefix="/result", tags=["Change"])
 
@@ -40,20 +41,15 @@ class ChangeResponse(BaseModel):
 @router.post(
     "/change",
     response_model=ChangeResponse,
-    responses={400: {"model": ErrorResponse, "description": "EX3/EX4/EX5/EX7/EX8/EX9/EX11"},
-               500: {"model": ErrorResponse, "description": "SYS-02 内存不足 / SYS-05 处理超时"}},
+    responses={400: {"model": ErrorResponse, "description": "EX3/EX4/EX8/EX9/EX11"},
+               429: {"model": ErrorResponse, "description": "EX7 并发超限"},
+               500: {"model": ErrorResponse, "description": "SYS-01/02/03/04/05"}},
     summary="变化检测主流程",
 )
 def run_change(payload: ChangeRequest) -> ChangeResponse:
     """变化检测主流程（REQ-05/06/07/08）。
 
-    TODO(HLD 2.2.3.3)：
-      1) MaskPipeline：valid_ratio 四段判定（=0 → EX3；<0.10 → EX11；<0.50 → EX5 告警；≥0.50 通过）；
-      2) IndexCalculator → OtsuThreshold → MorphologyCleaner → ChangeClassifier；
-      3) ChangeStat 面积统计与 params_snapshot 回写（REQ-11/14）。
+    EX5（0.10–0.50）为告警可继续档：返回 200，warning 置于 params_snapshot。
     """
-    _ = payload
-    return ChangeResponse(
-        run_id="",
-        params_snapshot={},
-    )
+    result = change_service.run(payload.run_id, payload.index, payload.block_size)
+    return ChangeResponse(**result)

@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """路由：POST /api/v1/accuracy/sample（HLD 2.2.3.4，REQ-09）。
 
-骨架阶段：只定义路径、HTTP 方法、Pydantic 请求/响应契约与占位返回值。
-后续由 SampleService 构建混淆矩阵并计算 OA / Kappa（不足 30 点/类 → EX10）。
+薄封装：Pydantic 校验 + 调 sample_service + 统一异常封装。
+样本入库 / EX10 / OA / Kappa 全在 service 层。
 """
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from app.api.v1.schemas import ErrorResponse, SampleItem
 from app.config.constants import KAPPA_TEACHING_MIN, MIN_SAMPLES_PER_CLASS
+from app.service import sample_service
 
 router = APIRouter(prefix="/accuracy", tags=["Accuracy"])
 
@@ -42,10 +43,9 @@ class AccuracySampleResponse(BaseModel):
 def submit_samples(payload: AccuracySampleRequest) -> AccuracySampleResponse:
     """样本提交与精度评价（REQ-09）。
 
-    TODO(HLD 2.2.3.4)：
-      1) 校验每类样本数 ≥ MIN_SAMPLES_PER_CLASS，否则 EX10；
-      2) ConfusionMatrixBuilder + AccuracyMetrics 计算 OA / Kappa；
-      3) Kappa < KAPPA_TEACHING_MIN 时返回「教学级，非工程级」标注。
+    累计每类样本数 ≥ MIN_SAMPLES_PER_CLASS，否则 EX10；Kappa < KAPPA_TEACHING_MIN
+    时标注「教学级，非工程级」。
     """
-    _ = (payload, MIN_SAMPLES_PER_CLASS, KAPPA_TEACHING_MIN)
-    return AccuracySampleResponse()
+    samples = [s.model_dump() for s in payload.samples]
+    result = sample_service.submit(payload.run_id, samples)
+    return AccuracySampleResponse(**result)

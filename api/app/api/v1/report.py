@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """路由：POST /api/v1/report/export（HLD 2.2.3.5，REQ-12/14/15）。
 
-骨架阶段：只定义路径、HTTP 方法、Pydantic 请求/响应契约与占位返回值。
-后续由 ReportService 汇总参数快照、专题图、GeoTIFF 与精度指标，产出三格式报告。
+薄封装：Pydantic 校验 + 调 report_service + 统一异常封装。
+格式白名单（EX6）/ 三件套落盘上传 / commit / 署名全在 service 层。
 """
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from app.api.v1.schemas import ErrorResponse, ExportFile
 from app.config.constants import ATTRIBUTION_S2, EXPORT_FORMATS
+from app.service import report_service
 
 router = APIRouter(prefix="/report", tags=["Report"])
 
@@ -36,16 +37,15 @@ class ReportExportResponse(BaseModel):
 @router.post(
     "/export",
     response_model=ReportExportResponse,
-    responses={400: {"model": ErrorResponse, "description": "EX6 导出格式不支持"}},
+    responses={400: {"model": ErrorResponse, "description": "EX6 导出格式不支持"},
+               429: {"model": ErrorResponse, "description": "EX7 并发超限"},
+               500: {"model": ErrorResponse, "description": "SYS-*"}},
     summary="报告导出",
 )
 def export_report(payload: ReportExportRequest) -> ReportExportResponse:
     """报告导出（REQ-12/14/15）。
 
-    TODO(HLD 2.2.3.5)：
-      1) 校验 formats ⊆ EXPORT_FORMATS，否则 EX6；
-      2) GeoTiffWriter / PdfBuilder 产出 GeoTIFF + PNG + PDF；
-      3) AttributionProvider 强制嵌入 Copernicus / USGS 署名（REQ-15）。
+    formats ⊆ EXPORT_FORMATS，否则 EX6；产出 GeoTIFF/PNG/PDF 三件套并强制署名。
     """
-    _ = (payload, ATTRIBUTION_S2, EXPORT_FORMATS)
-    return ReportExportResponse(run_id="")
+    result = report_service.export(payload.run_id, payload.formats)
+    return ReportExportResponse(**result)

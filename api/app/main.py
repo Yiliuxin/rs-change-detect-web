@@ -13,6 +13,7 @@ from typing import AsyncIterator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.errors import install as install_error_handlers
 from app.api.v1 import accuracy, aoi, change, report, scene
 from app.config.storage import COG_BUCKET, RESULT_BUCKET, ensure_buckets, get_client
 
@@ -58,6 +59,9 @@ app.add_middleware(
 # 注册 5 个 REST 路由（HLD 2.2.3.1 ~ 2.2.3.5）
 for _router in (aoi.router, scene.router, change.router, accuracy.router, report.router):
     app.include_router(_router, prefix=API_V1_PREFIX)
+
+# 统一异常封装：所有异常输出 {code, message, run_id}（HLD 第 5 章 / EX1–EX11、SYS-01–05）
+install_error_handlers(app)
 
 
 @app.get("/health", tags=["Ops"], summary="健康检查")
