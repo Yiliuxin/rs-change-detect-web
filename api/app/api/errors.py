@@ -25,6 +25,7 @@ CODE_HTTP = {
     "EX6": 400, "EX7": 409, "EX8": 409, "EX9": 409,
     "EX10": 400, "EX11": 400,
     "SYS-01": 500, "SYS-02": 500, "SYS-03": 500, "SYS-04": 500, "SYS-05": 500,
+    "SYS-06": 500, "SYS-07": 500,
 }
 
 __all__ = ["ApiError", "CODE_HTTP", "as_api_error", "install"]

@@ -26,7 +26,7 @@
     防重复提交：同 ``name+tile+两日期`` 进行中的 fetch 直接返回已有 ``fetch_id``。
 
 错误码：EX1（AOI 超限）/ EX2（无匹配、无有效数据、未知 fetch_id）/ SYS-06（STAC 或
-COG 下载失败）/ SYS-03（MinIO 或 PG 写入失败）；文案一律取自 ``constants.ERROR_MESSAGES``。
+COG 下载失败）/ SYS-07（MinIO 或 PG 写入失败）；文案一律取自 ``constants.ERROR_MESSAGES``。
 """
 from __future__ import annotations
 
@@ -459,14 +459,14 @@ def _upload_tag(name: str, tag: str, paths: Dict[str, object], run_id: Optional[
         for band in BANDS:
             path = paths[band]
             upload_file(client, COG_BUCKET, f"{prefix}{path.name}", str(path))
-    except Exception as exc:  # noqa: BLE001 - MinIO 写入失败 → SYS-03
-        raise ApiError("SYS-03", run_id=run_id, http_status=500,
+    except Exception as exc:  # noqa: BLE001 - MinIO 写入失败 → SYS-07
+        raise ApiError("SYS-07", run_id=run_id, http_status=500,
                        detail=f"MinIO 上传失败（{tag}）：{exc}") from exc
 
 
 def _persist_scene(name: str, tag: str, meta: dict, box: BBox,
                    run_id: Optional[str]) -> str:
-    """写 aoi（uuid5）+ scene（uuid5），复用 seed 口径；PG 失败 → SYS-03(500)。"""
+    """写 aoi（uuid5）+ scene（uuid5），复用 seed 口径；PG 失败 → SYS-07(500)。"""
     aoi_id = str(uuid.uuid5(UUID_NS, f"aoi:{name}"))
     scene_id = str(uuid.uuid5(UUID_NS, f"scene:{name}:{tag}:{meta['source_id']}"))
     try:
@@ -483,8 +483,8 @@ def _persist_scene(name: str, tag: str, meta: dict, box: BBox,
             tile=meta["tile"],
             bbox=box.as_tuple(),
         )
-    except Exception as exc:  # noqa: BLE001 - PG 写入失败 → SYS-03
-        raise ApiError("SYS-03", run_id=run_id, http_status=500,
+    except Exception as exc:  # noqa: BLE001 - PG 写入失败 → SYS-07
+        raise ApiError("SYS-07", run_id=run_id, http_status=500,
                        detail=f"数据库写入失败（{tag}）：{exc}") from exc
     return scene_id
 

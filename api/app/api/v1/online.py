@@ -111,7 +111,7 @@ class FetchProgress(BaseModel):
 
 
 class FetchError(BaseModel):
-    """失败信息（EX1 / EX2 / SYS-06 / SYS-03）。"""
+    """失败信息（EX1 / EX2 / SYS-06 / SYS-07）。"""
 
     code: str
     message: str
@@ -147,7 +147,7 @@ def discover_scenes(payload: DiscoverRequest) -> DiscoverResponse:
     "/fetch",
     response_model=FetchStartResponse,
     responses={400: {"model": ErrorResponse, "description": "EX1 / 参数非法"},
-               500: {"model": ErrorResponse, "description": "SYS-03 / SYS-06 写入或下载失败"}},
+               500: {"model": ErrorResponse, "description": "SYS-06 下载失败 / SYS-07 写入失败"}},
     summary="按需下载入库（在线取数，后台线程）",
 )
 def fetch_scenes(payload: FetchRequest) -> FetchStartResponse:
