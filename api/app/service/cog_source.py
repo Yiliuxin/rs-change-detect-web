@@ -6,7 +6,7 @@
 
 1) 走 MinIO：``list_objects(client, COG_BUCKET, prefix)`` 匹配 B02/B03/B04/B08/SCL
    （兼容 nanchang 带日期的文件名 ``t1_20231102_B04.tif``），``fget_object`` 下载到
-   ``api/runs/<run_id>/_cog/<tag>/``；
+   ``api/runs/<run_id>/_cog/<pair_name>/<tag>/``（按影像对隔离，避免切换时串文件）；
 2) MinIO 不可用 / 对象不全时回退本地 ``C:\\Test\\Web\\data\\pair_<name>_*\\``。
 
 返回 ``{B02,B03,B04,B08,SCL: Path}``；两路都失败 → SYS-01。不修改 data/ 下任何文件。
@@ -55,7 +55,13 @@ def _match_band(object_name: str, band: str) -> bool:
 
 
 def _from_minio(prefix: str, tag: str, run_id: str) -> Optional[Dict[str, Path]]:
-    """从 MinIO 下载 5 波段到 api/runs/<run_id>/_cog/<tag>/；失败返回 None。"""
+    """从 MinIO 下载 5 波段到 ``api/runs/<run_id>/_cog/<pair_name>/<tag>/``；失败返回 None。
+
+    缓存目录**必须按 pair_name 隔离**：不同影像对的波段文件名完全相同
+    （都是 ``t1_B02.tif``），若只按 ``run_id/tag`` 缓存，同一 run 内切换影像对时
+    会把上一组的文件当成本组的，静默产出错误结果（实测表现为 clip_window 离谱、
+    valid_ratio=0 → EX3）。
+    """
     try:
         client = get_client(StorageSettings.from_env())
         objects = list_objects(client, COG_BUCKET, prefix=prefix)
@@ -67,7 +73,8 @@ def _from_minio(prefix: str, tag: str, run_id: str) -> Optional[Dict[str, Path]]
                 return None
             picked[band] = sorted(hits)[0]
 
-        dest = RUNS_ROOT / run_id / "_cog" / tag
+        pair_name = prefix.strip("/").split("/")[0] or "scene"
+        dest = RUNS_ROOT / run_id / "_cog" / pair_name / tag
         dest.mkdir(parents=True, exist_ok=True)
         paths: Dict[str, Path] = {}
         for band, obj in picked.items():
