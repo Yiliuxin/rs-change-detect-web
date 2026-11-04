@@ -190,4 +190,7 @@ ERROR_MESSAGES: Final[Dict[str, str]] = {
     "SYS-03": "专题图渲染失败",
     "SYS-04": "数据库连接失败",
     "SYS-05": "处理超时",
+    # B 级扩展（在线取数）：STAC 检索不可达 / COG 逐波段下载重试后仍失败（REQ-02 在线分支）
+    # 注：HTTP 映射由调用方显式传 http_status=500（errors.CODE_HTTP 未改动，5 接口契约不变）
+    "SYS-06": "在线数据源不可达或影像下载失败，请稍后重试",
 }
