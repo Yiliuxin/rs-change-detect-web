@@ -486,7 +486,8 @@ function renderCaliber() {
   const baseline = (p.scenes && p.scenes.t2 && p.scenes.t2.proc_baseline) || '05.09';
   panel.innerHTML = `
     <div class="k">公式标识</div><div class="v"><code>S2_L2A_BOA</code></div>
-    <div class="k">辐射定标公式</div><div class="v"><code>rho=(DN-1000)/10000</code></div>
+    <div class="k">辐射定标公式</div><div class="v"><code>rho=DN/10000</code></div>
+    <div class="k">口径说明</div><div class="v">AWS COG DN 已应用 BOA_ADD_OFFSET（偏移已在 DN 中修正）</div>
     <div class="k">传感器</div><div class="v">S2 · Sentinel-2 L2A</div>
     <div class="k">处理基线版次</div><div class="v">${esc(baseline)}（S2 需 ≥ 04.00，达标）</div>
     <div class="k">分块尺寸</div><div class="v">256 px</div>

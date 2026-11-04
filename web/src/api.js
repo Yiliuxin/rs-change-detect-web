@@ -7,7 +7,7 @@ import { ApiError } from './errors.js';
 import * as demo from './demo.js';
 
 const BASE = '/api/v1';
-const TIMEOUT_MS = 2500; // constants.py API_TIMEOUT_SEC = 3
+const TIMEOUT_MS = 15000; // 重计算接口（POST /scene/match 真实读取 COG 算掩膜）放宽到 15s；constants.py API_TIMEOUT_SEC = 3 仅适用于轻接口，避免 2.5s 误超时降级
 
 function fetchWithTimeout(url, options) {
   const ctrl = new AbortController();
@@ -65,11 +65,88 @@ export function selectAoi(payload) {
 }
 
 // ---------- 2) REQ-02：列出双时相影像对（GET → POST → 本地 seed 兼容）----------
-function pickPairs(j) {
+// 真实后端 GET /scene/match 返回 {count, scenes:[...]}：按 cog_path 的 pair_<name> 段分组，
+// 组内按 acq_date 升序配成 t1（较早）/ t2（较晚），并用 cog_path 的 /t1/ /t2/ 标记校对兜底。
+// 导出为纯函数便于 Node 侧无 DOM 验证；不改变 listScenePairs 的 via:'GET' 返回口径。
+const PAIR_LABELS = {
+  poyang: '鄱阳湖 汛期→枯水期(水体消长)',
+  farmland: '赣中农田 生长期→枯黄期(NDVI 季相)',
+  nanchang: '南昌 初冬→深冬(城区/水体季相)',
+};
+
+function pairGroupKey(sc) {
+  const cp = sc && sc.cog_path;
+  if (typeof cp === 'string') {
+    const m = cp.match(/pair_([A-Za-z0-9_-]+)/);
+    if (m) return { key: m[1], byTile: false };
+  }
+  // cog_path 缺失时回退按 tile 分组（加前缀避免与 pair_<name> 键冲突）
+  if (sc && sc.tile) return { key: 'tile_' + sc.tile, byTile: true };
+  return null;
+}
+
+function cogPhase(sc) {
+  const cp = sc && sc.cog_path;
+  if (typeof cp !== 'string') return null;
+  if (/\/t1(?:\/|$)/.test(cp)) return 't1';
+  if (/\/t2(?:\/|$)/.test(cp)) return 't2';
+  return null;
+}
+
+function sceneVO(sc, phase) {
+  return {
+    scene_id: sc.scene_id,
+    date: sc.acq_date,
+    sensor: sc.sensor,
+    cloud_cover: sc.cloud_cover,
+    proc_baseline: sc.proc_baseline,
+    phase,
+    cog_path: sc.cog_path,
+  };
+}
+
+export function pickPairs(j) {
   if (!j || typeof j !== 'object') return null;
+  // 兼容演示降级层 / 旧契约：pairs 或 scene_pairs 直接透传
   if (Array.isArray(j.pairs) && j.pairs.length) return j.pairs;
   if (Array.isArray(j.scene_pairs) && j.scene_pairs.length) return j.scene_pairs;
-  return null;
+  // 真实 GET 契约：必须同时具备非空 scenes 与 count，否则返回 null 继续走降级
+  if (!Array.isArray(j.scenes) || !j.scenes.length || j.count == null) return null;
+
+  const groups = new Map();
+  for (const sc of j.scenes) {
+    const g = pairGroupKey(sc);
+    if (!g) continue;
+    if (!groups.has(g.key)) groups.set(g.key, {
+      byTile: g.byTile,
+      scenes: [],
+    });
+    groups.get(g.key).scenes.push(sc);
+  }
+
+  const pairs = [];
+  for (const [key, grp] of groups) {
+    const arr = grp.scenes;
+    if (arr.length < 2) continue; // 单景无法配成 t1/t2
+    // 主规则：组内按 acq_date 升序，较早者 t1、较晚者 t2
+    const sorted = arr.slice().sort((a, b) => String(a.acq_date || '').localeCompare(String(b.acq_date || '')));
+    let t1 = sorted[0];
+    let t2 = sorted[sorted.length - 1];
+    // 校对/兜底：cog_path 明确带 /t1/ /t2/ 标记时以其为准
+    const mk1 = arr.find((s) => cogPhase(s) === 't1');
+    const mk2 = arr.find((s) => cogPhase(s) === 't2');
+    if (mk1 && mk2) { t1 = mk1; t2 = mk2; }
+
+    const tile = t1.tile || t2.tile || '—';
+    const label = PAIR_LABELS[key] || (key + ' · ' + t1.acq_date + ' → ' + t2.acq_date);
+    pairs.push({
+      key,
+      label,
+      tile,
+      scenes: { t1: sceneVO(t1, 't1'), t2: sceneVO(t2, 't2') },
+    });
+  }
+  return pairs.length ? pairs : null;
 }
 
 export async function listScenePairs(aoiId) {
