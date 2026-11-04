@@ -1,10 +1,10 @@
 // -*- coding: utf-8 -*-
-// ECharts 图表：UI-03 三类面积占比饼图（REQ-08/11）、UI-05 三类面积柱状图（REQ-11）。
-// 数据来自 /result/change 的 stats，本地渲染保证首屏 < 5s（NF2）。
+// ECharts 图表：右栏「检测结果」三类面积占比饼图（REQ-08/11）与三类面积柱状图（REQ-11）。
+// 数据来自 /result/change 的 stats，本地渲染保证首屏 < 5s（NF2）。浅色专业主题。
 
 import * as echarts from 'echarts';
 
-const COLORS = { 1: '#21ba45', 2: '#e74c3c', 3: '#5b7a99' };
+const COLORS = { 1: '#21a04c', 2: '#d94c3d', 3: '#5b7a99' };
 const NAMES = { 1: '增强', 2: '退化', 3: '稳定' };
 
 let pie = null;
@@ -29,9 +29,10 @@ function normalizeStats(stats) {
 function tooltipBase() {
   return {
     trigger: 'item',
-    backgroundColor: 'rgba(12,21,36,0.95)',
-    borderColor: '#274067',
-    textStyle: { color: '#e8effb', fontSize: 12 },
+    backgroundColor: 'rgba(255,255,255,0.97)',
+    borderColor: '#d8e2ee',
+    textStyle: { color: '#24344d', fontSize: 12 },
+    extraCssText: 'box-shadow:0 4px 16px rgba(16,34,58,.12);border-radius:8px;',
     formatter: (p) => {
       const pct = p.percent != null ? p.percent + '%' : '';
       return p.name + '<br/>面积：' + p.value + ' ha' + (pct ? '（' + pct + '）' : '');
@@ -46,14 +47,14 @@ export function renderPie(el, stats) {
   pie.setOption({
     backgroundColor: 'transparent',
     textStyle: { fontFamily: 'Segoe UI, Microsoft YaHei, sans-serif' },
-    title: { text: '三类面积占比', left: 'center', top: 2, textStyle: { color: '#cfe0f8', fontSize: 12 } },
+    title: { text: '三类面积占比', left: 'center', top: 2, textStyle: { color: '#5b6b82', fontSize: 12, fontWeight: 600 } },
     tooltip: tooltipBase(),
-    legend: { bottom: 0, textStyle: { color: '#90a6c8', fontSize: 11 }, itemWidth: 12, itemHeight: 10 },
+    legend: { bottom: 0, textStyle: { color: '#5b6b82', fontSize: 11 }, itemWidth: 12, itemHeight: 10 },
     series: [{
-      name: '变化类别', type: 'pie', radius: ['38%', '66%'], center: ['50%', '50%'],
+      name: '变化类别', type: 'pie', radius: ['38%', '66%'], center: ['50%', '48%'],
       avoidLabelOverlap: true,
-      label: { color: '#c9d8ef', fontSize: 11, formatter: '{b}\n{d}%' },
-      labelLine: { lineStyle: { color: '#40608a' } },
+      label: { color: '#3c4d66', fontSize: 11, formatter: '{b}\n{d}%' },
+      labelLine: { lineStyle: { color: '#b6c4d4' } },
       data,
     }],
   }, true);
@@ -67,24 +68,24 @@ export function renderBar(el, stats) {
   bar.setOption({
     backgroundColor: 'transparent',
     textStyle: { fontFamily: 'Segoe UI, Microsoft YaHei, sans-serif' },
-    title: { text: '三类面积统计（公顷）', left: 'center', top: 2, textStyle: { color: '#cfe0f8', fontSize: 12 } },
+    title: { text: '三类面积统计（公顷）', left: 'center', top: 2, textStyle: { color: '#5b6b82', fontSize: 12, fontWeight: 600 } },
     tooltip: { ...tooltipBase(), trigger: 'axis', axisPointer: { type: 'shadow' } },
     grid: { left: 46, right: 16, top: 38, bottom: 26 },
     xAxis: {
       type: 'category', data: data.map((d) => d.name),
-      axisLine: { lineStyle: { color: '#274067' } },
-      axisLabel: { color: '#90a6c8', fontSize: 11 },
+      axisLine: { lineStyle: { color: '#c3cfdd' } },
+      axisLabel: { color: '#5b6b82', fontSize: 11 },
     },
     yAxis: {
       type: 'value', name: 'ha',
-      nameTextStyle: { color: '#6d84a8' },
-      splitLine: { lineStyle: { color: '#20324f' } },
-      axisLabel: { color: '#90a6c8', fontSize: 11 },
+      nameTextStyle: { color: '#8494a9' },
+      splitLine: { lineStyle: { color: '#e6edf4' } },
+      axisLabel: { color: '#5b6b82', fontSize: 11 },
     },
     series: [{
       type: 'bar', barWidth: '46%',
       data: data.map((d) => ({ value: d.value, itemStyle: { color: d.itemStyle.color, borderRadius: [5, 5, 0, 0] } })),
-      label: { show: true, position: 'top', color: '#c9d8ef', fontSize: 11 },
+      label: { show: true, position: 'top', color: '#3c4d66', fontSize: 11 },
     }],
   }, true);
   bar.resize();

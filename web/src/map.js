@@ -5,12 +5,12 @@
 
 import maplibregl from 'maplibre-gl';
 
-// 硬约束：纯本地空白底图
+// 硬约束：纯本地空白底图（浅色专业 GIS 风格）
 export const BLANK_STYLE = {
   version: 8,
   sources: {},
   layers: [
-    { id: 'bg', type: 'background', paint: { 'background-color': '#0e1726' } },
+    { id: 'bg', type: 'background', paint: { 'background-color': '#e9eef4' } },
   ],
 };
 
@@ -50,37 +50,37 @@ function initLayers(map) {
   map.addSource('graticule', { type: 'geojson', data: graticuleGeoJSON() });
   map.addLayer({
     id: 'graticule-line', type: 'line', source: 'graticule',
-    paint: { 'line-color': '#1c3350', 'line-width': 0.6, 'line-opacity': 0.7 },
+    paint: { 'line-color': '#ccd7e3', 'line-width': 0.6, 'line-opacity': 0.9 },
   });
   map.addSource('graticule-frame', { type: 'geojson', data: frameGeoJSON() });
   map.addLayer({
     id: 'frame-line', type: 'line', source: 'graticule-frame',
-    paint: { 'line-color': '#2f527c', 'line-width': 1.2, 'line-opacity': 0.9 },
+    paint: { 'line-color': '#aebfce', 'line-width': 1.2, 'line-opacity': 0.9 },
   });
 
   // AOI 矩形（框选 / 手填联动）
   map.addSource('aoi', { type: 'geojson', data: emptyFC() });
   map.addLayer({
     id: 'aoi-fill', type: 'fill', source: 'aoi',
-    paint: { 'fill-color': '#3b9dff', 'fill-opacity': 0.14 },
+    paint: { 'fill-color': '#1f7ae0', 'fill-opacity': 0.12 },
   });
   map.addLayer({
     id: 'aoi-line', type: 'line', source: 'aoi',
-    paint: { 'line-color': '#63b6ff', 'line-width': 2, 'line-dasharray': [2, 1.4] },
+    paint: { 'line-color': '#1f7ae0', 'line-width': 2, 'line-dasharray': [2, 1.4] },
   });
 
   // 样本点（按类别着色，支持点选删除）
   map.addSource('samples', { type: 'geojson', data: emptyFC() });
   map.addLayer({
     id: 'sample-halo', type: 'circle', source: 'samples',
-    paint: { 'circle-radius': 9.5, 'circle-color': '#ffffff', 'circle-opacity': 0.12 },
+    paint: { 'circle-radius': 9.5, 'circle-color': '#1f7ae0', 'circle-opacity': 0.14 },
   });
   map.addLayer({
     id: 'sample-circles', type: 'circle', source: 'samples',
     paint: {
       'circle-radius': 5.5,
-      'circle-color': ['match', ['get', 'cls'], 1, '#21ba45', 2, '#e74c3c', 3, '#5b7a99', '#ffffff'],
-      'circle-stroke-color': '#0b1220',
+      'circle-color': ['match', ['get', 'cls'], 1, '#21a04c', 2, '#d94c3d', 3, '#5b7a99', '#ffffff'],
+      'circle-stroke-color': '#ffffff',
       'circle-stroke-width': 1.5,
       'circle-opacity': 0.95,
     },

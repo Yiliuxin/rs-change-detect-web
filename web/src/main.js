@@ -1,7 +1,9 @@
 // -*- coding: utf-8 -*-
-// 表现层主控：UI-01 ~ UI-05 状态机、5 步流程、MapLibre/ECharts 编排。
+// 表现层主控：GIS 工作台式三栏布局 · 自由流程（无步骤条）。
+// 左栏=分析配置（AOI / 影像对 / 检测运行），中央=地图（始终可交互），右栏=分析结果（检测 / 精度 / 导出）。
+// 所有功能区常驻可见；仅当技术前提不满足时按钮置灰，并以 title / 提示文案说明缺什么。
 // 仅调用 api.js 的 5 个接口；不做任何影像处理/算法/SQL；不直连 MinIO/PostGIS。
-// 每个界面/控件标注 REQ-ID，对齐 HLD 4.x 与追溯表。
+// 每个卡片/控件标注 REQ-ID，对齐 HLD 4.x 与追溯表；UI-01~05 功能语义不变（仅布局重组）。
 
 import 'maplibre-gl/dist/maplibre-gl.css';
 import './style.css';
@@ -16,279 +18,31 @@ const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
 }[c]));
 
-const STEPS = [
-  { n: 1, t: 'AOI 框选', s: 'REQ-01' },
-  { n: 2, t: '影像对确认', s: 'REQ-02 / REQ-04' },
-  { n: 3, t: '变化专题图', s: 'REQ-10 / REQ-08' },
-  { n: 4, t: '样本与精度', s: 'REQ-09' },
-  { n: 5, t: '统计与报告', s: 'REQ-11 / REQ-12 / REQ-15' },
-];
+const ALLOW_FORMATS = ['geotiff', 'png', 'pdf']; // constants.py EXPORT_FORMATS
 
 const HINTS = {
-  1: '按住鼠标拖拽画矩形；或在左侧手填四至（WGS84）。仅允许 1 个 AOI。',
-  2: '从预置清单选择一组双时相影像对，确认锁定的辐射口径。',
-  3: '专题图以 image source 叠加到 AOI 四角，拖动滑杆可调不透明度。',
-  4: '点击地图空白处按当前类别打点；点击已有样本点即删除该点。',
-  5: '查看三类面积统计与只读参数快照，点击按钮触发报告下载。',
+  browse: '地图浏览模式：自由缩放平移，查看 AOI 预览与专题图叠加。',
+  aoi: 'AOI 框选模式：按住鼠标拖拽画矩形（仅允许 1 个 AOI），或在左栏手填四至（WGS84）。',
+  sample: '样本打点模式：点击地图空白处按当前类别打点；点击已有样本点即删除该点。',
 };
-const MODES = {
-  1: '模式：AOI 框选', 2: '模式：影像对确认', 3: '模式：专题图叠加',
-  4: '模式：样本勾选', 5: '模式：报告导出',
-};
-const ALLOW_FORMATS = ['geotiff', 'png', 'pdf']; // constants.py EXPORT_FORMATS
 
 // ===== 全局状态 =====
 const S = {
-  step: 1, maxStep: 1,
-  demo: false,
+  mapMode: 'aoi', // browse | aoi | sample
   aoi: null, aoiHistory: [],
   t1: '', t2: '',
-  aoiResult: null,
-  pairs: [], pairVia: '', selectedPair: null, sceneMatch: null,
-  change: null, changePngUrl: null, changeLoaded: false,
+  aoiResult: null, aoiBusy: false,
+  pairs: [], pairVia: '', pairFilter: '', selectedPair: null,
+  sceneMatch: null, sceneKey: '', sceneBusy: false,
+  change: null, changePngUrl: null, changeBusy: false,
   opacity: 0.85,
-  samples: [], sampleSeq: 0, curClass: 1, accuracy: null,
-  exportResult: null,
+  samples: [], sampleSeq: 0, curClass: 1, accuracy: null, accBusy: false,
+  exportResult: null, exportBusy: false,
 };
 
 let map = null;
 
-// ===== DOM 骨架 =====
-function buildPanel() {
-  const dateOpts = '<option value="">— 选择时相 —</option>' +
-    demo.PRESET_DATES.map((d) => `<option value="${d}">${d}</option>`).join('');
-
-  $('panel').innerHTML = `
-  <!-- ============ UI-01 ============ -->
-  <section class="view active" data-step="1">
-    <div class="view-head">
-      <h2>① AOI 框选与时相<span class="req">REQ-01</span></h2>
-      <p>离线空白底图上拖拽矩形，或手填四至；跨度与面积实时计算。</p>
-    </div>
-
-    <div class="card">
-      <div class="card-title">手填 AOI 四至（WGS84）<span class="req">REQ-01</span></div>
-      <div class="grid4">
-        <div><label class="fld">西 West (lon)</label><input type="number" step="0.0001" id="aoi-w" /></div>
-        <div><label class="fld">南 South (lat)</label><input type="number" step="0.0001" id="aoi-s" /></div>
-        <div><label class="fld">东 East (lon)</label><input type="number" step="0.0001" id="aoi-e" /></div>
-        <div><label class="fld">北 North (lat)</label><input type="number" step="0.0001" id="aoi-n" /></div>
-      </div>
-      <div class="btn-row" style="margin-top:10px">
-        <button type="button" class="btn btn-sm" id="btn-seed-poyang">鄱阳湖</button>
-        <button type="button" class="btn btn-sm" id="btn-seed-farmland">赣中农田</button>
-        <button type="button" class="btn btn-sm" id="btn-seed-nanchang">南昌</button>
-      </div>
-      <div class="btn-row" style="margin-top:8px">
-        <button type="button" class="btn btn-sm btn-ghost" id="btn-aoi-clear">清空 AOI</button>
-        <button type="button" class="btn btn-sm btn-ghost" id="btn-aoi-undo">撤销</button>
-      </div>
-      <div class="ok-line" style="color:var(--muted2);font-size:10.5px;font-weight:400">一键填入为本地影像对 seed 的 AOI<span class="demo-tag">演示数据</span></div>
-    </div>
-
-    <div class="card">
-      <div class="card-title">实时跨度与面积<span class="req">REQ-01</span></div>
-      <div class="metric-row">
-        <div class="metric"><div class="k">经度跨度 (°)</div><div class="v" id="span-lon">—</div></div>
-        <div class="metric"><div class="k">纬度跨度 (°)</div><div class="v" id="span-lat">—</div></div>
-        <div class="metric"><div class="k">面积 (deg²)</div><div class="v" id="area-deg">—</div></div>
-        <div class="metric"><div class="k">面积 (约 km²)</div><div class="v" id="area-km">—</div></div>
-      </div>
-      <div class="err-line" id="aoi-err"></div>
-    </div>
-
-    <div class="card">
-      <div class="card-title">时相选择（预置清单）<span class="req">REQ-01 / REQ-02</span></div>
-      <div class="grid2">
-        <div><label class="fld">时相 t1（较早）</label><select id="t1">${dateOpts}</select></div>
-        <div><label class="fld">时相 t2（较晚）</label><select id="t2">${dateOpts}</select></div>
-      </div>
-      <div class="err-line" id="phase-err"></div>
-    </div>
-
-    <button type="button" class="btn btn-primary btn-block" id="btn-aoi-submit" disabled>提交 AOI · POST /aoi/select</button>
-  </section>
-
-  <!-- ============ UI-02 ============ -->
-  <section class="view" data-step="2">
-    <div class="view-head">
-      <h2>② 双时相影像对与口径<span class="req">REQ-02 / REQ-04</span></h2>
-      <p>列出双时相影像对（日期 / 云量 / 影像块 / 基线），口径锁定只读。</p>
-    </div>
-
-    <div class="card">
-      <div class="card-title">影像对列表<span class="req">REQ-02</span><span class="hint" id="pair-via">来源：—</span></div>
-      <div id="pair-list"><div class="ok-line">正在获取影像对…</div></div>
-      <div class="ok-line" style="color:var(--muted2);font-size:10.5px;font-weight:400">云量 &gt; 50% 将标黄提示<span class="demo-tag">演示数据</span></div>
-    </div>
-
-    <div class="card">
-      <div class="card-title">锁定口径面板<span class="req">REQ-04</span><span class="readonly-badge">NF5 · 只读</span></div>
-      <div class="kv" id="caliber-panel"><span class="hint">请先选择一组影像对</span></div>
-    </div>
-
-    <button type="button" class="btn btn-primary btn-block" id="btn-scene-confirm" disabled>确认影像对与口径 · POST /scene/match</button>
-  </section>
-
-  <!-- ============ UI-03 ============ -->
-  <section class="view" data-step="3">
-    <div class="view-head">
-      <h2>③ 变化专题图叠加<span class="req">REQ-10 / REQ-08 / REQ-05</span></h2>
-      <p>专题图 PNG 以 image source 叠加，三类色带 + 不透明度控制。</p>
-    </div>
-
-    <div class="card">
-      <div class="card-title">有效像元占比 valid_ratio<span class="req">REQ-05</span></div>
-      <div class="ratio-box">
-        <div class="ratio-k">VALID RATIO</div>
-        <div class="ratio-v" id="valid-ratio">—</div>
-      </div>
-      <div class="ratio-note" id="valid-note">等待检测结果…</div>
-    </div>
-
-    <div class="card">
-      <div class="card-title">三类色带图例<span class="req">REQ-10</span></div>
-      <div class="legend-inline">
-        <div class="li"><span class="sw" style="background:#21ba45"></span>1 增强</div>
-        <div class="li"><span class="sw" style="background:#e74c3c"></span>2 退化</div>
-        <div class="li"><span class="sw" style="background:#5b7a99"></span>3 稳定</div>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="card-title">叠加不透明度<span class="req">REQ-10</span></div>
-      <div class="slider-row">
-        <input type="range" id="opacity" min="0" max="100" value="85" />
-        <span class="slider-val" id="opacity-val">85%</span>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="card-title">三类面积占比<span class="req">REQ-08 / REQ-11</span></div>
-      <div class="chart" id="chart-pie"></div>
-    </div>
-
-    <button type="button" class="btn btn-primary btn-block" id="btn-to-u4">下一步：样本与精度评价 →</button>
-    <div style="text-align:center;margin-top:8px"><span class="demo-tag">演示数据</span></div>
-  </section>
-
-  <!-- ============ UI-04 ============ -->
-  <section class="view" data-step="4">
-    <div class="view-head">
-      <h2>④ 样本勾选与精度评价<span class="req">REQ-09</span></h2>
-      <p>在专题图上按类别勾选样本点（WGS84），每类至少 30 个方可计算精度。</p>
-    </div>
-
-    <div class="card">
-      <div class="card-title">当前打点类别<span class="req">REQ-09</span></div>
-      <div class="class-btns" id="class-btns">
-        <div class="class-btn active" data-cls="1"><span class="dot" style="background:#21ba45"></span>1 增强</div>
-        <div class="class-btn" data-cls="2"><span class="dot" style="background:#e74c3c"></span>2 退化</div>
-        <div class="class-btn" data-cls="3"><span class="dot" style="background:#5b7a99"></span>3 稳定</div>
-      </div>
-      <div class="ok-line" style="color:var(--muted2);font-size:10.5px;font-weight:400">点击地图空白处打点；点击已有样本点即删除该点。</div>
-    </div>
-
-    <div class="card">
-      <div class="card-title">每类实时计数（≥ 30）<span class="req">REQ-09</span></div>
-      <div class="cnt-row"><span class="cnt-name">1 增强</span><div class="cnt-bar"><i id="bar-1" style="background:#21ba45;width:0%"></i></div><span class="cnt-num" id="cnt-1">0</span></div>
-      <div class="cnt-row"><span class="cnt-name">2 退化</span><div class="cnt-bar"><i id="bar-2" style="background:#e74c3c;width:0%"></i></div><span class="cnt-num" id="cnt-2">0</span></div>
-      <div class="cnt-row"><span class="cnt-name">3 稳定</span><div class="cnt-bar"><i id="bar-3" style="background:#5b7a99;width:0%"></i></div><span class="cnt-num" id="cnt-3">0</span></div>
-      <div class="warn-line" id="ex10-hint"></div>
-    </div>
-
-    <div class="card" id="fill-wrap" hidden>
-      <div class="card-title">演示辅助<span class="demo-tag">演示数据</span></div>
-      <button type="button" class="btn btn-sm btn-block" id="btn-fill-samples">一键补齐每类 32 个样本点</button>
-    </div>
-
-    <div class="btn-row">
-      <button type="button" class="btn btn-sm btn-ghost" id="btn-sample-undo">撤销上一点</button>
-      <button type="button" class="btn btn-sm btn-ghost" id="btn-samples-clear">清空样本</button>
-    </div>
-
-    <button type="button" class="btn btn-primary btn-block" id="btn-accuracy" disabled style="margin-top:10px">计算精度 · POST /accuracy/sample</button>
-
-    <div class="card" id="accuracy-result" hidden style="margin-top:14px">
-      <div class="card-title">精度评价结果<span class="req">REQ-09</span><span class="demo-tag">演示数据</span></div>
-      <div class="metric-row">
-        <div class="metric"><div class="k">总体精度 OA</div><div class="v" id="oa">—</div></div>
-        <div class="metric"><div class="k">Kappa 系数</div><div class="v" id="kappa">—</div></div>
-      </div>
-      <div class="ok-line" id="acc-note"></div>
-      <div style="margin-top:10px"><table class="tbl" id="cm-table"></table></div>
-    </div>
-
-    <button type="button" class="btn btn-primary btn-block" id="btn-to-u5" disabled style="margin-top:6px">下一步：统计与报告 →</button>
-  </section>
-
-  <!-- ============ UI-05 ============ -->
-  <section class="view" data-step="5">
-    <div class="view-head">
-      <h2>⑤ 统计与报告下载<span class="req">REQ-11 / REQ-12 / REQ-15</span></h2>
-      <p>三类面积柱状图、只读参数快照，触发 GeoTIFF / PNG / PDF 下载。</p>
-    </div>
-
-    <div class="card">
-      <div class="card-title">三类面积统计<span class="req">REQ-11</span></div>
-      <div class="chart" id="chart-bar"></div>
-    </div>
-
-    <div class="card">
-      <div class="card-title">参数快照（只读）<span class="req">REQ-14</span><span class="readonly-badge">NF9 · 只读</span></div>
-      <table class="tbl snapshot" id="snapshot-table"></table>
-    </div>
-
-    <div class="card">
-      <div class="card-title">报告导出 / 下载<span class="req">REQ-12 / REQ-15</span></div>
-      <div class="btn-row">
-        <button type="button" class="btn btn-sm" id="btn-exp-pdf">下载 PDF</button>
-        <button type="button" class="btn btn-sm" id="btn-exp-png">下载 PNG</button>
-        <button type="button" class="btn btn-sm" id="btn-exp-tif">下载 GeoTIFF</button>
-      </div>
-      <div id="export-files"></div>
-      <div style="margin-top:10px;border-top:1px dashed var(--line-soft);padding-top:10px">
-        <label class="fld">格式校验诊断：输入越权格式触发 EX6<span class="req">REQ-12</span></label>
-        <div class="btn-row">
-          <input type="text" id="custom-format" placeholder="例如 shp（越权格式）" />
-          <button type="button" class="btn btn-sm" id="btn-exp-custom">提交</button>
-        </div>
-      </div>
-    </div>
-
-    <div style="text-align:center"><span class="demo-tag">演示数据</span></div>
-  </section>`;
-}
-
-function buildLegend() {
-  $('map-legend').innerHTML = `
-    <h4>变化专题图色带 · 编码</h4>
-    <div class="legend-row"><span class="legend-code">1</span><span class="legend-swatch" style="background:#21ba45"></span>增强</div>
-    <div class="legend-row"><span class="legend-code">2</span><span class="legend-swatch" style="background:#e74c3c"></span>退化</div>
-    <div class="legend-row"><span class="legend-code">3</span><span class="legend-swatch" style="background:#5b7a99"></span>稳定</div>`;
-}
-
-function renderSteps() {
-  let html = '';
-  STEPS.forEach((st, i) => {
-    const cls = ['step', S.step === st.n ? 'active' : '', S.maxStep > st.n ? 'done' : '', S.maxStep < st.n ? 'locked' : ''].filter(Boolean).join(' ');
-    html += `<div class="${cls}" data-step="${st.n}"><div class="step-num">${S.maxStep > st.n ? '✓' : st.n}</div><div class="step-label"><b>${st.t}</b><small>${st.s}</small></div></div>`;
-    if (i < STEPS.length - 1) html += '<div class="step-sep"></div>';
-  });
-  $('steps').innerHTML = html;
-  $('steps').querySelectorAll('.step').forEach((d) => {
-    d.onclick = () => { const n = +d.dataset.step; if (n <= S.maxStep) gotoStep(n); };
-  });
-}
-
 // ===== 通用工具 =====
-function markDemo() {
-  const first = !document.body.classList.contains('is-demo');
-  document.body.classList.add('is-demo');
-  const fw = $('fill-wrap'); if (fw) fw.hidden = false;
-  if (first) showToast('后端接口不可用或返回空占位，已启用本地演示数据（页面已标注）', 'warn', 5200);
-}
-
 function handleErr(e) {
   if (e instanceof ApiError) {
     showError({ code: e.code, message: e.message, run_id: e.run_id });
@@ -296,6 +50,45 @@ function handleErr(e) {
     showToast('前端异常：' + (e && e.message ? e.message : String(e)), 'error');
     // eslint-disable-next-line no-console
     console.error(e);
+  }
+}
+
+// 按钮技术前提门控：置灰 + title 说明缺什么（绝不隐藏、绝不强制跳转）
+function gate(id, ok, reason) {
+  const btn = $(id);
+  if (!btn) return;
+  btn.disabled = !ok;
+  btn.title = ok ? '' : reason;
+}
+
+function currentRunId() {
+  return (S.change && S.change.run_id)
+    || (S.sceneMatch && S.sceneMatch.run_id)
+    || (S.aoiResult && S.aoiResult.run_id) || '';
+}
+
+// 数据源状态徽标：真实后端 / 演示数据（沿用 is-demo 机制）
+function setDataBadge(isDemo, viaLabel) {
+  const b = $('conn-badge');
+  document.body.classList.toggle('is-demo', !!isDemo);
+  if (!b) return;
+  if (isDemo) {
+    b.textContent = '● 演示数据';
+    b.className = 'badge badge-source badge-source-demo';
+  } else {
+    b.textContent = '● 真实后端' + (viaLabel ? ' · ' + viaLabel : '');
+    b.className = 'badge badge-source badge-source-live';
+  }
+}
+
+let demoMarked = false;
+function markDemo() {
+  const first = !document.body.classList.contains('is-demo');
+  setDataBadge(true);
+  const fw = $('fill-wrap'); if (fw) fw.hidden = false;
+  if (first && !demoMarked) {
+    demoMarked = true;
+    showToast('后端接口不可用或返回空占位，已启用本地演示数据（页面已标注）', 'warn', 5200);
   }
 }
 
@@ -321,7 +114,9 @@ function pushAoiHistory() {
   if (S.aoiHistory.length > 20) S.aoiHistory.shift();
 }
 
-// ===== UI-01 =====
+function boundsFromArray(a) { return { w: a[0], s: a[1], e: a[2], n: a[3] }; }
+
+// ===== UI-01：AOI 设置（REQ-01） =====
 function fillAoiInputs(b) {
   ['aoi-w', 'aoi-s', 'aoi-e', 'aoi-n'].forEach((id) => { $(id).value = ''; });
   if (!b) return;
@@ -333,7 +128,7 @@ function fillAoiInputs(b) {
 
 function syncFromInputs() {
   const raw = ['aoi-w', 'aoi-s', 'aoi-e', 'aoi-n'].map((id) => $(id).value.trim());
-  if (raw.some((r) => r === '')) return;
+  if (raw.some((r) => r === '')) { S.aoi = null; M.setAoi(map, null); updateAoiMetrics(); return; }
   const [w, s, e, n] = raw.map(Number);
   if ([w, s, e, n].some((v) => !Number.isFinite(v))) return;
   S.aoi = { w, s, e, n };
@@ -350,15 +145,24 @@ function applyAoi(b) {
 
 function aoiStatus() {
   const b = S.aoi;
-  if (!b) return { ok: false, spanOver: false, reason: '' };
+  if (!b) return { ok: false, spanOver: false, reason: '', legal: false, lon: 0, lat: 0 };
   const lon = b.e - b.w, lat = b.n - b.s;
   const legal = lon > 0 && lat > 0;
   const spanOver = lon > 0.25 + 1e-9 || lat > 0.25 + 1e-9;
-  return { ok: legal && !spanOver, spanOver, legal, lon, lat };
+  let reason = '';
+  if (!legal) reason = '四至不合法：需满足 东 > 西 且 北 > 南';
+  else if (spanOver) reason = '[EX1] ' + ERROR_MESSAGES.EX1;
+  return { ok: legal && !spanOver, spanOver, legal, lon, lat, reason };
 }
 
 function phaseValid() {
   return !!(S.t1 && S.t2 && S.t2 > S.t1);
+}
+
+function phaseErrText() {
+  if (S.t1 && S.t2 && S.t2 <= S.t1) return '时相 t2 必须晚于 t1';
+  if (!S.t1 || !S.t2) return '请选满 t1 与 t2 两个时相（预置清单）';
+  return '';
 }
 
 function updateAoiMetrics() {
@@ -367,76 +171,83 @@ function updateAoiMetrics() {
   const lon = b ? b.e - b.w : 0, lat = b ? b.n - b.s : 0;
   const deg2 = b ? lon * lat : 0;
   const km2 = deg2 * 111.32 * 111.32; // constants.py DEG_TO_KM
-  $('span-lon').textContent = b ? lon.toFixed(4) + ' °' : '—';
-  $('span-lat').textContent = b ? lat.toFixed(4) + ' °' : '—';
-  $('area-deg').innerHTML = b ? deg2.toFixed(6) + ' <small>deg²</small>' : '—';
-  $('area-km').innerHTML = b ? km2.toFixed(2) + ' <small>km²</small>' : '—';
+  $('span-lon').textContent = b ? lon.toFixed(4) + ' / ' + lat.toFixed(4) : '—';
+  $('area-deg').innerHTML = b ? deg2.toFixed(6) + ' <small>deg²</small> · ' + km2.toFixed(2) + ' <small>km²</small>' : '—';
 
-  let msg = '';
-  if (b && !st.legal) msg = '四至不合法：需满足 东 > 西 且 北 > 南';
-  else if (st.spanOver) msg = '[EX1] ' + ERROR_MESSAGES.EX1;
-  $('aoi-err').textContent = msg;
+  $('aoi-err').textContent = st.ok ? '' : st.reason;
   ['aoi-w', 'aoi-s', 'aoi-e', 'aoi-n'].forEach((id) => $(id).classList.toggle('invalid', !!(b && (st.spanOver || !st.legal))));
-  updateSubmitState();
-}
-
-function updateSubmitState() {
-  const st = aoiStatus();
-  const ph = phaseValid();
-  let pmsg = '';
-  if (S.t1 && S.t2 && S.t2 <= S.t1) pmsg = '时相 t2 必须晚于 t1';
-  else if (!S.t1 || !S.t2) pmsg = '请选满 t1 与 t2 两个时相';
-  $('phase-err').textContent = pmsg;
-  $('btn-aoi-submit').disabled = !(st.ok && ph);
+  $('phase-err').textContent = phaseErrText();
+  refreshGates();
 }
 
 async function submitAoi() {
   const st = aoiStatus();
-  if (!st.ok || !phaseValid()) return;
+  if (!st.ok || !phaseValid()) { updateAoiMetrics(); return; }
   const body = { aoi_geom: aoiGeomString(S.aoi), t1: S.t1, t2: S.t2 };
-  const btn = $('btn-aoi-submit');
+  const btn = $('btn-aoi-apply');
+  S.aoiBusy = true;
   btn.disabled = true; btn.textContent = '提交中…';
   try {
     const res = await api.selectAoi(body);
     if (res.demo) markDemo();
+    else setDataBadge(false, 'POST /aoi/select');
     S.aoiResult = res.data;
+    const applied = $('aoi-applied');
+    applied.hidden = false;
+    applied.textContent = '✓ AOI 已应用 · aoi_id ' + (res.data.aoi_id || '—')
+      + (res.data.run_id ? ' · run_id ' + res.data.run_id : '');
     showToast(res.demo ? 'AOI 已提交（演示数据）' : 'AOI 已提交', 'ok');
-    gotoStep(2);
-    loadPairs();
+    scheduleAutoConfirm();
   } catch (e) {
     handleErr(e);
   } finally {
-    btn.textContent = '提交 AOI · POST /aoi/select';
-    updateSubmitState();
+    S.aoiBusy = false;
+    btn.textContent = '应用 AOI · POST /aoi/select';
+    refreshGates();
   }
 }
 
-// ===== UI-02 =====
+// ===== UI-02：影像对（REQ-02 / REQ-04） =====
 async function loadPairs() {
   const box = $('pair-list');
-  box.innerHTML = '<div class="ok-line">正在获取影像对…</div>';
+  box.innerHTML = '<div class="status-line"><span class="spinner"></span>正在获取影像对…</div>';
   try {
     const res = await api.listScenePairs(S.aoiResult && S.aoiResult.aoi_id);
     if (res.demo) markDemo();
+    else setDataBadge(false, (res.via === 'GET' ? 'GET' : 'POST') + ' /scene/match');
     S.pairs = (res.data && res.data.pairs) || [];
     S.pairVia = res.via || '';
     const viaLabel = { GET: 'GET /scene/match', POST: 'POST /scene/match', SEED: '本地演示 seed' }[S.pairVia] || S.pairVia;
-    $('pair-via').textContent = '来源：' + viaLabel;
+    $('pair-count').textContent = '共 ' + S.pairs.length + ' 组 · ' + viaLabel;
     renderPairs();
     autoSelectPair();
   } catch (e) {
     handleErr(e);
-    box.innerHTML = '<div class="err-line">影像对获取失败</div>';
+    box.innerHTML = '<div class="err-line">影像对获取失败，可稍后重试</div>';
   }
+}
+
+function pairMatchesFilter(p) {
+  const q = S.pairFilter.trim().toLowerCase();
+  if (!q) return true;
+  const t1 = (p.scenes && p.scenes.t1) || {};
+  const t2 = (p.scenes && p.scenes.t2) || {};
+  return [p.label, p.tile, t1.date, t2.date, t1.cloud_cover, t2.cloud_cover, t1.scene_id, t2.scene_id]
+    .some((v) => v != null && String(v).toLowerCase().includes(q));
 }
 
 function renderPairs() {
   const box = $('pair-list');
+  const visible = S.pairs.map((p, i) => ({ p, i })).filter(({ p }) => pairMatchesFilter(p));
   if (!S.pairs.length) {
-    box.innerHTML = '<div class="warn-line">未获取到影像对，请检查后端服务。</div>';
+    box.innerHTML = '<div class="empty-state compact"><p>未获取到影像对</p><p class="empty-sub">请检查后端服务是否可用。</p></div>';
     return;
   }
-  box.innerHTML = S.pairs.map((p, i) => {
+  if (!visible.length) {
+    box.innerHTML = '<div class="empty-state compact"><p>无匹配过滤条件的影像对</p><p class="empty-sub">尝试清空过滤框。</p></div>';
+    return;
+  }
+  box.innerHTML = visible.map(({ p, i }) => {
     const t1 = (p.scenes && p.scenes.t1) || {};
     const t2 = (p.scenes && p.scenes.t2) || {};
     const hi1 = Number(t1.cloud_cover) > 50, hi2 = Number(t2.cloud_cover) > 50;
@@ -445,10 +256,9 @@ function renderPairs() {
       <div class="pair-scene">
         <span class="tag ${tag === 't1' ? 'tag-t1' : 'tag-t2'}">${tag.toUpperCase()}</span>
         <span class="dt">${esc(sc.date || '—')}</span>
-        <span class="pair-phase">${esc(sc.phase || '')}</span>
         <span class="cloud ${hi ? 'high' : ''}">云量 ${fmtCloud(sc.cloud_cover)}${hi ? ' ⚠' : ''}</span>
       </div>
-      <div class="pair-phase" style="padding-left:2px">基线 ${esc(sc.proc_baseline || '—')} · 传感器 ${esc(sc.sensor || '—')}</div>`;
+      <div class="pair-meta">基线 ${esc(sc.proc_baseline || '—')} · 传感器 ${esc(sc.sensor || '—')}</div>`;
     return `
       <div class="pair-card${sel}" data-idx="${i}">
         <div class="pair-head"><span class="radio"></span><span class="pair-name">${esc(p.label || p.name || '影像对 ' + (i + 1))}</span><span class="pair-tile">${esc(p.tile || '—')}</span></div>
@@ -476,50 +286,65 @@ function selectPair(i) {
   S.selectedPair = S.pairs[i] || null;
   renderPairs();
   renderCaliber();
-  $('btn-scene-confirm').disabled = !S.selectedPair;
+  refreshGates();
+  scheduleAutoConfirm();
 }
 
 function renderCaliber() {
   const p = S.selectedPair;
   const panel = $('caliber-panel');
-  if (!p) { panel.innerHTML = '<span class="hint">请先选择一组影像对</span>'; return; }
-  const baseline = (p.scenes && p.scenes.t2 && p.scenes.t2.proc_baseline) || '05.09';
+  if (!p) { panel.innerHTML = '<span class="hint">选择一组影像对后自动确认口径</span>'; return; }
+  const m = S.sceneMatch || {};
+  const baseline = m.proc_baseline || (p.scenes && p.scenes.t2 && p.scenes.t2.proc_baseline) || '05.09';
   panel.innerHTML = `
-    <div class="k">公式标识</div><div class="v"><code>S2_L2A_BOA</code></div>
+    <div class="k">公式标识</div><div class="v"><code>${esc(m.formula_id || 'S2_L2A_BOA')}</code></div>
     <div class="k">辐射定标公式</div><div class="v"><code>rho=DN/10000</code></div>
     <div class="k">口径说明</div><div class="v">AWS COG DN 已应用 BOA_ADD_OFFSET（偏移已在 DN 中修正）</div>
     <div class="k">传感器</div><div class="v">S2 · Sentinel-2 L2A</div>
     <div class="k">处理基线版次</div><div class="v">${esc(baseline)}（S2 需 ≥ 04.00，达标）</div>
-    <div class="k">分块尺寸</div><div class="v">256 px</div>
-    <div class="k">口径状态</div><div class="v" style="color:#8ce0a0">已锁定 · 不可编辑（NF5）</div>`;
+    <div class="k">分块尺寸</div><div class="v">${esc(String(($('block-size') && $('block-size').value) || 256))} px</div>
+    <div class="k">口径状态</div><div class="v caliber-ok">${S.sceneMatch ? '已锁定 · 不可编辑（NF5）' : '待确认（选择后自动提交）'}</div>`;
 }
 
-async function confirmScene() {
+// 口径确认（REQ-04）：AOI 与影像对齐备后自动提交 POST /scene/match
+let confirmTimer = null;
+function scheduleAutoConfirm() {
+  window.clearTimeout(confirmTimer);
+  confirmTimer = window.setTimeout(autoConfirmScene, 260);
+}
+
+async function autoConfirmScene() {
+  if (!S.aoiResult || !S.selectedPair || S.sceneBusy) return;
   const p = S.selectedPair;
-  if (!p) { showToast('请先选择一组影像对', 'warn'); return; }
+  const key = [S.aoiResult.aoi_id, p.scenes.t1.scene_id, p.scenes.t2.scene_id, $('block-size').value].join('|');
+  if (S.sceneKey === key && S.sceneMatch) { renderCaliber(); return; }
+  S.sceneBusy = true;
+  renderCaliber();
   const body = {
-    aoi_id: (S.aoiResult && S.aoiResult.aoi_id) || '',
+    aoi_id: S.aoiResult.aoi_id,
     scene_t1_id: (p.scenes && p.scenes.t1 && p.scenes.t1.scene_id) || '',
     scene_t2_id: (p.scenes && p.scenes.t2 && p.scenes.t2.scene_id) || '',
-    block_size: 256,
+    block_size: Number($('block-size').value) || 256,
   };
-  const btn = $('btn-scene-confirm');
-  btn.disabled = true; btn.textContent = '确认中…';
   try {
     const res = await api.matchScene(body);
     if (res.demo) markDemo();
+    else setDataBadge(false, 'POST /scene/match');
     S.sceneMatch = res.data;
-    showToast(res.demo ? '口径已确认（演示数据）' : '口径已确认', 'ok');
-    gotoStep(3);
+    S.sceneKey = key;
+    showToast(res.demo ? '影像对口径已确认（演示数据）' : '影像对口径已确认', 'ok');
   } catch (e) {
     handleErr(e);
+    S.sceneKey = '';
+    S.sceneMatch = null;
   } finally {
-    btn.textContent = '确认影像对与口径 · POST /scene/match';
-    btn.disabled = !S.selectedPair;
+    S.sceneBusy = false;
+    renderCaliber();
+    refreshGates();
   }
 }
 
-// ===== UI-03 =====
+// ===== UI-03：检测运行（REQ-05~08 / REQ-10） =====
 // 后端产物 URL 为同源相对路径 /api/v1/artifacts/...；若旧版/异常后端仍返回
 // file:///、Windows 绝对路径、minio:// 等浏览器不可加载地址，直接跳过 image source
 // 叠加，避免 "Not allowed to load local resource" 与 MapLibre Failed to fetch。
@@ -530,28 +355,73 @@ function isUnsafeImageUrl(u) {
     || /^\\\\/.test(u);                // UNC \\server\share
 }
 
-async function loadChange() {
-  if (S.changeLoaded) return;
-  S.changeLoaded = true;
-  const body = { run_id: (S.sceneMatch && S.sceneMatch.run_id) || (S.aoiResult && S.aoiResult.run_id) || '', index: 'NDVI', block_size: 256 };
+async function runChangeDetection() {
+  if (S.changeBusy) return;
+  if (!(S.aoiResult && S.selectedPair)) { refreshGates(); return; }
+  const btn = $('btn-run-change');
+  S.changeBusy = true;
+  btn.disabled = true;
+  btn.textContent = '运行中…';
+  $('run-progress').hidden = false;
+  $('run-status').textContent = '正在运行变化检测（读取 COG → 掩膜 → ΔNDVI → OTSU → 渲染专题图）…';
+  $('run-done').hidden = true;
+  const body = { run_id: currentRunId(), index: 'NDVI', block_size: Number($('block-size').value) || 256 };
   try {
     const res = await api.runChange(body);
     if (res.demo) markDemo();
+    else setDataBadge(false, 'POST /result/change');
     S.change = res.data;
-    let url = S.change.change_png;
+    let url = res.data.change_png;
     if (!url || /^demo:/.test(url)) url = demo.makeChangePngDataUrl();
     S.changePngUrl = url;
     if (!isUnsafeImageUrl(url)) {
       M.setImage(map, url, S.aoi);
       M.setImageOpacity(map, S.opacity);
     }
-    renderValidRatio();
-    C.renderPie($('chart-pie'), S.change.stats);
+    $('map-legend').hidden = false;
+    renderChangeResult();
+    renderSnapshot();
+    refreshExportState();
+    $('run-done').hidden = false;
+    $('run-done').textContent = '✓ 检测完成 · run_id ' + res.data.run_id;
     showToast(res.demo ? '变化检测完成（演示数据）' : '变化检测完成', 'ok');
   } catch (e) {
     handleErr(e);
-    S.changeLoaded = false;
+    $('run-status').textContent = '检测失败，可调整参数后重试';
+  } finally {
+    S.changeBusy = false;
+    $('run-progress').hidden = true;
+    btn.textContent = '运行变化检测 · POST /result/change';
+    refreshGates();
   }
+}
+
+// ===== 右栏 D：检测结果（REQ-05/08/10/11） =====
+function renderChangeResult() {
+  const d = S.change;
+  $('result-empty').hidden = !!d;
+  $('result-body').hidden = !d;
+  if (!d) return;
+  renderValidRatio();
+  $('threshold-val').textContent = d.threshold != null ? Number(d.threshold).toFixed(3) : '—';
+  $('runid-val').textContent = d.run_id || '—';
+  const stats = d.stats || [];
+  const totalPx = stats.reduce((a, s) => a + Number(s.pixel_count || 0), 0);
+  const names = { 1: '增强', 2: '退化', 3: '稳定' };
+  const colors = { 1: '#21a04c', 2: '#d94c3d', 3: '#5b7a99' };
+  let html = '<thead><tr><th>类别</th><th>像元数</th><th>面积 (ha)</th><th>占比</th></tr></thead><tbody>';
+  for (const s of stats) {
+    const c = Number(s.change_class);
+    const pct = totalPx ? (Number(s.pixel_count || 0) / totalPx * 100).toFixed(1) + '%' : '—';
+    html += `<tr><td><span class="sw-sm" style="background:${colors[c] || '#999'}"></span>${c} ${esc(names[c] || '—')}</td>`
+      + `<td>${esc(s.pixel_count != null ? Number(s.pixel_count).toLocaleString() : '—')}</td>`
+      + `<td>${esc(s.area_ha != null ? Number(s.area_ha).toFixed(1) : '—')}</td>`
+      + `<td>${pct}</td></tr>`;
+  }
+  html += '</tbody>';
+  $('stats-table').innerHTML = html;
+  C.renderPie($('chart-pie'), stats);
+  C.renderBar($('chart-bar'), stats);
 }
 
 function renderValidRatio() {
@@ -560,23 +430,32 @@ function renderValidRatio() {
   v.textContent = (r * 100).toFixed(1) + ' %';
   v.className = 'ratio-v';
   note.className = 'ratio-note';
+  let ex5 = false;
   if (r >= 0.50) {
     v.classList.add('pass'); note.classList.add('pass');
     note.textContent = '✓ 有效像元占比合格（≥ 0.50），结论有效';
-    $('btn-to-u4').disabled = false;
   } else if (r >= 0.10) {
     v.classList.add('warn'); note.classList.add('warn');
     note.textContent = '⚠ 有效数据偏低，结论仅供参考　[EX5] ' + ERROR_MESSAGES.EX5;
-    $('btn-to-u4').disabled = false;
+    ex5 = true;
   } else {
     v.classList.add('stop'); note.classList.add('stop');
     note.textContent = '⛔ 有效像元不足，本轮检测终止　[EX11] ' + ERROR_MESSAGES.EX11;
-    $('btn-to-u4').disabled = true;
     showError({ code: 'EX11', message: ERROR_MESSAGES.EX11, run_id: S.change && S.change.run_id });
+  }
+  const bar = $('ex5-bar');
+  const snapWarn = S.change && S.change.params_snapshot && S.change.params_snapshot.warning;
+  if (ex5 || snapWarn) {
+    bar.hidden = false;
+    bar.classList.add('warn');
+    bar.innerHTML = '<strong>[EX5] ' + esc(ERROR_MESSAGES.EX5) + '</strong>'
+      + (snapWarn ? '<div class="alert-sub">' + esc(snapWarn) + '</div>' : '');
+  } else {
+    bar.hidden = true;
   }
 }
 
-// ===== UI-04 =====
+// ===== 右栏 E：精度评估（REQ-09） =====
 function updateCounts() {
   const cnt = { 1: 0, 2: 0, 3: 0 };
   S.samples.forEach((p) => { if (cnt[p.cls] != null) cnt[p.cls]++; });
@@ -587,11 +466,14 @@ function updateCounts() {
     $('bar-' + c).style.width = Math.min(100, (cnt[c] / demo.MIN_SAMPLES_PER_CLASS) * 100) + '%';
     if (cnt[c] < demo.MIN_SAMPLES_PER_CLASS) allOk = false;
   });
-  $('btn-accuracy').disabled = !allOk;
-  $('ex10-hint').textContent = allOk
+  const btn = $('btn-accuracy');
+  btn.disabled = !allOk || S.accBusy;
+  btn.title = allOk ? '' : '[EX10] ' + ERROR_MESSAGES.EX10;
+  const hint = $('ex10-hint');
+  hint.textContent = allOk
     ? '✓ 三类样本均已达到每类 30 个，可计算精度'
-    : '[EX10] ' + ERROR_MESSAGES.EX10;
-  $('ex10-hint').style.color = allOk ? '#8ce0a0' : 'var(--warn)';
+    : '[EX10] ' + ERROR_MESSAGES.EX10 + '（当前缺口见上方计数条）';
+  $('acc-empty').hidden = S.samples.length > 0 || !!S.accuracy;
 }
 
 function addSample(lng, lat, cls) {
@@ -608,7 +490,8 @@ function removeSample(id) {
 
 function fillSamplesDemo() {
   const b = S.aoi;
-  if (!b) return;
+  if (!b) { showToast('请先设置 AOI，再一键补齐演示样本', 'warn'); return; }
+  // 每类 32 个：低 valid_ratio 组首 round 触发 EX10（<30 不可计算），可多次点击直至每类 ≥ 30
   [1, 2, 3].forEach((cls) => {
     for (let i = 0; i < 32; i++) {
       S.samples.push({
@@ -621,24 +504,27 @@ function fillSamplesDemo() {
   });
   M.setSamples(map, S.samples);
   updateCounts();
-  showToast('已补齐演示样本（每类 32 个，演示数据）', 'ok');
+  showToast('已补齐演示样本（每类 32 个，可继续点击补齐）', 'ok');
 }
 
 async function calcAccuracy() {
+  if (S.accBusy) return;
   const samples = S.samples.map((p) => ({ x: p.x, y: p.y, ref_class: demo.CLASS_INFO[p.cls].ref }));
-  const body = { run_id: (S.aoiResult && S.aoiResult.run_id) || '', samples };
+  const body = { run_id: currentRunId(), samples };
   const btn = $('btn-accuracy');
+  S.accBusy = true;
   btn.disabled = true; btn.textContent = '计算中…';
   try {
     const res = await api.submitSamples(body);
     if (res.demo) markDemo();
+    else setDataBadge(false, 'POST /accuracy/sample');
     S.accuracy = res.data;
     renderAccuracy();
-    $('btn-to-u5').disabled = false;
     showToast(res.demo ? '精度评价完成（演示数据）' : '精度评价完成', 'ok');
   } catch (e) {
     handleErr(e);
   } finally {
+    S.accBusy = false;
     btn.textContent = '计算精度 · POST /accuracy/sample';
     updateCounts();
   }
@@ -665,19 +551,35 @@ function renderAccuracy() {
   $('cm-table').innerHTML = html;
 }
 
-// ===== UI-05 =====
+// ===== 右栏 F：报告导出（REQ-12/14/15） =====
+function refreshExportState() {
+  const has = !!S.change;
+  $('export-empty').hidden = has;
+  $('export-body').hidden = !has;
+  refreshGates();
+}
+
 function renderSnapshot() {
   const ps = (S.change && S.change.params_snapshot) || {};
+  // 后端快照字段可能为对象（如基线 {S2: ...}），统一安全字符串化，避免 [object Object]
+  const fmt = (v, dflt) => {
+    if (v == null || v === '') return dflt;
+    if (typeof v === 'object') {
+      if (v.S2 != null) return String(v.S2); // proc_baseline 按传感器给出
+      return JSON.stringify(v);
+    }
+    return String(v);
+  };
   const commit = ps.commit || (S.exportResult && S.exportResult.commit) || '—';
   const formula = (ps.formula_id || 'S2_L2A_BOA') + (ps.formula_text ? ' · ' + ps.formula_text : '');
   const rows = [
-    ['run_id', String((S.change && S.change.run_id) || (S.aoiResult && S.aoiResult.run_id) || '—'), true],
-    ['commit（代码版次）', String(commit), true],
+    ['run_id', fmt((S.change && S.change.run_id) || (S.aoiResult && S.aoiResult.run_id), '—'), true],
+    ['commit（代码版次）', fmt(commit, '—'), true],
     ['辐射定标公式', formula, true],
-    ['处理基线版次', String(ps.proc_baseline || '—'), false],
-    ['变化阈值 ΔNDVI', String(ps.threshold != null ? ps.threshold : '—'), false],
-    ['分块尺寸 (px)', String(ps.block_size != null ? ps.block_size : '—'), false],
-    ['指数类型', String(ps.index || 'NDVI'), false],
+    ['处理基线版次', fmt(ps.proc_baseline, '—'), false],
+    ['变化阈值 ΔNDVI', fmt(ps.threshold, '—'), false],
+    ['分块尺寸 (px)', fmt(ps.block_size, '—'), false],
+    ['指数类型', fmt(ps.index, 'NDVI'), false],
   ];
   $('snapshot-table').innerHTML = '<tbody>' + rows.map(([k, v, code]) =>
     `<tr><td class="k">${esc(k)}</td><td>${code ? '<code>' + esc(v) + '</code>' : esc(v)}</td></tr>`).join('') + '</tbody>';
@@ -685,11 +587,11 @@ function renderSnapshot() {
 
 function renderFiles(files, isDemo) {
   const box = $('export-files');
-  if (!files || !files.length) { box.innerHTML = '<div class="ok-line" style="color:var(--muted2);font-size:11px">尚无导出文件</div>'; return; }
+  if (!files || !files.length) { box.innerHTML = '<div class="ok-line muted">尚无导出文件</div>'; return; }
   box.innerHTML = files.map((f) => {
     const size = f.size != null ? (f.size > 1024 ? (f.size / 1024).toFixed(1) + ' KB' : f.size + ' B') : '—';
-    const tag = (isDemo || f.demo) ? '<span style="font-size:10px;font-weight:800;color:#231700;background:#f5c451;border-radius:4px;padding:1px 6px;white-space:nowrap">演示数据</span>' : '';
-    const ph = f.placeholder ? '<span style="color:var(--warn);font-size:10px;white-space:nowrap">占位</span>' : '';
+    const tag = (isDemo || f.demo) ? '<span class="demo-tag solid">演示数据</span>' : '';
+    const ph = f.placeholder ? '<span class="ph-tag">占位</span>' : '';
     return `<div class="file-item"><span class="fi-fmt">${esc(f.format)}</span><span class="fi-url">${esc(String(f.url || '').slice(0, 40))}</span><span class="fi-size">${size}</span>${tag}${ph}</div>`;
   }).join('');
 }
@@ -706,16 +608,22 @@ function triggerDownload(f) {
 
 async function doExport(formats) {
   const fmts = formats.map((f) => String(f).toLowerCase());
+  if (!fmts.length) { showToast('请先勾选至少一种导出格式', 'warn'); return; }
   // 前端格式白名单（REQ-12 / EX6）：越权格式即时按内置映射展示，不臆造语义
   const bad = fmts.find((f) => !ALLOW_FORMATS.includes(f));
   if (bad) {
-    showError({ code: 'EX6', message: ERROR_MESSAGES.EX6, run_id: (S.change && S.change.run_id) || null });
+    showError({ code: 'EX6', message: ERROR_MESSAGES.EX6, run_id: currentRunId() || null });
     return;
   }
-  const body = { run_id: (S.aoiResult && S.aoiResult.run_id) || '', formats: fmts };
+  if (!currentRunId()) { showToast('尚无 run_id，请先完成一次变化检测', 'warn'); return; }
+  const btn = $('btn-export');
+  S.exportBusy = true;
+  btn.disabled = true; btn.textContent = '导出中…';
+  const body = { run_id: currentRunId(), formats: fmts };
   try {
     const res = await api.exportReport(body);
     if (res.demo) markDemo();
+    else setDataBadge(false, 'POST /report/export');
     S.exportResult = res.data;
     renderFiles(res.data.files, res.demo);
     (res.data.files || []).forEach(triggerDownload);
@@ -723,28 +631,39 @@ async function doExport(formats) {
     showToast(res.demo ? '导出完成（演示数据，文件已标注）' : '导出完成', 'ok');
   } catch (e) {
     handleErr(e);
+  } finally {
+    S.exportBusy = false;
+    btn.textContent = '导出所选格式 · POST /report/export';
+    refreshGates();
   }
 }
 
-// ===== 流程切换 =====
-function gotoStep(n) {
-  S.maxStep = Math.max(S.maxStep, n);
-  S.step = n;
-  document.querySelectorAll('.view').forEach((v) => v.classList.toggle('active', +v.dataset.step === n));
-  renderSteps();
-  $('map-hint').textContent = HINTS[n];
-  $('map-mode').textContent = MODES[n];
-  $('map-legend').hidden = !(n >= 3 && n <= 5);
-  if (n === 3) loadChange();
-  if (n === 5) {
-    C.renderBar($('chart-bar'), S.change && S.change.stats);
-    renderSnapshot();
+// ===== 技术前提门控汇总（自由流程：全部常驻，缺前提才置灰） =====
+function refreshGates() {
+  const st = aoiStatus();
+  const phOk = phaseValid();
+  gate('btn-aoi-apply', st.ok && phOk,
+    !st.ok ? (st.reason || '请填写完整四至（WGS84）')
+      : (st.spanOver ? '[EX1] ' + ERROR_MESSAGES.EX1 : phaseErrText()));
+
+  const canRun = !!(S.aoiResult && S.selectedPair);
+  gate('btn-run-change', canRun && !S.changeBusy,
+    !S.aoiResult ? '需先应用 AOI（左栏「AOI 设置」卡片）'
+      : (!S.selectedPair ? '需先选择影像对（左栏「双时相影像对」卡片）' : '检测运行中，请稍候…'));
+
+  const fmts = ['cb-geotiff', 'cb-png', 'cb-pdf'].filter((id) => $(id) && $(id).checked);
+  gate('btn-export', !!currentRunId() && fmts.length > 0 && !S.exportBusy,
+    !currentRunId() ? '需先完成一次变化检测获得 run_id' : '请至少勾选一种导出格式');
+}
+
+// ===== 地图模式（浏览 / AOI 框选 / 样本打点） =====
+function setMapMode(mode) {
+  S.mapMode = mode;
+  document.querySelectorAll('.mode-btn').forEach((b) => b.classList.toggle('active', b.dataset.mode === mode));
+  $('map-hint').textContent = HINTS[mode] || HINTS.browse;
+  if (map && map.getCanvas()) {
+    map.getCanvas().style.cursor = mode === 'browse' ? '' : 'crosshair';
   }
-  window.setTimeout(() => {
-    try { if (map) map.resize(); } catch (_) { /* style 未就绪 */ }
-    C.resizeCharts();
-  }, 60);
-  $('panel').scrollTop = 0;
 }
 
 // ===== 事件绑定 =====
@@ -765,7 +684,7 @@ function bindEvents() {
       $('t1').value = demo.SEEDS[i].scenes.t1.date;
       $('t2').value = demo.SEEDS[i].scenes.t2.date;
       S.t1 = $('t1').value; S.t2 = $('t2').value;
-      updateAoiMetrics(); updateSubmitState();
+      updateAoiMetrics();
     };
   });
 
@@ -782,11 +701,14 @@ function bindEvents() {
     applyAoi(prev);
   };
 
-  $('t1').onchange = () => { S.t1 = $('t1').value; updateSubmitState(); };
-  $('t2').onchange = () => { S.t2 = $('t2').value; updateSubmitState(); };
-  $('btn-aoi-submit').onclick = submitAoi;
+  $('t1').onchange = () => { S.t1 = $('t1').value; updateAoiMetrics(); };
+  $('t2').onchange = () => { S.t2 = $('t2').value; updateAoiMetrics(); };
+  $('btn-aoi-apply').onclick = submitAoi;
 
-  $('btn-scene-confirm').onclick = confirmScene;
+  $('pair-filter').addEventListener('input', () => { S.pairFilter = $('pair-filter').value; renderPairs(); });
+  $('block-size').onchange = () => { if (S.selectedPair) scheduleAutoConfirm(); };
+
+  $('btn-run-change').onclick = runChangeDetection;
 
   $('opacity').addEventListener('input', () => {
     const v = Number($('opacity').value);
@@ -794,7 +716,10 @@ function bindEvents() {
     $('opacity-val').textContent = v + '%';
     M.setImageOpacity(map, S.opacity);
   });
-  $('btn-to-u4').onclick = () => gotoStep(4);
+
+  document.querySelectorAll('.mode-btn').forEach((b) => {
+    b.onclick = () => setMapMode(b.dataset.mode);
+  });
 
   $('class-btns').querySelectorAll('.class-btn').forEach((el) => {
     el.onclick = () => {
@@ -810,11 +735,15 @@ function bindEvents() {
     S.samples = []; M.setSamples(map, S.samples); updateCounts();
   };
   $('btn-accuracy').onclick = calcAccuracy;
-  $('btn-to-u5').onclick = () => gotoStep(5);
 
-  $('btn-exp-pdf').onclick = () => doExport(['pdf']);
-  $('btn-exp-png').onclick = () => doExport(['png']);
-  $('btn-exp-tif').onclick = () => doExport(['geotiff']);
+  ['cb-geotiff', 'cb-png', 'cb-pdf'].forEach((id) => {
+    $(id).addEventListener('change', refreshGates);
+  });
+  $('btn-export').onclick = () => {
+    const fmts = ['cb-geotiff', 'cb-png', 'cb-pdf'].filter((id) => $(id).checked)
+      .map((id) => id.replace('cb-', ''));
+    doExport(fmts);
+  };
   $('btn-exp-custom').onclick = () => {
     const v = $('custom-format').value.trim();
     if (!v) { showToast('请输入要校验的导出格式', 'warn'); return; }
@@ -822,13 +751,11 @@ function bindEvents() {
   };
 }
 
-function boundsFromArray(a) { return { w: a[0], s: a[1], e: a[2], n: a[3] }; }
-
 function bindMapEvents() {
-  // 矩形框选（仅 UI-01）
+  // 矩形框选（AOI 框选模式，REQ-01）
   let drawing = false, moved = false, startPx = null, startLL = null;
   map.on('mousedown', (e) => {
-    if (S.step !== 1) return;
+    if (S.mapMode !== 'aoi') return;
     drawing = true; moved = false;
     startPx = { x: e.point.x, y: e.point.y };
     startLL = map.unproject(e.point);
@@ -836,7 +763,7 @@ function bindMapEvents() {
     map.dragPan.disable();
   });
   map.on('mousemove', (e) => {
-    if (!drawing || S.step !== 1) return;
+    if (!drawing || S.mapMode !== 'aoi') return;
     const d = Math.hypot(e.point.x - startPx.x, e.point.y - startPx.y);
     if (d <= 4) return;
     moved = true;
@@ -846,13 +773,13 @@ function bindMapEvents() {
     if (!drawing) return;
     drawing = false;
     map.dragPan.enable();
-    if (moved) updateSubmitState();
+    if (moved) updateAoiMetrics();
   };
   window.addEventListener('mouseup', endDraw);
 
-  // 样本点打点 / 删除（仅 UI-04）
+  // 样本点打点 / 删除（样本打点模式，REQ-09）
   map.on('click', (e) => {
-    if (S.step !== 4) return;
+    if (S.mapMode !== 'sample') return;
     const feats = map.queryRenderedFeatures(e.point, { layers: ['sample-circles'] });
     if (feats.length) {
       removeSample(feats[0].properties.id);
@@ -864,9 +791,19 @@ function bindMapEvents() {
 
 // ===== 启动 =====
 function init() {
-  buildPanel();
-  buildLegend();
-  renderSteps();
+  // 时相预置清单（REQ-01）
+  const dateOpts = '<option value="">— 选择时相 —</option>' +
+    demo.PRESET_DATES.map((d) => `<option value="${d}">${d}</option>`).join('');
+  $('t1').innerHTML = dateOpts;
+  $('t2').innerHTML = dateOpts;
+
+  // 地图图例（三类色带 · REQ-10）
+  $('map-legend').innerHTML = `
+    <h4>变化专题图色带 · 编码</h4>
+    <div class="legend-row"><span class="legend-code">1</span><span class="legend-swatch" style="background:#21a04c"></span>增强</div>
+    <div class="legend-row"><span class="legend-code">2</span><span class="legend-swatch" style="background:#d94c3d"></span>退化</div>
+    <div class="legend-row"><span class="legend-code">3</span><span class="legend-swatch" style="background:#5b7a99"></span>稳定</div>`;
+
   bindEvents();
 
   map = M.createMap('map', demo.SEEDS[0].center, 9);
@@ -874,12 +811,24 @@ function init() {
     fillAoiInputs(boundsFromArray(demo.SEEDS[0].aoi));
     syncFromInputs();
     M.fitBounds(map, S.aoi, 90);
+    setMapMode('aoi');
   });
   bindMapEvents();
 
   updateCounts();
   renderSnapshot();
-  gotoStep(1);
+  renderFiles([], false);
+  refreshExportState();
+  refreshGates();
+  setMapMode('aoi');
+
+  // 影像对清单启动即加载（自由流程：无 AOI 也可浏览，GET /scene/match 不强制 aoi_id）
+  loadPairs();
+
+  window.addEventListener('resize', () => {
+    try { if (map) map.resize(); } catch (_) { /* style 未就绪 */ }
+    C.resizeCharts();
+  });
 }
 
 init();

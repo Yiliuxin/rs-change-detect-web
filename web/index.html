@@ -3,36 +3,215 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="遥感影像处理与地表变化检测 Web 平台 · 表现层 UI-01~05" />
-    <title>遥感变化检测平台 · UI-01~05</title>
+    <meta name="description" content="遥感影像处理与地表变化检测 Web 平台 · GIS 工作台式三栏自由流程 · UI-01~05" />
+    <link rel="icon" href="data:," />
+    <title>遥感变化检测平台 · GIS 工作台</title>
   </head>
   <body>
     <div id="app">
+      <!-- ============ 顶栏：系统名 + 数据源状态徽标 ============ -->
       <header class="topbar">
         <div class="brand">
           <span class="brand-mark">RS</span>
           <div class="brand-text">
             <strong>遥感影像变化检测平台</strong>
-            <small>表现层 · HLD 4.x · MapLibre 离线空白底图</small>
+            <small>GIS 工作台 · HLD 4.x · 自由流程 · MapLibre 离线空白底图</small>
           </div>
         </div>
         <div class="topbar-right">
-          <span id="demo-badge" class="badge badge-demo" hidden>演示数据</span>
+          <span id="conn-badge" class="badge badge-source">● 数据源检测中…</span>
           <span class="badge badge-req">REQ-01 ~ REQ-15</span>
           <span class="badge badge-env">MVP 离线</span>
         </div>
       </header>
 
-      <nav id="steps" class="steps" aria-label="5 步流程"></nav>
-
       <main class="layout">
-        <aside id="panel" class="panel"></aside>
-        <section class="map-area">
+        <!-- ============ 左栏 · 分析配置（三张常驻卡片，自由流程，无步骤条） ============ -->
+        <aside class="col col-left" id="col-config" aria-label="分析配置">
+
+          <!-- A. AOI 设置（UI-01 / REQ-01） -->
+          <section class="card" id="card-aoi">
+            <div class="card-title">AOI 设置<span class="req">REQ-01</span></div>
+            <div class="grid2">
+              <div><label class="fld" for="aoi-w">西 West (lon)</label><input type="number" step="0.0001" id="aoi-w" /></div>
+              <div><label class="fld" for="aoi-n">北 North (lat)</label><input type="number" step="0.0001" id="aoi-n" /></div>
+              <div><label class="fld" for="aoi-e">东 East (lon)</label><input type="number" step="0.0001" id="aoi-e" /></div>
+              <div><label class="fld" for="aoi-s">南 South (lat)</label><input type="number" step="0.0001" id="aoi-s" /></div>
+            </div>
+            <div class="btn-row gap-top">
+              <button type="button" class="btn btn-sm" id="btn-seed-poyang" title="一键填入鄱阳湖 seed 的 AOI 与时相">鄱阳湖</button>
+              <button type="button" class="btn btn-sm" id="btn-seed-farmland" title="一键填入赣中农田 seed 的 AOI 与时相">赣中农田</button>
+              <button type="button" class="btn btn-sm" id="btn-seed-nanchang" title="一键填入南昌 seed 的 AOI 与时相">南昌</button>
+              <button type="button" class="btn btn-sm btn-ghost" id="btn-aoi-undo" title="撤销上一次 AOI 修改">撤销</button>
+              <button type="button" class="btn btn-sm btn-ghost" id="btn-aoi-clear" title="清空当前 AOI">清空</button>
+            </div>
+            <div class="grid2 gap-top">
+              <div>
+                <label class="fld" for="t1">时相 t1（较早）<span class="req">REQ-01/02</span></label>
+                <select id="t1"></select>
+              </div>
+              <div>
+                <label class="fld" for="t2">时相 t2（较晚）<span class="req">REQ-01/02</span></label>
+                <select id="t2"></select>
+              </div>
+            </div>
+            <div class="metric-row gap-top">
+              <div class="metric"><div class="k">经度 / 纬度跨度 (°)</div><div class="v" id="span-lon">—</div></div>
+              <div class="metric"><div class="k">面积（deg² / 约 km²）</div><div class="v" id="area-deg">—</div></div>
+            </div>
+            <div class="err-line" id="aoi-err"></div>
+            <div class="err-line" id="phase-err"></div>
+            <button type="button" class="btn btn-primary btn-block gap-top" id="btn-aoi-apply" disabled>应用 AOI · POST /aoi/select</button>
+            <div class="ok-line" id="aoi-applied" hidden></div>
+          </section>
+
+          <!-- B. 影像对（UI-02 / REQ-02 / REQ-04） -->
+          <section class="card" id="card-pairs">
+            <div class="card-title">双时相影像对<span class="req">REQ-02</span><span class="hint" id="pair-count">—</span></div>
+            <input type="text" id="pair-filter" class="pair-filter" placeholder="过滤：名称 / 日期 / 云量 / tile…" />
+            <div class="pair-list" id="pair-list">
+              <div class="status-line"><span class="spinner"></span>正在获取影像对…</div>
+            </div>
+            <div class="card-subtitle">锁定口径面板<span class="req">REQ-04</span><span class="readonly-badge">NF5 · 只读</span></div>
+            <div class="kv" id="caliber-panel"><span class="hint">选择一组影像对后自动确认口径</span></div>
+          </section>
+
+          <!-- C. 检测运行（UI-03 入口 / REQ-05~08 / REQ-10） -->
+          <section class="card" id="card-run">
+            <div class="card-title">检测运行<span class="req">REQ-05 ~ REQ-08</span></div>
+            <div class="grid2">
+              <div>
+                <label class="fld" for="block-size">分块尺寸 block_size<span class="req">REQ-06</span></label>
+                <select id="block-size">
+                  <option value="256" selected>256 px</option>
+                  <option value="512">512 px</option>
+                </select>
+              </div>
+              <div>
+                <label class="fld" for="index-type">指数类型 index</label>
+                <input type="text" id="index-type" value="NDVI" readonly title="MVP 仅支持 NDVI（REQ-07），口径锁定不可修改" />
+              </div>
+            </div>
+            <button type="button" class="btn btn-primary btn-block gap-top" id="btn-run-change" disabled
+              title="需先应用 AOI（A 卡片）并选择影像对（B 卡片）">运行变化检测 · POST /result/change</button>
+            <div class="status-line gap-top" id="run-progress" hidden><span class="spinner"></span><span id="run-status">正在运行变化检测…</span></div>
+            <div class="ok-line" id="run-done" hidden></div>
+            <div class="card-subtitle gap-top">专题图叠加不透明度<span class="req">REQ-10</span></div>
+            <div class="slider-row">
+              <input type="range" id="opacity" min="0" max="100" value="85" />
+              <span class="slider-val" id="opacity-val">85%</span>
+            </div>
+          </section>
+        </aside>
+
+        <!-- ============ 中央 · 地图（始终可交互） ============ -->
+        <section class="map-area" aria-label="地图">
           <div id="map"></div>
           <div id="map-legend" class="map-legend" hidden></div>
           <div id="map-hint" class="map-hint"></div>
-          <div id="map-mode" class="map-mode"></div>
+          <div id="map-mode" class="map-mode" role="group" aria-label="地图交互模式">
+            <button type="button" class="mode-btn" data-mode="browse" title="自由浏览：缩放平移查看 AOI 与专题图">浏览</button>
+            <button type="button" class="mode-btn" data-mode="aoi" title="AOI 框选：拖拽画矩形（REQ-01）">AOI 框选</button>
+            <button type="button" class="mode-btn" data-mode="sample" title="样本打点：点击地图按类别打点（REQ-09）">样本打点</button>
+          </div>
         </section>
+
+        <!-- ============ 右栏 · 分析结果（三张常驻卡片，引导性空态） ============ -->
+        <aside class="col col-right" id="col-results" aria-label="分析结果">
+
+          <!-- D. 检测结果（REQ-05/08/10/11） -->
+          <section class="card" id="card-result">
+            <div class="card-title">检测结果<span class="req">REQ-05/08/10/11</span></div>
+            <div class="empty-state" id="result-empty">
+              <div class="empty-icon">🗺️</div>
+              <p>尚未运行变化检测。</p>
+              <p class="empty-sub">在左侧「检测运行」卡片点击<strong>「运行变化检测」</strong>，此处将展示有效像元占比、阈值与三类像元统计。</p>
+            </div>
+            <div id="result-body" hidden>
+              <div class="ratio-box">
+                <div class="ratio-k">VALID RATIO<span class="req">REQ-05</span></div>
+                <div class="ratio-v" id="valid-ratio">—</div>
+              </div>
+              <div class="ratio-note" id="valid-note">等待检测结果…</div>
+              <div class="alert-bar" id="ex5-bar" hidden></div>
+              <div class="metric-row gap-top">
+                <div class="metric"><div class="k">变化阈值 ΔNDVI<span class="req">REQ-07</span></div><div class="v" id="threshold-val">—</div></div>
+                <div class="metric"><div class="k">run_id<span class="req">REQ-14</span></div><div class="v v-sm" id="runid-val">—</div></div>
+              </div>
+              <div class="gap-top"><table class="tbl" id="stats-table"></table></div>
+              <div class="chart" id="chart-pie"></div>
+              <div class="chart" id="chart-bar"></div>
+            </div>
+          </section>
+
+          <!-- E. 精度评估（UI-04 / REQ-09） -->
+          <section class="card" id="card-accuracy">
+            <div class="card-title">精度评估<span class="req">REQ-09</span></div>
+            <div class="empty-state" id="acc-empty">
+              <div class="empty-icon">📍</div>
+              <p>尚未录入精度样本。</p>
+              <p class="empty-sub">将地图切到<strong>「样本打点」</strong>模式点击打点（按类别着色），每类 ≥ 30 个方可计算精度。</p>
+            </div>
+            <div id="acc-body">
+              <div class="card-subtitle">当前打点类别</div>
+              <div class="class-btns" id="class-btns">
+                <div class="class-btn active" data-cls="1" title="切换打点类别为 1 增强"><span class="dot" style="background:#21a04c"></span>1 增强</div>
+                <div class="class-btn" data-cls="2" title="切换打点类别为 2 退化"><span class="dot" style="background:#d94c3d"></span>2 退化</div>
+                <div class="class-btn" data-cls="3" title="切换打点类别为 3 稳定"><span class="dot" style="background:#5b7a99"></span>3 稳定</div>
+              </div>
+              <div class="cnt-row"><span class="cnt-name">1 增强</span><div class="cnt-bar"><i id="bar-1" style="background:#21a04c;width:0%"></i></div><span class="cnt-num" id="cnt-1">0</span></div>
+              <div class="cnt-row"><span class="cnt-name">2 退化</span><div class="cnt-bar"><i id="bar-2" style="background:#d94c3d;width:0%"></i></div><span class="cnt-num" id="cnt-2">0</span></div>
+              <div class="cnt-row"><span class="cnt-name">3 稳定</span><div class="cnt-bar"><i id="bar-3" style="background:#5b7a99;width:0%"></i></div><span class="cnt-num" id="cnt-3">0</span></div>
+              <div class="warn-line" id="ex10-hint"></div>
+              <div class="inner-card" id="fill-wrap">
+                <div class="card-subtitle">样本快速录入<span class="demo-tag">演示数据</span></div>
+                <button type="button" class="btn btn-sm btn-block" id="btn-fill-samples" title="每类随机补 32 个样本点，可多次点击直至每类 ≥ 30（EX10）">一键补齐每类 32 个样本点</button>
+              </div>
+              <div class="btn-row gap-top">
+                <button type="button" class="btn btn-sm btn-ghost" id="btn-sample-undo" title="删除最近一个样本点">撤销上一点</button>
+                <button type="button" class="btn btn-sm btn-ghost" id="btn-samples-clear" title="清空全部样本点">清空样本</button>
+              </div>
+              <button type="button" class="btn btn-primary btn-block gap-top" id="btn-accuracy" disabled
+                title="[EX10] 样本数量不足，每类至少 30 个样本点">计算精度 · POST /accuracy/sample</button>
+              <div id="accuracy-result" hidden>
+                <div class="card-subtitle">精度评价结果<span class="req">REQ-09</span></div>
+                <div class="metric-row">
+                  <div class="metric"><div class="k">总体精度 OA</div><div class="v" id="oa">—</div></div>
+                  <div class="metric"><div class="k">Kappa 系数</div><div class="v" id="kappa">—</div></div>
+                </div>
+                <div class="ok-line" id="acc-note"></div>
+                <div class="gap-top"><table class="tbl" id="cm-table"></table></div>
+              </div>
+            </div>
+          </section>
+
+          <!-- F. 报告导出（UI-05 / REQ-11/12/14/15） -->
+          <section class="card" id="card-export">
+            <div class="card-title">报告导出<span class="req">REQ-12 / REQ-15</span></div>
+            <div class="empty-state" id="export-empty">
+              <div class="empty-icon">📄</div>
+              <p>暂无可导出的运行结果。</p>
+              <p class="empty-sub">完成<strong>「运行变化检测」</strong>获得 run_id 后，可在此勾选格式并导出 GeoTIFF / PNG / PDF。</p>
+            </div>
+            <div id="export-body" hidden>
+              <div class="fmt-row">
+                <label class="chk"><input type="checkbox" id="cb-geotiff" checked /> GeoTIFF</label>
+                <label class="chk"><input type="checkbox" id="cb-png" checked /> PNG</label>
+                <label class="chk"><input type="checkbox" id="cb-pdf" checked /> PDF</label>
+              </div>
+              <button type="button" class="btn btn-primary btn-block gap-top" id="btn-export"
+                title="提交 POST /report/export，越权格式触发 EX6">导出所选格式 · POST /report/export</button>
+              <div id="export-files"></div>
+              <div class="card-subtitle gap-top">参数快照（只读）<span class="req">REQ-14</span><span class="readonly-badge">NF9 · 只读</span></div>
+              <table class="tbl snapshot" id="snapshot-table"></table>
+              <div class="card-subtitle gap-top">格式校验诊断<span class="req">REQ-12 / EX6</span></div>
+              <div class="btn-row">
+                <input type="text" id="custom-format" placeholder="例如 shp（越权格式）" />
+                <button type="button" class="btn btn-sm" id="btn-exp-custom" title="提交越权格式以验证 EX6 错误路径">提交</button>
+              </div>
+            </div>
+          </section>
+        </aside>
       </main>
 
       <div id="banner" class="banner" hidden></div>
