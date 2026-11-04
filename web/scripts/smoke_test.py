@@ -44,10 +44,12 @@ with sync_playwright() as p:
     for cid in ["card-aoi", "card-pairs", "card-run", "card-result", "card-accuracy", "card-export"]:
         ok(f"卡片常驻可见 {cid}", page.locator(f"#{cid}").is_visible())
 
-    # 2) 影像对列表（真实 GET /scene/match；当前后端 6 景/3 组，11 组正确性由 node 侧验证）
-    page.wait_for_function("document.querySelectorAll('#pair-list .pair-card').length >= 3", timeout=30000)
+    # 2) 影像对列表（真实 GET /scene/match；后端已入库 22 景 / 11 组）
+    page.wait_for_function("document.querySelectorAll('#pair-list .pair-card').length >= 11", timeout=60000)
     n_pairs = page.locator("#pair-list .pair-card").count()
-    ok("影像对列表加载", n_pairs >= 3, f"共 {n_pairs} 组")
+    ok("影像对列表加载 11 组", n_pairs >= 11, f"共 {n_pairs} 组")
+    _labels = page.locator("#pair-list .pair-card").all_inner_texts()
+    ok("11 组均有名称与日期", all(("→" in x or "-" in x) for x in _labels), f"{len(_labels)} 条")
 
     # 3) 自由流程：先点右栏（结果卡片空态可交互/可见）
     ok("检测结果空态引导", page.locator("#result-empty").is_visible())
@@ -70,8 +72,8 @@ with sync_playwright() as p:
     aoi_txt = page.locator("#aoi-applied").inner_text()
     ok("POST /aoi/select 返回 aoi_id", "aoi_id" in aoi_txt, aoi_txt[:80])
 
-    # 5) 选影像对（poyang 组）→ 口径自动确认
-    page.locator("#pair-list .pair-card").first.click()
+    # 5) 选影像对（按名称精确选 poyang 组：11 组时 first 是 dongting，与鄱阳湖 AOI 空间不重叠）
+    page.locator("#pair-list .pair-card").filter(has_text="鄱阳湖").first.click()
     page.wait_for_function(
         "document.querySelector('#caliber-panel').innerText.includes('已锁定')", timeout=30000)
     ok("口径自动确认已锁定(NF5)", True)
