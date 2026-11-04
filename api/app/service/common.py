@@ -13,8 +13,12 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 RUNS_ROOT = Path(__file__).resolve().parents[2] / "runs"
 # 本地影像回退根：C:\Test\Web\data\pair_*
 DATA_ROOT = REPO_ROOT / "data"
+# 产物同源 HTTP URL 前缀（REQ-10 / REQ-12）：静态端点在 main.py 注册，根即 RUNS_ROOT。
+# 响应只暴露相对 URL；本地绝对路径仍用于落盘与 change_result 表登记（schema 不变）。
+ARTIFACT_URL_PREFIX = "/api/v1/artifacts"
 
-__all__ = ["REPO_ROOT", "RUNS_ROOT", "DATA_ROOT", "git_short_commit", "utc_now", "run_dir"]
+__all__ = ["REPO_ROOT", "RUNS_ROOT", "DATA_ROOT", "ARTIFACT_URL_PREFIX",
+           "git_short_commit", "utc_now", "run_dir", "artifact_url"]
 
 
 def git_short_commit() -> Optional[str]:
@@ -39,3 +43,11 @@ def run_dir(run_id: str) -> Path:
     d = RUNS_ROOT / run_id
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def artifact_url(run_id: str, filename: str) -> str:
+    """产物同源相对 URL（REQ-10 / REQ-12），供 change_service / report_service 复用。
+
+    仅用于响应；落盘与 ``change_result`` 表仍使用本地绝对路径。
+    """
+    return f"{ARTIFACT_URL_PREFIX}/{run_id}/{filename}"

@@ -3,11 +3,12 @@
 
 流程：formats 白名单校验（EX6）→ 串行限流（EX7）→ 读回 change.tif + 报告元数据 →
 调 ``export_triplet`` 产出 GeoTIFF/PNG/PDF 三件套 → 上传 results 桶 →
-返回 files（url + 实际字节数）/ run_id / commit / attribution。
+返回 files（同源相对 URL + 实际字节数）/ run_id / commit / attribution。
 """
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -19,10 +20,10 @@ from app.config.constants import (
     ATTRIBUTION_S2, ATTRIBUTION_S2_MODIFIED, EXPORT_FORMATS, RESULT_BUCKET,
 )
 from app.config.storage import (
-    StorageSettings, ensure_buckets, get_client, object_url, upload_file,
+    StorageSettings, ensure_buckets, get_client, upload_file,
 )
 from app.repository import task_repo
-from app.service.common import git_short_commit, run_dir
+from app.service.common import artifact_url, git_short_commit, run_dir
 from app.service.concurrency import serial
 from app.service.sample_service import accuracy_for_run
 
@@ -35,19 +36,25 @@ _FORMAT_FILE = {
 
 __all__ = ["export"]
 
+logger = logging.getLogger(__name__)
+
 
 def _upload(client, run_id: str, fmt: str, local: Path) -> str:
-    """上传单个产物到 results 桶；MinIO 不可用时回退本地绝对路径。"""
+    """保留 MinIO 上传动作，但返回给前端的 ``files[].url`` 为同源相对 URL。
+
+    ``storage.object_url()`` 的 ``minio://`` 口径只用于 ``scene.cog_path`` 登记
+    （``cog_source.resolve_bands()`` 依赖它），此处不调用、也不改动该函数本身；
+    上传失败时仅告警，产物已落盘，仍可由 /api/v1/artifacts 端点读取。
+    """
     filename, content_type = _FORMAT_FILE[fmt]
     if client is not None:
         try:
             object_name = f"{run_id}/{filename}"
             upload_file(client, RESULT_BUCKET, object_name, str(local),
                         content_type=content_type)
-            return object_url(RESULT_BUCKET, object_name)
-        except Exception:  # noqa: BLE001 - 存储故障回退本地路径，不阻断导出
-            pass
-    return str(local.resolve())
+        except Exception:  # noqa: BLE001 - 存储故障不阻断导出
+            logger.warning("MinIO 产物上传失败，改由本地 HTTP 端点提供：%s", filename)
+    return artifact_url(run_id, filename)
 
 
 def export(run_id: str, formats: List[str]) -> dict:

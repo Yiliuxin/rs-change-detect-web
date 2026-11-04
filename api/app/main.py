@@ -7,20 +7,31 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 from app.api.errors import install as install_error_handlers
 from app.api.v1 import accuracy, aoi, change, report, scene
 from app.config.storage import COG_BUCKET, RESULT_BUCKET, ensure_buckets, get_client
+from app.service.common import ARTIFACT_URL_PREFIX, RUNS_ROOT
 
 # API 版本前缀（HLD 2.2.3）
 API_V1_PREFIX = "/api/v1"
 # 前端开发服务器来源（HLD 2.1 表现层）
 WEB_ORIGIN = "http://localhost:5173"
+# 产物静态端点根：run_dir(run_id).parent，即 api/runs（REQ-10 / REQ-12）
+ARTIFACT_ROOT = RUNS_ROOT
+# filename 白名单 → Content-Type（同时充当防穿越白名单）
+ARTIFACT_MEDIA_TYPES = {
+    "change.tif": "image/tiff",
+    "change.png": "image/png",
+    "report.pdf": "application/pdf",
+}
 
 logger = logging.getLogger(__name__)
 
@@ -68,3 +79,30 @@ install_error_handlers(app)
 def health() -> dict:
     """健康检查：返回 {"status": "ok"}。"""
     return {"status": "ok"}
+
+
+@app.get(
+    f"{ARTIFACT_URL_PREFIX}/{{run_id}}/{{filename}}",
+    tags=["Artifacts"],
+    summary="读取本轮产物（GeoTIFF / 静态专题图 / PDF 报告）",
+)
+def get_artifact(run_id: str, filename: str) -> FileResponse:
+    """同源暴露 ``api/runs/<run_id>/`` 下三件套（REQ-10 / REQ-12）。
+
+    防目录穿越三重校验：
+      1) ``filename`` 必须命中白名单；
+      2) ``run_id`` 必须是合法 UUID，且一律用其**规范化形式**拼路径（不带原始串）；
+      3) 最终路径 ``resolve()`` 后必须仍位于 ``ARTIFACT_ROOT`` 内且为真实文件。
+    5 个业务路由契约不变；``storage.object_url()`` 的 minio:// 口径不受影响。
+    """
+    if filename not in ARTIFACT_MEDIA_TYPES:
+        raise HTTPException(status_code=404, detail="产物名不在白名单内")
+    try:
+        canonical = str(uuid.UUID(run_id))
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=404, detail="run_id 非法") from None
+
+    target = (ARTIFACT_ROOT / canonical / filename).resolve()
+    if not target.is_relative_to(ARTIFACT_ROOT.resolve()) or not target.is_file():
+        raise HTTPException(status_code=404, detail="产物不存在")
+    return FileResponse(target, media_type=ARTIFACT_MEDIA_TYPES[filename])

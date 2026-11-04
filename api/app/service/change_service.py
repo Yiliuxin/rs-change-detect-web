@@ -38,7 +38,7 @@ from app.config.constants import (
 )
 from app.repository import aoi_repo, change_result_repo, scene_repo, task_repo
 from app.service.cog_source import resolve_bands
-from app.service.common import run_dir, utc_now
+from app.service.common import artifact_url, run_dir, utc_now
 from app.service.concurrency import serial
 
 __all__ = ["load_scene", "run"]
@@ -246,18 +246,21 @@ def run(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE) -> dict:
                 json.dumps(report, ensure_ascii=False, default=str), encoding="utf-8"
             )
 
-            change_geotiff = str(exported["files"]["geotiff"])
-            change_png = str(exported["files"]["png"])
+            change_geotiff_path = str(exported["files"]["geotiff"])
+            change_png_path = str(exported["files"]["png"])
 
             # REQ-08/11/12：三类统计幂等入库 + task 终态
-            change_result_repo.upsert_stats(run_id, stats, change_geotiff, change_png)
+            # change_result 表仍登记本地绝对路径，schema / 仓储层均不改
+            change_result_repo.upsert_stats(run_id, stats, change_geotiff_path, change_png_path)
             task_repo.update_snapshot(run_id, snapshot)
             task_repo.update_status(run_id, "SUCCESS", finished_at=utc_now())
 
+            # 响应改为同源相对 URL：浏览器 image source / <a download> 可直接加载，
+            # 避免把本地绝对路径或 minio:// 自定义 scheme 暴露给前端（REQ-10/REQ-12）
             return {
                 "run_id": run_id,
-                "change_geotiff": change_geotiff,
-                "change_png": change_png,
+                "change_geotiff": artifact_url(run_id, "change.tif"),
+                "change_png": artifact_url(run_id, "change.png"),
                 "threshold": float(threshold),
                 "valid_ratio": float(valid_ratio),
                 "stats": stats,

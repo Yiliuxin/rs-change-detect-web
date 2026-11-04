@@ -520,6 +520,16 @@ async function confirmScene() {
 }
 
 // ===== UI-03 =====
+// 后端产物 URL 为同源相对路径 /api/v1/artifacts/...；若旧版/异常后端仍返回
+// file:///、Windows 绝对路径、minio:// 等浏览器不可加载地址，直接跳过 image source
+// 叠加，避免 "Not allowed to load local resource" 与 MapLibre Failed to fetch。
+function isUnsafeImageUrl(u) {
+  return !u
+    || /^(file|minio):\/\//i.test(u)   // file:///、minio://
+    || /^[A-Za-z]:[\\/]/.test(u)       // C:\... / C:/...
+    || /^\\\\/.test(u);                // UNC \\server\share
+}
+
 async function loadChange() {
   if (S.changeLoaded) return;
   S.changeLoaded = true;
@@ -531,8 +541,10 @@ async function loadChange() {
     let url = S.change.change_png;
     if (!url || /^demo:/.test(url)) url = demo.makeChangePngDataUrl();
     S.changePngUrl = url;
-    M.setImage(map, url, S.aoi);
-    M.setImageOpacity(map, S.opacity);
+    if (!isUnsafeImageUrl(url)) {
+      M.setImage(map, url, S.aoi);
+      M.setImageOpacity(map, S.opacity);
+    }
     renderValidRatio();
     C.renderPie($('chart-pie'), S.change.stats);
     showToast(res.demo ? '变化检测完成（演示数据）' : '变化检测完成', 'ok');

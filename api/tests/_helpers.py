@@ -17,6 +17,7 @@ from app.algorithm.mask_builder import SCL_CLOUD_HIGH_PROB, SCL_CLOUD_MEDIUM_PRO
 from app.config.constants import (
     AOI_MAX_SPAN_DEG, ERROR_MESSAGES, MIN_SAMPLES_PER_CLASS,
 )
+from app.service.common import run_dir
 
 # —— 预置影像对（与 data/*/manifest.json、scripts/seed_report.md 一致）——
 POYANG_BBOX = (116.25, 29.15, 116.35, 29.25)
@@ -118,6 +119,9 @@ def make_change_flow(client, geom: str, t1: str, t2: str) -> Dict:
     run_id = aoi_body.get("run_id") or ""
     r_change = client.post("/api/v1/result/change", json={"run_id": run_id})
     change_body = r_change.json()
+    # 响应里的 change_png / change_geotiff 已是同源相对 URL（见 test_api_artifacts.py）；
+    # 既有用例按落盘绝对路径断言 rasterio/is_file，故此处仍提供真实磁盘路径。
+    out = run_dir(run_id)
     return {
         "aoi_status": r_aoi.status_code,
         "aoi_body": aoi_body,
@@ -126,8 +130,8 @@ def make_change_flow(client, geom: str, t1: str, t2: str) -> Dict:
         "run_id": run_id,
         "aoi_id": aoi_body.get("aoi_id") or "",
         "matched_scenes": aoi_body.get("matched_scenes") or [],
-        "change_geotiff": change_body.get("change_geotiff", ""),
-        "change_png": change_body.get("change_png", ""),
+        "change_geotiff": str(out / "change.tif"),
+        "change_png": str(out / "change.png"),
         "valid_ratio": float(change_body.get("valid_ratio", 0.0) or 0.0),
         "threshold": float(change_body.get("threshold", 0.0) or 0.0),
         "stats": change_body.get("stats", []),
