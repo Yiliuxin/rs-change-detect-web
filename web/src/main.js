@@ -7,7 +7,7 @@
 
 import 'maplibre-gl/dist/maplibre-gl.css';
 import './style.css';
-import { ERROR_MESSAGES, showToast, showError, ApiError } from './errors.js';
+import { ERROR_MESSAGES, errorMessage, showToast, showError, ApiError } from './errors.js';
 import * as api from './api.js';
 import * as demo from './demo.js';
 import * as M from './map.js';
@@ -38,6 +38,21 @@ const S = {
   opacity: 0.85,
   samples: [], sampleSeq: 0, curClass: 1, accuracy: null, accBusy: false,
   exportResult: null, exportBusy: false,
+};
+
+// 在线取数（可选）卡片独立状态，与离线 S 完全隔离，互不污染。
+const ON = {
+  degraded: false,       // 后端未启用在线取数（discover 裸 404 / 网络失败）
+  discoverBusy: false,
+  candidates: [],
+  selected: -1,
+  runId: '',
+  fetching: false,       // POST /scene/fetch 已受理，轮询进行中
+  fetchId: '',
+  pollTimer: null,
+  pollBusy: false,       // 避免单次 GET 未返回时重叠发请求
+  pollFails: 0,
+  terminal: '',          // '' | 'SUCCESS' | 'FAILED'
 };
 
 let map = null;
@@ -178,6 +193,7 @@ function updateAoiMetrics() {
   ['aoi-w', 'aoi-s', 'aoi-e', 'aoi-n'].forEach((id) => $(id).classList.toggle('invalid', !!(b && (st.spanOver || !st.legal))));
   $('phase-err').textContent = phaseErrText();
   refreshGates();
+  refreshOnlineAoiEcho(); // 在线取数卡片复用 A 卡 AOI 的实时回显（展示层附加，不改离线行为）
 }
 
 async function submitAoi() {
@@ -666,6 +682,365 @@ function setMapMode(mode) {
   }
 }
 
+// ===== 在线取数（可选）· B 级扩展 / REQ-02 在线分支 =====
+// 只消费 api.discoverScenes / startFetch / pollFetch 三个新接口；复用 A 卡 S.aoi（WGS84 bbox），
+// 不重复输入 AOI。状态与错误展示完全内联于本卡片，绝不调用 handleErr / showError / gate()，
+// 因此不影响离线预置路径 A/B/C/D/E/F 的任何交互；错误文案按 code 走 errorMessage() 映射。
+
+const ON_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const ON_NAME_RE = /^[a-z0-9_]{1,40}$/;
+const ON_POLL_MS = 2000; // 每 2s 轮询一次 GET /scene/fetch/{fetch_id}
+
+function onlineDefaultName() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return 'user_' + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate())
+    + '_' + p(d.getHours()) + p(d.getMinutes());
+}
+
+// 规范化为后端 name 约束 ^[a-z0-9_]{1,40}$
+function onlineNormalizeName(raw) {
+  let s = String(raw == null ? '' : raw).toLowerCase();
+  s = s.replace(/[^a-z0-9_]+/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '');
+  return s.slice(0, 40);
+}
+
+function renderOnlineNamePreview() {
+  const el = $('onl-name-preview');
+  if (!el) return;
+  const n = onlineNormalizeName($('onl-name').value);
+  const ok = ON_NAME_RE.test(n);
+  el.className = 'onl-name-preview' + (ok ? '' : ' bad');
+  el.innerHTML = ok
+    ? '提交组名：<code>' + esc(n) + '</code>'
+    : '组名规范化后为空，仅允许小写字母 / 数字 / 下划线（1–40 位）';
+}
+
+function refreshOnlineAoiEcho() {
+  const el = $('onl-aoi-text');
+  if (!el) return;
+  const b = S.aoi;
+  if (!b) { el.textContent = '—（请先在 A 卡设置 AOI）'; return; }
+  el.textContent = '[' + Number(b.w).toFixed(4) + ', ' + Number(b.s).toFixed(4)
+    + ', ' + Number(b.e).toFixed(4) + ', ' + Number(b.n).toFixed(4) + ']';
+}
+
+function onlineAoiBbox() {
+  const b = S.aoi;
+  return b ? [Number(b.w), Number(b.s), Number(b.e), Number(b.n)] : null;
+}
+
+function onlineWindows() {
+  return {
+    t1_window: [$('onl-t1-start').value, $('onl-t1-end').value],
+    t2_window: [$('onl-t2-start').value, $('onl-t2-end').value],
+  };
+}
+
+// 本地前置校验（减少无效请求）：AOI 存在/合法/跨度≤0.25°(EX1) + 两窗口齐全、end>start、t2>t1
+function onlinePrecheck() {
+  const b = onlineAoiBbox();
+  if (!b) return { err: '请先在 A 卡「AOI 设置」填写 AOI（本卡片复用其当前 AOI）。' };
+  const st = aoiStatus();
+  if (!st.legal) return { err: st.reason || 'AOI 四至不合法' };
+  if (st.spanOver) return { err: '[EX1] ' + ERROR_MESSAGES.EX1 };
+  const w = onlineWindows();
+  const all = w.t1_window.concat(w.t2_window);
+  if (all.some((d) => !ON_DATE_RE.test(d))) return { err: '请填全 t1 / t2 两个时相窗口的起止日期（YYYY-MM-DD）。' };
+  if (w.t1_window[1] <= w.t1_window[0] || w.t2_window[1] <= w.t2_window[0]) {
+    return { err: '每个窗口的结束日期须晚于开始日期。' };
+  }
+  if (w.t2_window[0] <= w.t1_window[0]) return { err: 't2 窗口须晚于 t1 窗口（t2 > t1）。' };
+  return { bbox: b, t1_window: w.t1_window, t2_window: w.t2_window };
+}
+
+function onlCloud(v) {
+  return fmtCloud(v);
+}
+
+// ---------- discover：候选清单（空态 / 加载中 / 错误 / 列表 三态） ----------
+function renderOnlineCandidates() {
+  const box = $('onl-cand-list');
+  const list = ON.candidates;
+  if (!list.length) {
+    box.innerHTML = '<div class="empty-state compact"><p>无候选影像对</p>'
+      + '<p class="empty-sub">可调整 AOI 或 t1 / t2 时相窗口后重新查询。</p></div>';
+    $('onl-cand-count').textContent = '0 组';
+    return;
+  }
+  $('onl-cand-count').textContent = list.length + ' 组 · 综合云量升序';
+  box.innerHTML = list.map((c, i) => {
+    const t1 = c.t1 || {}, t2 = c.t2 || {};
+    const sel = ON.selected === i ? ' selected' : '';
+    const hi1 = Number(t1.cloud_cover) > 50, hi2 = Number(t2.cloud_cover) > 50;
+    return `
+      <div class="onl-cand${sel}" data-idx="${i}">
+        <div class="onl-cand-head"><span class="radio"></span><span class="onl-tile">tile ${esc(c.tile || '—')}</span>
+          <span class="onl-combined">综合云量 ${esc(onlCloud(c.combined_cloud))}</span></div>
+        <div class="onl-scene"><span class="tag tag-t1">T1</span><span class="dt">${esc(t1.date || '—')}</span><span class="cloud ${hi1 ? 'high' : ''}">云量 ${esc(onlCloud(t1.cloud_cover))}</span></div>
+        <div class="onl-scene"><span class="tag tag-t2">T2</span><span class="dt">${esc(t2.date || '—')}</span><span class="cloud ${hi2 ? 'high' : ''}">云量 ${esc(onlCloud(t2.cloud_cover))}</span></div>
+        <div class="onl-cand-meta">基线 ${esc(t1.proc_baseline || '—')} / ${esc(t2.proc_baseline || '—')} · S2 L2A</div>
+        ${ON.selected === i ? '<div class="onl-sel-note">✓ 已选定该候选（t1 + t2 同时选中）</div>' : ''}
+      </div>`;
+  }).join('');
+}
+
+function renderOnlineEmptyState(msg) {
+  $('onl-cand-list').innerHTML = '<div class="empty-state compact"><p>暂无候选</p>'
+    + '<p class="empty-sub">' + esc(msg) + '</p></div>';
+  $('onl-cand-count').textContent = '—';
+}
+
+function updateOnlineFetchGate() {
+  const btn = $('onl-fetch');
+  if (!btn) return;
+  const can = ON.selected >= 0 && !!ON.candidates[ON.selected] && !ON.fetching && !ON.discoverBusy;
+  btn.disabled = !can;
+  btn.title = can ? '' : (ON.fetching ? '下载进行中' : '请先在候选清单中点选一个候选影像对');
+}
+
+// 优雅降级：discover 404（端点未启用）或网络失败 → 置灰说明，不弹错误弹窗、不影响离线路径
+function showOnlineDegraded(detail) {
+  ON.degraded = true;
+  stopOnlinePolling();
+  ON.fetching = false;
+  $('onl-degraded').hidden = false;
+  $('onl-body').hidden = true;
+  $('onl-badge').textContent = '未启用';
+  const sub = $('onl-degraded').querySelector('.empty-sub');
+  if (sub && detail) sub.textContent = detail;
+}
+
+function clearOnlineDegraded() {
+  ON.degraded = false;
+  $('onl-degraded').hidden = true;
+  $('onl-body').hidden = false;
+}
+
+// 按 code 展示中文提示（errors.js ERROR_MESSAGES，含 SYS-06/SYS-07），未命中回退后端原文
+function onlineErrText(payload) {
+  const code = payload && payload.code;
+  const zh = errorMessage({ code, message: payload && payload.message });
+  return (code ? '[' + code + '] ' : '') + zh;
+}
+
+async function onlineDiscover() {
+  if (ON.discoverBusy || ON.fetching) return;
+  const errEl = $('onl-discover-err');
+  errEl.textContent = '';
+  const pre = onlinePrecheck();
+  if (pre.err) { errEl.textContent = pre.err; return; }
+
+  ON.discoverBusy = true;
+  ON.selected = -1;
+  ON.candidates = [];
+  const btn = $('onl-discover');
+  btn.disabled = true; btn.textContent = '检索中…';
+  $('onl-discover-loading').hidden = false;
+  $('onl-cand-list').innerHTML = '<div class="status-line"><span class="spinner"></span>正在检索 STAC 候选影像…</div>';
+  $('onl-progress').hidden = true;
+  $('onl-fetch-err').textContent = '';
+  updateOnlineFetchGate();
+  try {
+    const res = await api.discoverScenes({
+      bbox: pre.bbox,
+      t1_window: pre.t1_window,
+      t2_window: pre.t2_window,
+    });
+    if (res.ok) {
+      clearOnlineDegraded();
+      ON.candidates = (res.data && Array.isArray(res.data.candidates)) ? res.data.candidates : [];
+      ON.runId = (res.data && res.data.run_id) || '';
+      ON.selected = -1;
+      renderOnlineCandidates();
+      $('onl-badge').textContent = ON.runId ? ('STAC 在线 · ' + ON.runId.slice(0, 8)) : 'STAC 在线';
+      if (!ON.candidates.length) errEl.textContent = '本次检索无候选影像对，可调整窗口后重试。';
+    } else if (res.unavailable || res.status === 404) {
+      // 端点未启用（裸 404）/ 网络失败 → 置灰降级，绝不弹错误弹窗
+      showOnlineDegraded('discover 返回 404 或网络不可达；当前走离线预置流程，A / B / C / D / E / F 全部功能不受影响。');
+    } else {
+      // 业务错误体 {code,message,run_id}：内联中文提示，不弹全局错误横幅
+      errEl.textContent = onlineErrText(res);
+      renderOnlineEmptyState(onlineErrText(res));
+      $('onl-badge').textContent = 'STAC 在线';
+    }
+  } catch (e) {
+    // 兜底：任何异常也只做置灰降级，不弹错误弹窗、不污染离线路径
+    showOnlineDegraded();
+  } finally {
+    ON.discoverBusy = false;
+    btn.disabled = false; btn.textContent = '查询候选影像 · POST /scene/discover';
+    $('onl-discover-loading').hidden = true;
+    updateOnlineFetchGate();
+  }
+}
+
+function selectOnlineCandidate(i) {
+  if (!ON.candidates[i]) return;
+  ON.selected = i;
+  renderOnlineCandidates();
+  updateOnlineFetchGate();
+}
+
+// ---------- fetch：提交 + 2s 轮询状态 ----------
+function renderOnlineProgress(status, done, total) {
+  const st = String(status || 'PENDING').toUpperCase();
+  const badge = $('onl-status-badge');
+  badge.textContent = st;
+  badge.className = 'onl-status-badge st-' + st;
+  const d = Number(done) || 0, t = Number(total) || 10;
+  $('onl-band').textContent = '波段 ' + d + '/' + t;
+  const pct = Math.max(0, Math.min(100, Math.round((d / t) * 100)));
+  $('onl-bar-fill').style.width = pct + '%';
+  const bar = $('onl-progress').querySelector('.onl-bar');
+  bar.classList.toggle('done', st === 'SUCCESS');
+  bar.classList.toggle('failed', st === 'FAILED');
+  const spinning = st === 'PENDING' || st === 'RUNNING';
+  $('onl-prog-spinner').hidden = !spinning;
+  return { st, d, t };
+}
+
+function stopOnlinePolling() {
+  if (ON.pollTimer) { window.clearInterval(ON.pollTimer); ON.pollTimer = null; }
+  ON.pollBusy = false;
+}
+
+function restoreOnlineFetchButton() {
+  ON.fetching = false;
+  const btn = $('onl-fetch');
+  btn.textContent = '下载并入库 · POST /scene/fetch';
+  updateOnlineFetchGate();
+}
+
+function onlineFetchTerminal(status, data) {
+  stopOnlinePolling();
+  ON.terminal = status;
+  const pg = (data && data.progress) || {};
+  renderOnlineProgress(status, pg.done, pg.total);
+  restoreOnlineFetchButton();
+  if (status === 'SUCCESS') {
+    const ids = (data && data.scene_ids) || {};
+    const ok = $('onl-success');
+    ok.hidden = false;
+    ok.textContent = '✓ 入库完成 · scene t1 ' + (ids.t1 || '—') + ' / t2 ' + (ids.t2 || '—') + '，影像对列表已刷新';
+    showToast('在线取数完成，影像对列表已刷新', 'ok', 4200);
+    // 自动刷新 B 卡影像对列表（loadPairs → api.listScenePairs()）
+    loadPairs();
+  } else {
+    const box = $('onl-failed');
+    box.hidden = false;
+    const err = (data && data.error) || {};
+    box.textContent = onlineErrText({ code: err.code, message: err.message });
+  }
+  // 终态后按钮进度态复位为可再次提交
+  $('onl-fetch').textContent = '下载并入库 · POST /scene/fetch';
+}
+
+async function onlinePollTick() {
+  if (!ON.fetching || ON.pollBusy || !ON.fetchId) return;
+  ON.pollBusy = true;
+  try {
+    // 单次 GET：15s 超时只作用于本次请求；2s 轮询循环在 setInterval 内，不被整体超时中断
+    const res = await api.pollFetch(ON.fetchId);
+    if (!ON.fetching) return; // 已终止/切换任务，丢弃过期回调
+    if (res.ok) {
+      ON.pollFails = 0;
+      const data = res.data || {};
+      const st = String(data.status || '').toUpperCase();
+      const pg = data.progress || {};
+      renderOnlineProgress(st || 'PENDING', pg.done, pg.total);
+      $('onl-fetch').textContent = '下载中… 波段 ' + (Number(pg.done) || 0) + '/' + (Number(pg.total) || 10);
+      if (st === 'SUCCESS' || st === 'FAILED') onlineFetchTerminal(st, data);
+    } else if (res.transient) {
+      // 单次 GET 抖动（网络/5xx/超时）：跳过本次，2s 后继续，绝不中断长下载
+      ON.pollFails += 1;
+      if (ON.pollFails === 3) {
+        $('onl-fetch').textContent = '下载中…（进度查询重试中）';
+      }
+    } else {
+      // 裸 404 / 业务错误体：停止轮询，内联中文提示
+      const detail = res.unavailable ? '后端未启用在线取数或网络不可达' : onlineErrText(res);
+      onlineFetchTerminal('FAILED', { error: { code: res.code, message: detail } });
+    }
+  } catch (e) {
+    // 兜底：单次轮询异常按瞬态处理，继续下一轮
+    ON.pollFails += 1;
+  } finally {
+    ON.pollBusy = false;
+  }
+}
+
+function startOnlinePolling(fetchId, initialStatus) {
+  stopOnlinePolling();
+  ON.fetchId = fetchId;
+  ON.fetching = true;
+  ON.terminal = '';
+  ON.pollFails = 0;
+  ON.pollBusy = false;
+  $('onl-progress').hidden = false;
+  $('onl-success').hidden = true;
+  $('onl-failed').hidden = true;
+  $('onl-fetch-id').textContent = 'fetch_id ' + fetchId;
+  renderOnlineProgress(initialStatus || 'PENDING', 0, 10);
+  $('onl-fetch').textContent = '下载中… 波段 0/10';
+  updateOnlineFetchGate();
+  onlinePollTick();                                  // 立即拉一次，尽快进入 RUNNING
+  ON.pollTimer = window.setInterval(onlinePollTick, ON_POLL_MS); // 之后每 2s 独立轮询
+}
+
+async function onlineFetch() {
+  if (ON.fetching || ON.discoverBusy) return;
+  const errEl = $('onl-fetch-err');
+  errEl.textContent = '';
+  const pre = onlinePrecheck();
+  if (pre.err) { errEl.textContent = pre.err; return; }
+  const c = ON.candidates[ON.selected];
+  if (!c) { errEl.textContent = '请先在候选清单中点选一个候选影像对。'; return; }
+  const rawName = $('onl-name').value;
+  const name = onlineNormalizeName(rawName) || onlineDefaultName();
+  $('onl-name').value = name;
+  renderOnlineNamePreview();
+  if (!ON_NAME_RE.test(name)) { errEl.textContent = '组名不合法：仅允许 [a-z0-9_]（1–40 位）。'; return; }
+
+  const phase = (p) => ({
+    source_id: String((p && p.source_id) || ''),
+    date: String((p && p.date) || ''),
+    proc_baseline: String((p && p.proc_baseline) || ''),
+    cloud_cover: (p && p.cloud_cover != null) ? Number(p.cloud_cover) : null,
+  });
+  const body = {
+    name,
+    bbox: pre.bbox,
+    tile: String(c.tile || ''),
+    t1: phase(c.t1),
+    t2: phase(c.t2),
+  };
+  const btn = $('onl-fetch');
+  btn.disabled = true; btn.textContent = '提交中…';
+  try {
+    const res = await api.startFetch(body);
+    if (res.ok && res.data && res.data.fetch_id) {
+      startOnlinePolling(res.data.fetch_id, res.data.status);
+    } else if (res.unavailable || res.status === 404) {
+      showOnlineDegraded('在线取数接口不可用；当前走离线预置流程，A / B / C / D / E / F 全部功能不受影响。');
+      restoreOnlineFetchButton();
+    } else {
+      errEl.textContent = onlineErrText(res);
+      restoreOnlineFetchButton();
+    }
+  } catch (e) {
+    showOnlineDegraded();
+    restoreOnlineFetchButton();
+  }
+}
+
+function retryOnline() {
+  clearOnlineDegraded();
+  $('onl-badge').textContent = '可选 · 离线优先';
+  $('onl-discover-err').textContent = '';
+  onlineDiscover();
+}
+
 // ===== 事件绑定 =====
 function bindEvents() {
   ['aoi-w', 'aoi-s', 'aoi-e', 'aoi-n'].forEach((id) => {
@@ -749,6 +1124,32 @@ function bindEvents() {
     if (!v) { showToast('请输入要校验的导出格式', 'warn'); return; }
     doExport([v]);
   };
+
+  // 在线取数（可选）卡片事件（B 级扩展 / REQ-02 在线分支）
+  $('onl-discover').onclick = onlineDiscover;
+  $('onl-fetch').onclick = onlineFetch;
+  $('onl-retry').onclick = retryOnline;
+  $('onl-name').addEventListener('input', renderOnlineNamePreview);
+  $('onl-name').addEventListener('blur', () => {
+    const n = onlineNormalizeName($('onl-name').value);
+    if (n) $('onl-name').value = n;
+    renderOnlineNamePreview();
+  });
+  // 日期窗口变化时清空旧的候选/选择，避免用过期候选提交
+  ['onl-t1-start', 'onl-t1-end', 'onl-t2-start', 'onl-t2-end'].forEach((id) => {
+    $(id).addEventListener('change', () => {
+      if (ON.candidates.length && !ON.fetching) {
+        ON.candidates = []; ON.selected = -1;
+        renderOnlineEmptyState('时相窗口已变更，请重新「查询候选影像」。');
+        updateOnlineFetchGate();
+      }
+    });
+  });
+  // 候选清单点选（事件委托）：点选一个候选即同时选定其 t1 与 t2
+  $('onl-cand-list').addEventListener('click', (e) => {
+    const card = e.target.closest && e.target.closest('.onl-cand');
+    if (card) selectOnlineCandidate(Number(card.dataset.idx));
+  });
 }
 
 function bindMapEvents() {
@@ -796,6 +1197,11 @@ function init() {
     demo.PRESET_DATES.map((d) => `<option value="${d}">${d}</option>`).join('');
   $('t1').innerHTML = dateOpts;
   $('t2').innerHTML = dateOpts;
+
+  // 在线取数卡片（可选）默认组名 user_<yyyymmdd>_<hhmm> + AOI 回显
+  $('onl-name').value = onlineDefaultName();
+  renderOnlineNamePreview();
+  refreshOnlineAoiEcho();
 
   // 地图图例（三类色带 · REQ-10）
   $('map-legend').innerHTML = `

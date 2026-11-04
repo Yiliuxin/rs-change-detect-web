@@ -19,6 +19,9 @@ export const ERROR_MESSAGES = {
   'SYS-03': '专题图渲染失败',
   'SYS-04': '数据库连接失败',
   'SYS-05': '处理超时',
+  // B 级扩展（在线取数）：文案逐字照抄 api/app/config/constants.py ERROR_MESSAGES
+  'SYS-06': '在线数据源不可达或影像下载失败，请稍后重试',
+  'SYS-07': '在线取数结果写入对象存储或数据库失败，请稍后重试',
 };
 
 // 后端真实业务错误：{code, message, run_id}。此类错误必须全局展示，不允许被演示降级吞掉。

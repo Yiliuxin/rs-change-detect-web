@@ -26,7 +26,7 @@
       </header>
 
       <main class="layout">
-        <!-- ============ 左栏 · 分析配置（三张常驻卡片，自由流程，无步骤条） ============ -->
+        <!-- ============ 左栏 · 分析配置（四张常驻卡片，自由流程，无步骤条） ============ -->
         <aside class="col col-left" id="col-config" aria-label="分析配置">
 
           <!-- A. AOI 设置（UI-01 / REQ-01） -->
@@ -100,6 +100,75 @@
             <div class="slider-row">
               <input type="range" id="opacity" min="0" max="100" value="85" />
               <span class="slider-val" id="opacity-val">85%</span>
+            </div>
+          </section>
+
+          <!-- D(第四张) · 在线取数（可选）（B 级扩展 / REQ-02 在线分支） -->
+          <section class="card" id="card-online">
+            <div class="card-title">在线取数（可选）<span class="req">REQ-02 · 在线分支</span><span class="hint" id="onl-badge">可选 · 离线优先</span></div>
+
+            <!-- 优雅降级：discover 返回 404（端点未启用）或网络失败时的置灰说明，不弹错误弹窗 -->
+            <div class="onl-degraded" id="onl-degraded" hidden>
+              <div class="empty-icon">🛰️</div>
+              <p>后端未启用在线取数</p>
+              <p class="empty-sub">当前走离线预置流程，A / B / C / D / E / F 全部功能不受影响。如需在线检索，请启用 /scene/discover 并保证 STAC 数据源可达。</p>
+              <button type="button" class="btn btn-sm btn-ghost gap-top" id="onl-retry">重新检测</button>
+            </div>
+
+            <div id="onl-body">
+              <!-- 复用 A 卡当前 AOI（不重复输入；实时回显 bbox） -->
+              <div class="onl-aoi-echo">复用 A 卡当前 AOI（WGS84 bbox）<span class="v" id="onl-aoi-text">—</span></div>
+
+              <!-- 两时相窗口 + 检索按钮 -->
+              <div class="onl-window">
+                <label class="fld" for="onl-t1-start">t1 窗口（较早）</label>
+                <div class="onl-range">
+                  <input type="date" id="onl-t1-start" value="2023-07-01" />
+                  <span class="onl-sep">→</span>
+                  <input type="date" id="onl-t1-end" value="2023-09-30" />
+                </div>
+              </div>
+              <div class="onl-window gap-top-sm">
+                <label class="fld" for="onl-t2-start">t2 窗口（较晚）</label>
+                <div class="onl-range">
+                  <input type="date" id="onl-t2-start" value="2023-11-15" />
+                  <span class="onl-sep">→</span>
+                  <input type="date" id="onl-t2-end" value="2024-01-15" />
+                </div>
+              </div>
+              <button type="button" class="btn btn-block gap-top" id="onl-discover">查询候选影像 · POST /scene/discover</button>
+              <div class="err-line" id="onl-discover-err"></div>
+              <div class="status-line gap-top" id="onl-discover-loading" hidden><span class="spinner"></span>正在检索 STAC 候选影像…</div>
+
+              <!-- 候选清单（tile / 两时相日期 / 云量 / combined_cloud；点选即同时选定 t1+t2） -->
+              <div class="card-subtitle">候选影像对<span class="req">REQ-02</span><span class="hint" id="onl-cand-count">—</span></div>
+              <div class="onl-cand-list" id="onl-cand-list">
+                <div class="empty-state compact"><p>尚未检索</p><p class="empty-sub">设置 t1 / t2 窗口后点击「查询候选影像」。</p></div>
+              </div>
+
+              <!-- 组名 + 下载并入库 -->
+              <div class="card-subtitle">下载并入库<span class="req">REQ-02</span></div>
+              <label class="fld" for="onl-name">组名 name（自动规范化为 [a-z0-9_]）</label>
+              <input type="text" id="onl-name" maxlength="40" spellcheck="false" />
+              <div class="onl-name-preview" id="onl-name-preview"></div>
+              <button type="button" class="btn btn-primary btn-block gap-top" id="onl-fetch" disabled
+                title="请先在候选清单中点选一个候选影像对">下载并入库 · POST /scene/fetch</button>
+              <div class="err-line" id="onl-fetch-err"></div>
+
+              <!-- 进度态：状态徽标 + 「波段 x/10」进度条 + 2s 轮询 -->
+              <div class="onl-progress" id="onl-progress" hidden>
+                <div class="onl-prog-head">
+                  <span class="onl-status-badge" id="onl-status-badge">PENDING</span>
+                  <span class="onl-band" id="onl-band">波段 0/10</span>
+                </div>
+                <div class="onl-bar"><i id="onl-bar-fill" style="width:0%"></i></div>
+                <div class="onl-prog-foot">
+                  <span class="hint" id="onl-fetch-id"></span>
+                  <span class="spinner" id="onl-prog-spinner"></span>
+                </div>
+                <div class="ok-line" id="onl-success" hidden></div>
+                <div class="err-line" id="onl-failed" hidden></div>
+              </div>
             </div>
           </section>
         </aside>

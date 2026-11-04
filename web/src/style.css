@@ -420,3 +420,92 @@ table.tbl td.diag { background: rgba(33, 160, 76, .1); font-weight: 800; }
   .col { padding: 12px; }
   .brand-text small { display: none; }
 }
+
+/* ===== 在线取数卡片（可选 · B 级扩展 / REQ-02 在线分支） ===== */
+.gap-top-sm { margin-top: 8px; }
+
+/* 优雅降级：置灰说明，不弹错误弹窗、不影响离线路径 */
+.onl-degraded {
+  text-align: center; padding: 18px 12px;
+  border: 1px dashed var(--line); border-radius: 10px;
+  background: var(--card2); color: var(--muted2);
+  opacity: .9;
+}
+.onl-degraded p { margin: 0 0 6px; font-size: 12.5px; font-weight: 700; color: var(--muted); }
+.onl-degraded .empty-sub { font-size: 11.5px; font-weight: 400; color: var(--muted2); line-height: 1.6; }
+.onl-degraded .empty-icon { filter: grayscale(1); opacity: .6; }
+
+/* 复用 A 卡 AOI 回显 */
+.onl-aoi-echo {
+  font-size: 11px; color: var(--muted); background: var(--card2);
+  border: 1px dashed var(--line); border-radius: 8px; padding: 6px 9px;
+  line-height: 1.5;
+}
+.onl-aoi-echo .v {
+  display: block; margin-top: 2px; font-variant-numeric: tabular-nums;
+  font-weight: 700; color: var(--accent2); word-break: break-all;
+}
+
+/* 两时相窗口 */
+.onl-window label.fld { margin-bottom: 4px; }
+.onl-range { display: flex; align-items: center; gap: 6px; }
+.onl-range input[type="date"] { flex: 1 1 0; min-width: 0; padding: 7px 8px; font-size: 12px; }
+.onl-sep { flex: 0 0 auto; color: var(--muted2); font-size: 12px; }
+
+/* 组名规范化预览 */
+.onl-name-preview { font-size: 10.5px; color: var(--muted2); margin-top: 4px; min-height: 14px; word-break: break-all; }
+.onl-name-preview code { color: #1c5fb0; background: var(--card2); border-radius: 4px; padding: 0 5px; }
+.onl-name-preview.bad { color: var(--red); }
+
+/* 候选清单 */
+.onl-cand-list {
+  max-height: 240px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 8px;
+  padding-right: 2px;
+  scrollbar-width: thin; scrollbar-color: #c3cfdd transparent;
+}
+.onl-cand-list::-webkit-scrollbar { width: 8px; }
+.onl-cand-list::-webkit-scrollbar-thumb { background: #c3cfdd; border-radius: 8px; }
+
+.onl-cand {
+  border: 1px solid var(--line); border-radius: 9px; padding: 9px;
+  background: #fff; cursor: pointer; transition: all .15s;
+}
+.onl-cand:hover { border-color: var(--accent); box-shadow: 0 2px 10px rgba(31, 122, 224, .12); }
+.onl-cand.selected { border-color: var(--accent); background: var(--accent-soft); box-shadow: 0 0 0 2px rgba(31, 122, 224, .14); }
+.onl-cand-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.onl-cand-head .radio { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--muted2); flex: 0 0 14px; position: relative; background: #fff; }
+.onl-cand.selected .radio { border-color: var(--accent); }
+.onl-cand.selected .radio::after { content: ''; position: absolute; inset: 3px; border-radius: 50%; background: var(--accent); }
+.onl-tile { font-weight: 800; font-size: 12px; font-variant-numeric: tabular-nums; }
+.onl-combined { margin-left: auto; font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.onl-scene { display: flex; align-items: center; gap: 8px; font-size: 11px; padding: 3px 0; border-top: 1px dashed var(--line-soft); }
+.onl-scene .tag { font-size: 9.5px; font-weight: 800; padding: 1px 6px; border-radius: 4px; }
+.onl-scene .dt { font-variant-numeric: tabular-nums; font-weight: 600; }
+.onl-scene .cloud { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+.onl-scene .cloud.high { color: var(--warn); font-weight: 800; }
+.onl-cand-meta { color: var(--muted2); font-size: 10px; margin-top: 3px; word-break: break-all; }
+.onl-sel-note { color: var(--accent2); font-size: 10px; font-weight: 700; margin-top: 4px; }
+
+/* 进度态：状态徽标 + 波段进度条 */
+.onl-progress {
+  margin-top: 12px; padding: 10px; border: 1px solid var(--line);
+  border-radius: 9px; background: var(--card2);
+}
+.onl-prog-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.onl-status-badge {
+  font-size: 10px; font-weight: 800; letter-spacing: .4px; padding: 2px 9px; border-radius: 999px;
+  color: #fff; background: var(--muted2);
+}
+.onl-status-badge.st-PENDING { background: #8494a9; }
+.onl-status-badge.st-RUNNING { background: var(--accent); }
+.onl-status-badge.st-SUCCESS { background: var(--green); }
+.onl-status-badge.st-FAILED { background: var(--red); }
+.onl-band { margin-left: auto; font-size: 11.5px; font-weight: 800; font-variant-numeric: tabular-nums; color: var(--txt); }
+.onl-bar { height: 9px; border-radius: 6px; background: #fff; border: 1px solid var(--line); overflow: hidden; }
+.onl-bar > i { display: block; height: 100%; width: 0%; border-radius: 6px; background: linear-gradient(90deg, var(--accent), #59a6ff); transition: width .4s ease; }
+.onl-bar.done > i { background: linear-gradient(90deg, var(--green), #55c87b); }
+.onl-bar.failed > i { background: linear-gradient(90deg, var(--red), #ea8378); }
+.onl-prog-foot { display: flex; align-items: center; justify-content: space-between; margin-top: 7px; min-height: 14px; }
+.onl-prog-foot .hint { font-size: 10px; word-break: break-all; }
+.onl-prog-foot .spinner { flex: 0 0 13px; }

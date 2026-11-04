@@ -234,3 +234,92 @@ export function exportReport(payload) {
     () => demo.demoExport(payload),
   );
 }
+
+// ==========================================================================
+// B 级扩展（可选）：在线取数 —— REQ-02 在线分支
+//   POST /scene/discover            STAC 检索候选 tile（纯检索，不下载）
+//   POST /scene/fetch               按需下载入库，返回 {fetch_id, status}
+//   GET  /scene/fetch/{fetch_id}    查询进度 {status, progress, error, scene_ids}
+// 与 5 个 MVP 接口并存但相互独立：不做演示降级（在线能力是可选的），
+// 绝不把后端错误抛到全局（由调用方 main.js 在卡片内联优雅降级，不弹错误弹窗）。
+//
+// 统一返回「判别式结果」，调用方无需 try/catch 也能保证零 JS 异常：
+//   { ok:true,  data }                                 成功
+//   { ok:false, unavailable:true, status }            网络失败 / 裸 404（端点未启用）→ 卡片置灰降级
+//   { ok:false, code, message, run_id, status }       后端业务错误体 {code,message,run_id} → 按 code 内联中文
+//   { ok:false, transient:true }                      仅 pollFetch：单次 GET 抖动，可安全跳过本次、继续轮询
+//
+// 超时说明：onlineFetch 的超时「只作用于单次请求」，不包裹任何轮询循环；
+//   - discover：STAC 两次检索（后端各 30s），放宽到 120000ms 避免慢出口误超时；
+//   - startFetch：POST 仅受理建任务（后台线程下载），30000ms；
+//   - pollFetch：沿用 TIMEOUT_MS(15000)，且只作用于这一发 GET；
+//     main.js 每 2s 独立调用一次，长下载不会被 15s 整体掐断。
+// ==========================================================================
+const ONLINE_DISCOVER_TIMEOUT_MS = 120000;
+const ONLINE_FETCH_START_TIMEOUT_MS = 30000;
+
+function onlineFetch(path, options, timeoutMs) {
+  const ctrl = new AbortController();
+  const timer = window.setTimeout(() => ctrl.abort(), timeoutMs);
+  return fetch(BASE + path, { ...options, signal: ctrl.signal })
+    .finally(() => window.clearTimeout(timer));
+}
+
+async function onlineCall(path, options, timeoutMs, transientOnFail) {
+  let resp;
+  try {
+    resp = await onlineFetch(path, options, timeoutMs);
+  } catch (_) {
+    // 8000 未启动 / 单次超时 / 断网
+    return transientOnFail
+      ? { ok: false, transient: true }
+      : { ok: false, unavailable: true, status: 0 };
+  }
+  if (resp.ok) {
+    try {
+      return { ok: true, data: await resp.json() };
+    } catch (_) {
+      return transientOnFail
+        ? { ok: false, transient: true }
+        : { ok: false, unavailable: true, status: resp.status };
+    }
+  }
+  // 5xx 抖动在轮询场景视为可重试（长下载期间偶发代理/网关错误不中断流程）
+  if (transientOnFail && resp.status >= 500) return { ok: false, transient: true };
+  let body = null;
+  try { body = await resp.clone().json(); } catch (_) { /* 非 JSON 错误页 */ }
+  if (body && body.code) {
+    return {
+      ok: false,
+      code: body.code,
+      message: body.message,
+      run_id: body.run_id || null,
+      status: resp.status,
+    };
+  }
+  // 裸 404 / 405 / 非契约错误页：在线端点未启用 → 优雅降级
+  return transientOnFail
+    ? { ok: false, transient: true }
+    : { ok: false, unavailable: true, status: resp.status };
+}
+
+// REQ-02 在线分支：STAC 检索候选（复用 A 卡 AOI 的 bbox / aoi_geom + 两时相窗口）
+export function discoverScenes(payload) {
+  return onlineCall('/scene/discover', jsonOptions(payload), ONLINE_DISCOVER_TIMEOUT_MS, false);
+}
+
+// REQ-02 在线分支：按需下载入库（返回 fetch_id 后立即由轮询跟进）
+export function startFetch(payload) {
+  return onlineCall('/scene/fetch', jsonOptions(payload), ONLINE_FETCH_START_TIMEOUT_MS, false);
+}
+
+// REQ-02 在线分支：单次进度查询。15s 超时只作用于这一发 GET；
+// 轮询循环在 main.js（每 2s 调一次），不会被 15s 包住导致长下载被中断。
+export function pollFetch(fetchId) {
+  return onlineCall(
+    '/scene/fetch/' + encodeURIComponent(fetchId),
+    { method: 'GET', headers: { 'Content-Type': 'application/json' } },
+    TIMEOUT_MS,
+    true,
+  );
+}
