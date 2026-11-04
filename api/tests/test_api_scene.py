@@ -21,12 +21,12 @@ def _select_one(client):
 
 @pytest.mark.req("REQ-02")
 @pytest.mark.req("REQ-04")
-def test_scene_match_get_no_query_returns_all_six(client):
-    """无 query → find_all() 返回 6 条 S2 记录，口径/基线全部合法。"""
+def test_scene_match_get_no_query_returns_all(client):
+    """无 query → find_all() 返回全部 S2 记录（预置 6 景，扩容后自动适配），口径/基线全部合法。"""
     r = client.get(URL)
     assert r.status_code == 200, r.text
     b = r.json()
-    assert b["count"] == 6 and len(b["scenes"]) == 6
+    assert b["count"] == len(b["scenes"]) and b["count"] >= 6  # 数据量随预置影像对扩容，不写死
     assert b["aoi_id"] is None and b["run_id"] is None
     assert b["block_size"] == BLOCK_SIZE
     assert b["sensor"] == "S2"

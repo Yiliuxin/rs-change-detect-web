@@ -85,6 +85,6 @@ def test_cog_path_and_object_url_convention_unchanged(client):
     r = client.get("/api/v1/scene/match")
     assert r.status_code == 200, r.text
     scenes = r.json()["scenes"]
-    assert len(scenes) == 6
+    assert len(scenes) >= 6  # 预置影像对可扩容（离线 6→22 景），口径校验与数量解耦
     assert all(s["cog_path"].startswith("minio://scenes/") for s in scenes)
     assert object_url(COG_BUCKET, "pair_poyang/t1/") == "minio://scenes/pair_poyang/t1/"
