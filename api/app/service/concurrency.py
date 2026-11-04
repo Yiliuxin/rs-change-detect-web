@@ -21,7 +21,7 @@ __all__ = ["serial"]
 
 @contextmanager
 def serial(run_id: Optional[str] = None) -> Iterator[None]:
-    """占用唯一处理槽；已被占用 → EX7（429）。"""
+    """占用唯一处理槽；已被占用 → EX7（409）。"""
     acquired = _semaphore.acquire(blocking=False)
     if not acquired:
         raise ApiError("EX7", run_id=run_id)

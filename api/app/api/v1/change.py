@@ -41,8 +41,8 @@ class ChangeResponse(BaseModel):
 @router.post(
     "/change",
     response_model=ChangeResponse,
-    responses={400: {"model": ErrorResponse, "description": "EX3/EX4/EX8/EX9/EX11"},
-               429: {"model": ErrorResponse, "description": "EX7 并发超限"},
+    responses={400: {"model": ErrorResponse, "description": "EX3/EX4/EX11"},
+               409: {"model": ErrorResponse, "description": "EX7 并发超限 / EX8 口径混用 / EX9 基线不可判定"},
                500: {"model": ErrorResponse, "description": "SYS-01/02/03/04/05"}},
     summary="变化检测主流程",
 )

@@ -269,7 +269,7 @@ def test_mvp_max_concurrency_one_and_ex7_on_reentry():
         with pytest.raises(ApiError) as e:
             with serial("inner"):
                 pass
-        assert e.value.code == "EX7" and e.value.http_status == 429
+        assert e.value.code == "EX7" and e.value.http_status == 409
     with serial("again"):        # 释放后可再次占用（同步阻塞，不排队）
         assert True
 
@@ -281,9 +281,9 @@ def test_mvp_max_concurrency_one_and_ex7_on_reentry():
 def test_error_mapping_matches_hld_5_2():
     assert CODE_HTTP["EX2"] == 404
     assert CODE_HTTP["EX1"] == CODE_HTTP["EX3"] == CODE_HTTP["EX10"] == 400
-    assert CODE_HTTP["EX8"] == 400 and CODE_HTTP["EX9"] == 400
+    assert CODE_HTTP["EX8"] == 409 and CODE_HTTP["EX9"] == 409
     assert CODE_HTTP["EX6"] == 400 and CODE_HTTP["EX11"] == 400
-    assert CODE_HTTP["EX7"] == 429
+    assert CODE_HTTP["EX7"] == 409
     assert all(CODE_HTTP[c] == 500
                for c in ("SYS-01", "SYS-02", "SYS-03", "SYS-04", "SYS-05"))
     e = ApiError("EX10", run_id="r-1")

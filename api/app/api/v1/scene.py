@@ -70,8 +70,9 @@ class ScenePairListResponse(BaseModel):
 @router.post(
     "/match",
     response_model=SceneMatchResponse,
-    responses={400: {"model": ErrorResponse, "description": "EX8 辐射口径混用 / EX9 基线不可判定"},
+    responses={400: {"model": ErrorResponse, "description": "其余 EX* 业务错误（400）"},
                404: {"model": ErrorResponse, "description": "EX2 无匹配影像对"},
+               409: {"model": ErrorResponse, "description": "EX8 口径混用 / EX9 基线不可判定"},
                500: {"model": ErrorResponse, "description": "SYS-01 COG 读取失败"}},
     summary="双时相场景匹配与辐射口径确认（POST 契约）",
 )
@@ -86,8 +87,9 @@ def match_scene(payload: SceneMatchRequest) -> SceneMatchResponse:
 @router.get(
     "/match",
     response_model=ScenePairListResponse,
-    responses={400: {"model": ErrorResponse, "description": "EX8 口径混用 / EX9 基线不可判定"},
-               404: {"model": ErrorResponse, "description": "EX2 无匹配影像对"}},
+    responses={400: {"model": ErrorResponse, "description": "其余 EX* 业务错误（400）"},
+               404: {"model": ErrorResponse, "description": "EX2 无匹配影像对"},
+               409: {"model": ErrorResponse, "description": "EX8 口径混用 / EX9 基线不可判定"}},
     summary="查询匹配影像对清单（GET）",
 )
 def list_matched_scenes(

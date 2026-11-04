@@ -38,7 +38,7 @@ class ReportExportResponse(BaseModel):
     "/export",
     response_model=ReportExportResponse,
     responses={400: {"model": ErrorResponse, "description": "EX6 导出格式不支持"},
-               429: {"model": ErrorResponse, "description": "EX7 并发超限"},
+               409: {"model": ErrorResponse, "description": "EX7 并发超限"},
                500: {"model": ErrorResponse, "description": "SYS-*"}},
     summary="报告导出",
 )
