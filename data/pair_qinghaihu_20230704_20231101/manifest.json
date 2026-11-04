@@ -1,0 +1,46 @@
+{
+  "name": "qinghaihu",
+  "label": "青海湖 高寒草甸 生长期→枯黄期(湖岸草甸季相)",
+  "tile": "47SNB",
+  "aoi_wgs84": [
+    99.6,
+    37.05,
+    99.7,
+    37.15
+  ],
+  "aoi_span_deg": 0.1,
+  "center": [
+    99.65,
+    37.1
+  ],
+  "scenes": {
+    "t1": {
+      "source_id": "S2A_47SNB_20230704_0_L2A",
+      "date": "2023-07-04",
+      "cloud_cover": 0.036951,
+      "processing_baseline": "05.09",
+      "phase": "生长期(2023 夏)",
+      "local_files": [
+        "t1_B02.tif",
+        "t1_B03.tif",
+        "t1_B04.tif",
+        "t1_B08.tif",
+        "t1_SCL.tif"
+      ]
+    },
+    "t2": {
+      "source_id": "S2A_47SNB_20231101_0_L2A",
+      "date": "2023-11-01",
+      "cloud_cover": 0.000405,
+      "processing_baseline": "05.09",
+      "phase": "枯黄期(2023 秋末)",
+      "local_files": [
+        "t2_B02.tif",
+        "t2_B03.tif",
+        "t2_B04.tif",
+        "t2_B08.tif",
+        "t2_SCL.tif"
+      ]
+    }
+  }
+}

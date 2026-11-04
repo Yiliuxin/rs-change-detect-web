@@ -1,0 +1,46 @@
+{
+  "name": "xilingol",
+  "label": "锡林郭勒草原 草生长期→枯黄期(草甸季相)",
+  "tile": "50TMP",
+  "aoi_wgs84": [
+    116.0,
+    43.5,
+    116.1,
+    43.6
+  ],
+  "aoi_span_deg": 0.1,
+  "center": [
+    116.05,
+    43.55
+  ],
+  "scenes": {
+    "t1": {
+      "source_id": "S2A_50TMP_20230818_1_L2A",
+      "date": "2023-08-18",
+      "cloud_cover": 0,
+      "processing_baseline": "05.11",
+      "phase": "草生长期(2023 夏)",
+      "local_files": [
+        "t1_B02.tif",
+        "t1_B03.tif",
+        "t1_B04.tif",
+        "t1_B08.tif",
+        "t1_SCL.tif"
+      ]
+    },
+    "t2": {
+      "source_id": "S2B_50TMP_20231022_0_L2A",
+      "date": "2023-10-22",
+      "cloud_cover": 0.00179,
+      "processing_baseline": "05.09",
+      "phase": "枯黄期(2023 秋冬)",
+      "local_files": [
+        "t2_B02.tif",
+        "t2_B03.tif",
+        "t2_B04.tif",
+        "t2_B08.tif",
+        "t2_SCL.tif"
+      ]
+    }
+  }
+}

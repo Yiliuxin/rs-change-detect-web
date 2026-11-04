@@ -1,0 +1,46 @@
+{
+  "name": "hetao",
+  "label": "河套灌区 作物生长期→收割后(灌溉农业)",
+  "tile": "49TBF",
+  "aoi_wgs84": [
+    108.55,
+    40.75,
+    108.65,
+    40.85
+  ],
+  "aoi_span_deg": 0.1,
+  "center": [
+    108.6,
+    40.8
+  ],
+  "scenes": {
+    "t1": {
+      "source_id": "S2A_49TBF_20230903_0_L2A",
+      "date": "2023-09-03",
+      "cloud_cover": 0.000315,
+      "processing_baseline": "05.09",
+      "phase": "作物生长期(2023 夏末)",
+      "local_files": [
+        "t1_B02.tif",
+        "t1_B03.tif",
+        "t1_B04.tif",
+        "t1_B08.tif",
+        "t1_SCL.tif"
+      ]
+    },
+    "t2": {
+      "source_id": "S2A_49TBF_20231013_0_L2A",
+      "date": "2023-10-13",
+      "cloud_cover": 0.005395,
+      "processing_baseline": "05.09",
+      "phase": "收割后(2023 秋)",
+      "local_files": [
+        "t2_B02.tif",
+        "t2_B03.tif",
+        "t2_B04.tif",
+        "t2_B08.tif",
+        "t2_SCL.tif"
+      ]
+    }
+  }
+}

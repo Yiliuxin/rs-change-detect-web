@@ -1,0 +1,46 @@
+{
+  "name": "north_china",
+  "label": "华北平原 夏玉米→冬小麦(农田轮作)",
+  "tile": "50SKF",
+  "aoi_wgs84": [
+    114.5,
+    36.55,
+    114.6,
+    36.65
+  ],
+  "aoi_span_deg": 0.1,
+  "center": [
+    114.55,
+    36.6
+  ],
+  "scenes": {
+    "t1": {
+      "source_id": "S2A_50SKF_20230726_0_L2A",
+      "date": "2023-07-26",
+      "cloud_cover": 0.074223,
+      "processing_baseline": "05.09",
+      "phase": "夏玉米生长期",
+      "local_files": [
+        "t1_B02.tif",
+        "t1_B03.tif",
+        "t1_B04.tif",
+        "t1_B08.tif",
+        "t1_SCL.tif"
+      ]
+    },
+    "t2": {
+      "source_id": "S2A_50SKF_20240112_0_L2A",
+      "date": "2024-01-12",
+      "cloud_cover": 0.008248,
+      "processing_baseline": "05.10",
+      "phase": "冬小麦苗期(冬)",
+      "local_files": [
+        "t2_B02.tif",
+        "t2_B03.tif",
+        "t2_B04.tif",
+        "t2_B08.tif",
+        "t2_SCL.tif"
+      ]
+    }
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "name": "yellow_delta",
+  "label": "黄河三角洲 生长季→枯水期(湿地演变)",
+  "tile": "50SPG",
+  "aoi_wgs84": [
+    119.0,
+    37.7,
+    119.1,
+    37.8
+  ],
+  "aoi_span_deg": 0.1,
+  "center": [
+    119.05,
+    37.75
+  ],
+  "scenes": {
+    "t1": {
+      "source_id": "S2A_50SPG_20230630_0_L2A",
+      "date": "2023-06-30",
+      "cloud_cover": 0.036804,
+      "processing_baseline": "05.09",
+      "phase": "生长季(2023 夏)",
+      "local_files": [
+        "t1_B02.tif",
+        "t1_B03.tif",
+        "t1_B04.tif",
+        "t1_B08.tif",
+        "t1_SCL.tif"
+      ]
+    },
+    "t2": {
+      "source_id": "S2B_50SPG_20231102_0_L2A",
+      "date": "2023-11-02",
+      "cloud_cover": 0.182212,
+      "processing_baseline": "05.09",
+      "phase": "枯水期(2023 冬)",
+      "local_files": [
+        "t2_B02.tif",
+        "t2_B03.tif",
+        "t2_B04.tif",
+        "t2_B08.tif",
+        "t2_SCL.tif"
+      ]
+    }
+  }
+}

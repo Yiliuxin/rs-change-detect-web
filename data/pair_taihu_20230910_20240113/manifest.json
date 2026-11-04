@@ -1,0 +1,46 @@
+{
+  "name": "taihu",
+  "label": "太湖 夏季作物→冬季裸地(太湖流域农田季相)",
+  "tile": "50RQV",
+  "aoi_wgs84": [
+    119.9,
+    31.35,
+    120.0,
+    31.45
+  ],
+  "aoi_span_deg": 0.1,
+  "center": [
+    119.95,
+    31.4
+  ],
+  "scenes": {
+    "t1": {
+      "source_id": "S2B_50RQV_20230910_0_L2A",
+      "date": "2023-09-10",
+      "cloud_cover": 0.30267,
+      "processing_baseline": "05.09",
+      "phase": "作物生长期(2023 夏)",
+      "local_files": [
+        "t1_B02.tif",
+        "t1_B03.tif",
+        "t1_B04.tif",
+        "t1_B08.tif",
+        "t1_SCL.tif"
+      ]
+    },
+    "t2": {
+      "source_id": "S2A_50RQV_20240113_0_L2A",
+      "date": "2024-01-13",
+      "cloud_cover": 0.002449,
+      "processing_baseline": "05.10",
+      "phase": "冬季裸地(2023/24 冬)",
+      "local_files": [
+        "t2_B02.tif",
+        "t2_B03.tif",
+        "t2_B04.tif",
+        "t2_B08.tif",
+        "t2_SCL.tif"
+      ]
+    }
+  }
+}
