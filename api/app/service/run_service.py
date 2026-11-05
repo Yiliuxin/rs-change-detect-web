@@ -9,14 +9,26 @@ CSV 始终给出增强 / 退化 / 稳定三行（缺数据记 0，不伪造）�
 """
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Any, Dict, List, Optional
 
+import rasterio
+
 from app.algorithm.change_detector import CHANGE_LABELS_ZH
+from app.algorithm.geotransform import raster_meta
 from app.api.errors import ApiError, as_api_error
 from app.repository import run_repo, task_repo
 from app.service.cog_source import parse_cog_path
 from app.service.common import ARTIFACT_MEDIA_TYPES, RUNS_ROOT, artifact_url
+
+logger = logging.getLogger(__name__)
+
+# 裁切栅格候选：主名 + 按指数归档名（与 ARTIFACT_MEDIA_TYPES / artifact_manifest 同源）。
+# 旧 run 若没有这些产物，raster 如实返回 null；_cog/ 下的是原始未裁切 COG，不作为来源。
+_RASTER_ARTIFACTS: tuple = (
+    "change.tif", "change_ndvi.tif", "change_ndwi.tif",
+)
 
 __all__ = [
     "DEFAULT_PAGE_LIMIT", "MAX_PAGE_LIMIT", "CSV_BOM", "CSV_HEADER",
@@ -112,6 +124,32 @@ def _artifacts(run_id: str) -> List[dict]:
     ]
 
 
+def _raster_meta(run_id: str) -> Optional[dict]:
+    """读取该 run 裁切栅格的 profile/geotransform（REQ-14 图上点选用）。
+
+    只认 ``runs/<规范化 run_id>/`` 下已落盘的结果 GeoTIFF；文件缺失、损坏或
+    profile 无效一律返回 ``None``（详情不报错，前端按无底图元信息处理）。
+    """
+    try:
+        canonical = str(uuid.UUID(run_id))
+    except (ValueError, AttributeError, TypeError):
+        return None
+    out = RUNS_ROOT / canonical
+    for name in _RASTER_ARTIFACTS:
+        path = out / name
+        if not path.is_file():
+            continue
+        try:
+            with rasterio.open(str(path)) as ds:
+                meta = raster_meta(ds)
+        except Exception as exc:  # noqa: BLE001 - 损坏栅格不阻断详情
+            logger.warning("run=%s 栅格 %s 读取失败：%s", run_id, name, exc)
+            continue
+        if meta:
+            return meta
+    return None
+
+
 def list_runs(limit: int = DEFAULT_PAGE_LIMIT, offset: int = 0) -> dict:
     """GET /api/v1/runs：分页列表，按 created_at 倒序（REQ-14）。"""
     try:
@@ -138,7 +176,10 @@ def list_runs(limit: int = DEFAULT_PAGE_LIMIT, offset: int = 0) -> dict:
 
 
 def detail(run_id: str) -> dict:
-    """GET /api/v1/runs/{run_id}：摘要 + params_snapshot 全量 + 全部产物 URL。"""
+    """GET /api/v1/runs/{run_id}：摘要 + params_snapshot 全量 + 全部产物 URL + raster。
+
+    raster 由裁切栅格 profile 读取；产物缺失/损坏时为 null（不报错、不伪造）。
+    """
     try:
         row = run_repo.get_run(run_id)
         if not row:
@@ -147,6 +188,7 @@ def detail(run_id: str) -> dict:
         item = _summary(row)
         item["params_snapshot"] = dict(row.get("params_snapshot") or {})
         item["artifacts"] = _artifacts(run_id)
+        item["raster"] = _raster_meta(run_id)
         return item
     except ApiError:
         raise

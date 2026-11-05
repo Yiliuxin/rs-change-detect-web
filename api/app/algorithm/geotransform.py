@@ -5,15 +5,16 @@
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
-from typing import Iterable, Sequence, Tuple
+from typing import Dict, Iterable, Optional, Sequence, Tuple
 
 import rasterio
 from rasterio.crs import CRS
 from rasterio.windows import Window, from_bounds
 from rasterio.warp import transform as warp_transform
 
-from app.config.constants import AOI_MAX_SPAN_DEG
+from app.config.constants import AOI_MAX_SPAN_DEG, DEG_TO_KM
 
 WGS84 = CRS.from_epsg(4326)
 
@@ -116,3 +117,27 @@ def iter_corners(bbox: BBox) -> Iterable[Tuple[float, float]]:
         (bbox.maxx, bbox.maxy),
         (bbox.maxx, bbox.miny),
     )
+
+
+def raster_meta(ds: rasterio.DatasetReader) -> Optional[Dict[str, object]]:
+    """裁切栅格 profile → ``{width, height, pixel_size_m}``；无法判定时返回 None。
+
+    ``width`` / ``height`` 取 ``ds.width`` / ``ds.height``；``pixel_size_m`` 由
+    ``pixel_area_m2(ds)`` 开方得到（米制投影 CRS 下即像元边长，本项目 COG 为 UTM
+    10 m）。CRS 为地理坐标时单位为度，按栅格中心纬度用 ``DEG_TO_KM`` 折算成米。
+    纯函数：不抛异常，供 run 详情「取不到返回 null」语义复用。
+    """
+    try:
+        width, height = int(ds.width), int(ds.height)
+        area = float(pixel_area_m2(ds))
+        if width <= 0 or height <= 0 or not math.isfinite(area) or area <= 0:
+            return None
+        size = math.sqrt(area)
+        if ds.crs is not None and ds.crs.is_geographic:
+            _cx, cy = ds.xy(height // 2, width // 2)
+            size *= DEG_TO_KM * 1000.0 * abs(math.cos(math.radians(float(cy))))
+        if not math.isfinite(size) or size <= 0:
+            return None
+        return {"width": width, "height": height, "pixel_size_m": float(size)}
+    except Exception:  # noqa: BLE001 - profile 缺失/异常一律返回 None，不阻断调用方
+        return None

@@ -2,7 +2,8 @@
 """路由：GET /api/v1/runs 与 GET /api/v1/runs/{run_id}（REQ-13 / REQ-14）。
 
 薄封装：Query 参数 → run_service 编排 → 统一异常封装。列表按 created_at 倒序
-分页；详情含 params_snapshot 全量与全部产物下载 URL；run 不存在 → EX2 404。
+分页；详情含 params_snapshot 全量、全部产物下载 URL（含 t1/t2_composite.png）
+与裁切栅格 raster 元信息（取不到为 null）；run 不存在 → EX2 404。
 """
 from __future__ import annotations
 
@@ -55,11 +56,21 @@ class RunArtifact(BaseModel):
     size: int = 0
 
 
+class RasterMeta(BaseModel):
+    """裁切栅格元信息（样本图上点选 / 卷帘对齐用）；取不到时详情为 null。"""
+
+    width: int = Field(..., description="裁切栅格列数（像元）")
+    height: int = Field(..., description="裁切栅格行数（像元）")
+    pixel_size_m: float = Field(..., description="像元地面尺寸（米）")
+
+
 class RunDetailResponse(RunSummary):
-    """历史 run 详情：摘要 + 参数快照全量 + 全部产物 URL。"""
+    """历史 run 详情：摘要 + 参数快照全量 + 全部产物 URL + 栅格元信息。"""
 
     params_snapshot: Dict[str, Any] = Field(default_factory=dict)
     artifacts: List[RunArtifact] = Field(default_factory=list)
+    raster: Optional[RasterMeta] = Field(
+        None, description="裁切栅格 {width,height,pixel_size_m}；产物缺失时为 null")
 
 
 @router.get(

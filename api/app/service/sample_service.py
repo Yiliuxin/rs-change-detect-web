@@ -10,17 +10,19 @@
 """
 from __future__ import annotations
 
+import math
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import rasterio
 from rasterio.warp import transform as warp_transform
 
 from app.algorithm.accuracy import SampleInsufficientError, accuracy_report
+from app.algorithm.geotransform import BBox, lonlat_to_pixel, pixel_to_lonlat
 from app.api.errors import ApiError, as_api_error
 from app.config.constants import MIN_SAMPLES_PER_CLASS
-from app.repository import sample_repo, task_repo
+from app.repository import aoi_repo, sample_repo, task_repo
 from app.service.common import run_dir
 
 # 中文参考类别 → 三类编码（与 change_detector.CHANGE_CODES 一致）
@@ -28,7 +30,7 @@ REF_CLASS_CODE = {"增强": 1, "退化": 2, "稳定": 3}
 VALID_CLASSES = ("增强", "退化", "稳定")
 
 __all__ = ["REF_CLASS_CODE", "VALID_CLASSES", "open_change", "build_xy",
-           "accuracy_for_run", "submit"]
+           "accuracy_for_run", "submit", "from_lnglat"]
 
 
 def open_change(run_id: str) -> rasterio.DatasetReader:
@@ -64,6 +66,91 @@ def _locate(ds: rasterio.DatasetReader, x: float, y: float) -> Tuple[int, int, f
     return int(row), int(col), lon, lat
 
 
+# --------------------------------------------------------------------------- #
+# 两条样本提交路径（像元点选 / 经纬度点选）共用的校验与入库构件（REQ-09）
+# --------------------------------------------------------------------------- #
+def _require_task(run_id: str) -> dict:
+    """run 存在性校验：task 不存在 → EX2 404。"""
+    task = task_repo.get_task(run_id)
+    if not task:
+        raise ApiError("EX2", run_id=run_id,
+                       detail=f"run_id 无对应 task：{run_id}")
+    return task
+
+
+def _validate_ref_classes(run_id: str, samples: List[dict]) -> None:
+    """参考类别合法性（DB CHECK 亦是三类，此处提前给出明确 400）。"""
+    for s in samples:
+        if s.get("ref_class") not in VALID_CLASSES:
+            raise ApiError("EX10", run_id=run_id, http_status=400,
+                           detail=f"非法 ref_class：{s.get('ref_class')!r}")
+
+
+def _aoi_bbox(task: dict) -> Optional[Tuple[float, float, float, float]]:
+    """AOI WGS84 外接矩形：优先参数快照，回退 aoi 表几何（取不到返回 None）。"""
+    seq = (task.get("params_snapshot") or {}).get("aoi_wgs84")
+    if seq:
+        try:
+            return BBox.from_sequence(list(seq)).as_tuple()
+        except (TypeError, ValueError):
+            pass
+    return aoi_repo.find_bbox(task["aoi_id"])
+
+
+def _locate_lonlat(ds: rasterio.DatasetReader, run_id: str,
+                   lng: float, lat: float,
+                   bbox: Optional[Tuple[float, float, float, float]]) -> Tuple[int, int, float, float]:
+    """经纬度 → (row, col) 并复算越界（AOI 外 → 400 EX12）。
+
+    用 ``geotransform.lonlat_to_pixel`` 反算像元；像元必须落在裁切栅格范围内。
+    再把像元中心用 ``pixel_to_lonlat`` 回投 WGS84，与 AOI 外接矩形复算一次
+    （容差 1 个像元），避免仅凭前端坐标或仅凭栅格窗口（窗口按 AOI 外扩）漏判。
+    """
+    if not (math.isfinite(lng) and math.isfinite(lat)
+            and -180.0 <= lng <= 180.0 and -90.0 <= lat <= 90.0):
+        raise ApiError("EX12", run_id=run_id,
+                       detail=f"经纬度非法：lng={lng!r}, lat={lat!r}")
+    row, col = lonlat_to_pixel(ds, lng, lat)
+    if not (0 <= row < ds.height and 0 <= col < ds.width):
+        raise ApiError("EX12", run_id=run_id,
+                       detail=f"点选位置在 AOI 外：像元 (col={col}, row={row}) "
+                              f"超出裁切栅格 {ds.width}×{ds.height}")
+    if bbox:
+        minx, miny, maxx, maxy = bbox
+        tol_x = abs(maxx - minx) / max(ds.width, 1)
+        tol_y = abs(maxy - miny) / max(ds.height, 1)
+        px_lng, px_lat = pixel_to_lonlat(ds, row, col)
+        for x, y in ((lng, lat), (px_lng, px_lat)):
+            if not (minx - tol_x <= x <= maxx + tol_x
+                    and miny - tol_y <= y <= maxy + tol_y):
+                raise ApiError("EX12", run_id=run_id,
+                               detail=f"点选位置在 AOI 外：({x:.6f}, {y:.6f}) "
+                                      f"不在 {bbox} 内")
+    return int(row), int(col), lng, lat
+
+
+def _sample_rows(ds: rasterio.DatasetReader, run_id: str, samples: List[dict],
+                 *, lonlat: bool = False,
+                 bbox: Optional[Tuple[float, float, float, float]] = None) -> List[Dict]:
+    """样本请求 → 待入库行；像元/经纬度两条路径共用同一字段口径与 label 缺省。"""
+    rows: List[Dict] = []
+    for s in samples:
+        ref = s["ref_class"]
+        if lonlat:
+            row, col, lon, lat = _locate_lonlat(
+                ds, run_id, float(s["lng"]), float(s["lat"]), bbox)
+        else:
+            row, col, lon, lat = _locate(ds, float(s["x"]), float(s["y"]))
+            # 既有 /accuracy/sample 口径保持不变（负值按左上边界截断）
+            col, row = max(0, col), max(0, row)
+        rows.append({
+            "lon": lon, "lat": lat,
+            "px_x": col, "px_y": row,
+            "ref_class": ref, "label": s.get("label") or ref,
+        })
+    return rows
+
+
 def build_xy(run_id: str, ds: rasterio.DatasetReader) -> Tuple[np.ndarray, np.ndarray]:
     """由累计样本 + change.tif 组装 (y_true, y_pred)（过滤无效像元）。"""
     change = ds.read(1)
@@ -96,27 +183,13 @@ def accuracy_for_run(run_id: str, ds: rasterio.DatasetReader,
 
 
 def submit(run_id: str, samples: List[dict]) -> dict:
-    """样本提交与精度评价（REQ-09）。"""
+    """样本提交与精度评价（REQ-09）；校验/定位/入库与 ``from_lnglat`` 共用构件。"""
     try:
-        if not task_repo.get_task(run_id):
-            raise ApiError("EX2", run_id=run_id,
-                           detail=f"run_id 无对应 task：{run_id}")
-
-        # 参考类别合法性（DB CHECK 亦是三类，此处提前给出明确 400）
-        for s in samples:
-            if s.get("ref_class") not in VALID_CLASSES:
-                raise ApiError("EX10", run_id=run_id, http_status=400,
-                               detail=f"非法 ref_class：{s.get('ref_class')!r}")
+        _require_task(run_id)
+        _validate_ref_classes(run_id, samples)
 
         with open_change(run_id) as ds:
-            rows = []
-            for s in samples:
-                row, col, lon, lat = _locate(ds, float(s["x"]), float(s["y"]))
-                rows.append({
-                    "lon": lon, "lat": lat,
-                    "px_x": max(0, col), "px_y": max(0, row),
-                    "ref_class": s["ref_class"], "label": s["ref_class"],
-                })
+            rows = _sample_rows(ds, run_id, samples)
             sample_repo.insert_samples(run_id, rows)
 
             # 累计每类样本数，任一类 < MIN_SAMPLES_PER_CLASS → EX10（禁用计算精度）
@@ -137,6 +210,34 @@ def submit(run_id: str, samples: List[dict]) -> dict:
                 "kappa": acc["kappa"],
                 "note": acc["note"],
             }
+    except ApiError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise as_api_error(exc, run_id=run_id) from exc
+
+
+def from_lnglat(run_id: str, lng: float, lat: float,
+                ref_class: str, label: Optional[str] = None) -> dict:
+    """POST /api/v1/sample/from_lnglat（REQ-09）：经纬度点选 → 像元坐标 → 入库。
+
+    只落库并返回坐标，不触发 /accuracy/sample 的累计精度评价（EX10 计数门槛
+    仍归既有接口）；AOI 外 → 400 EX12，非法 ref_class → 400 EX10。
+    """
+    try:
+        task = _require_task(run_id)
+        item = {"lng": float(lng), "lat": float(lat),
+                "ref_class": ref_class, "label": label}
+        _validate_ref_classes(run_id, [item])
+        bbox = _aoi_bbox(task)
+        with open_change(run_id) as ds:
+            rows = _sample_rows(ds, run_id, [item], lonlat=True, bbox=bbox)
+            sample_id = sample_repo.insert_one(run_id, rows[0])
+        row = rows[0]
+        return {
+            "sample_id": sample_id,
+            "px_x": int(row["px_x"]), "px_y": int(row["px_y"]),
+            "ref_class": row["ref_class"],
+        }
     except ApiError:
         raise
     except Exception as exc:  # noqa: BLE001

@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from app.api.errors import install as install_error_handlers
-from app.api.v1 import accuracy, aoi, change, online, report, runs, scene
+from app.api.v1 import accuracy, aoi, change, online, report, runs, sample, scene
 from app.config.storage import COG_BUCKET, RESULT_BUCKET, ensure_buckets, get_client
 from app.service.common import ARTIFACT_MEDIA_TYPES, ARTIFACT_URL_PREFIX, RUNS_ROOT
 
@@ -64,8 +64,9 @@ app.add_middleware(
 )
 
 # 注册 5 个 REST 路由（HLD 2.2.3.1 ~ 2.2.3.5）+ 历史 run 查询（REQ-14）
+# + 样本图上点选（REQ-09，独立路径，不改 5 个接口语义）
 for _router in (aoi.router, scene.router, change.router, accuracy.router,
-                report.router, runs.router):
+                report.router, runs.router, sample.router):
     app.include_router(_router, prefix=API_V1_PREFIX)
 
 # B 级扩展：在线取数（STAC discover + 按需下载入库），与 5 个 MVP 路由并存不改

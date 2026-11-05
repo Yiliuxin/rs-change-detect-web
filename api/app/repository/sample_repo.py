@@ -11,29 +11,42 @@ from typing import Dict, List
 
 from app.repository.db import db_cursor
 
-__all__ = ["insert_samples", "list_samples", "count_by_class"]
+__all__ = ["insert_one", "insert_samples", "list_samples", "count_by_class"]
+
+
+def _insert(cur, run_id: str, r: Dict) -> str:
+    """单行 INSERT 的唯一实现（既有批量提交与经纬度点选共用），返回 sample_id。"""
+    cur.execute(
+        """
+        INSERT INTO sample
+            (sample_id, run_id, geom, px_x, px_y, ref_class, label)
+        VALUES (%s, %s, ST_SetSRID(ST_MakePoint(%s, %s), 4326),
+                %s, %s, %s, %s)
+        RETURNING sample_id::text AS sample_id
+        """,
+        (
+            str(uuid.uuid4()), run_id,
+            float(r["lon"]), float(r["lat"]),
+            int(r["px_x"]), int(r["px_y"]),
+            str(r["ref_class"]), r.get("label"),
+        ),
+    )
+    return str(cur.fetchone()["sample_id"])
+
+
+def insert_one(run_id: str, row: Dict) -> str:
+    """单点入库（POST /api/v1/sample/from_lnglat），返回 sample_id。"""
+    with db_cursor() as cur:
+        return _insert(cur, run_id, row)
 
 
 def insert_samples(run_id: str, rows: List[Dict]) -> int:
-    """批量入库样本，rows 每项含 lon/lat/px_x/px_y/ref_class(,label)。返回条数。"""
+    """批量入库样本（既有 /accuracy/sample 路径），返回条数。"""
     if not rows:
         return 0
     with db_cursor() as cur:
         for r in rows:
-            cur.execute(
-                """
-                INSERT INTO sample
-                    (sample_id, run_id, geom, px_x, px_y, ref_class, label)
-                VALUES (%s, %s, ST_SetSRID(ST_MakePoint(%s, %s), 4326),
-                        %s, %s, %s, %s)
-                """,
-                (
-                    str(uuid.uuid4()), run_id,
-                    float(r["lon"]), float(r["lat"]),
-                    int(r["px_x"]), int(r["px_y"]),
-                    str(r["ref_class"]), r.get("label"),
-                ),
-            )
+            _insert(cur, run_id, r)
     return len(rows)
 
 
