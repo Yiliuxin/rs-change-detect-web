@@ -16,7 +16,21 @@ from app.config.constants import MAX_CONCURRENCY
 
 _semaphore = threading.BoundedSemaphore(MAX_CONCURRENCY)
 
-__all__ = ["serial"]
+__all__ = ["serial", "try_acquire", "release"]
+
+
+def try_acquire() -> bool:
+    """非阻塞抢占处理槽；已被占用返回 False（异步受理时用于立即判 EX7）。"""
+    return _semaphore.acquire(blocking=False)
+
+
+def release() -> None:
+    """释放处理槽（后台线程结束时调用，保证不泄漏）。"""
+    try:
+        _semaphore.release()
+    except (ValueError, RuntimeError):
+        # 重复释放（理论上不该发生）静默忽略
+        pass
 
 
 @contextmanager

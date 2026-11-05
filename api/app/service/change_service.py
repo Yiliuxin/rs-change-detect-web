@@ -49,7 +49,7 @@ from app.service.common import (
 )
 from app.service.concurrency import serial
 
-__all__ = ["load_scene", "run"]
+__all__ = ["load_scene", "run", "run_pipeline"]
 
 _BANDS_10M = ("B02", "B03", "B04", "B08")
 # REQ-06/07：指数 → (band_a, band_b)，NDVI=(R,NIR)，NDWI=(G,NIR)。
@@ -168,14 +168,29 @@ def _resolve_bbox(task: dict) -> BBox:
 
 def run(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
         threshold: Optional[float] = None) -> dict:
-    """变化检测主流程（REQ-05/06/07/08/14）。
+    """变化检测主流程（REQ-05/06/07/08/14），同步阻塞入口。
+
+    保持既有语义不变：``with serial`` 占用唯一处理槽（REQ-13，超限 EX7），
+    内部调用 :func:`run_pipeline` 执行完整管线。
+    """
+    with serial(run_id):  # REQ-13：同步阻塞、并发上限 1（超限 EX7）
+        return run_pipeline(run_id, index, block_size, threshold)
+
+
+def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
+                 threshold: Optional[float] = None,
+                 on_stage: Optional[object] = None) -> dict:
+    """变化检测完整管线（REQ-05/06/07/08/14），不含并发闸门。
+
+    供同步入口 :func:`run` 与异步入口 ``change_async`` 复用。``on_stage(name)``
+    为可选进度回调（异步模式用于推进 5 阶段进度），同步模式传 None 即空操作。
 
     参数扩展（向后兼容、缺省行为不变）：
       * ``index``：NDVI（缺省，红+近红外）/ NDWI（绿+近红外），非法 → EX12；
       * ``threshold``：提供时跳过 Otsu 直接作对称阈值，须落在 (-1, 1)，越界 → EX12；
         ``params_snapshot`` 记录 ``threshold`` 与 ``threshold_source``("manual"/"otsu")。
     """
-    # 参数校验放在 try 之前：非法参数不应把 task 误标为 FAILED
+    # 参数校验：非法参数不应把 task 误标为 FAILED
     key = _validate_index(index, run_id)
     manual = _validate_threshold(threshold, run_id)
     try:
@@ -194,177 +209,187 @@ def run(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
         # REQ-04 / NF5 / EX8：双时相辐射口径一致
         sensor = assert_same_caliber(sc_t1["sensor"], sc_t2["sensor"])
 
-        with serial(run_id):  # REQ-13：同步阻塞、并发上限 1（超限 EX7）
-            task_repo.update_status(run_id, "RUNNING", started_at=utc_now())
+        task_repo.update_status(run_id, "RUNNING", started_at=utc_now())
 
-            scenes = {
-                "t1": load_scene(sc_t1["cog_path"], sc_t1["sensor"],
-                                 sc_t1.get("proc_baseline"), bbox, run_id),
-                "t2": load_scene(sc_t2["cog_path"], sc_t2["sensor"],
-                                 sc_t2.get("proc_baseline"), bbox, run_id),
-            }
-            # REQ-03 / EX4：双时相左上角/尺寸/CRS 一致
-            assert_grid_aligned(scenes["t1"]["profile"], scenes["t2"]["profile"])
+        scenes = {
+            "t1": load_scene(sc_t1["cog_path"], sc_t1["sensor"],
+                             sc_t1.get("proc_baseline"), bbox, run_id),
+            "t2": load_scene(sc_t2["cog_path"], sc_t2["sensor"],
+                             sc_t2.get("proc_baseline"), bbox, run_id),
+        }
+        if on_stage is not None:
+            on_stage("read_clip")  # 阶段 1：读裁切
 
-            # 双时相有效掩膜交集 + 剔除 NODATA(=0)
-            valid = scenes["t1"]["masks"].valid & scenes["t2"]["masks"].valid
-            for phase in ("t1", "t2"):
-                for band in ("B04", "B08"):
-                    valid &= scenes[phase]["dn"][band] > 0
+        # REQ-03 / EX4：双时相左上角/尺寸/CRS 一致
+        assert_grid_aligned(scenes["t1"]["profile"], scenes["t2"]["profile"])
 
-            valid_ratio = compute_valid_ratio(valid)
-            verdict = judge_valid_ratio(valid_ratio, mask=valid)
+        # 双时相有效掩膜交集 + 剔除 NODATA(=0)
+        valid = scenes["t1"]["masks"].valid & scenes["t2"]["masks"].valid
+        for phase in ("t1", "t2"):
+            for band in ("B04", "B08"):
+                valid &= scenes[phase]["dn"][band] > 0
 
-            # EX3(=0) / EX11(<0.10) 终止档：不产出结果，如实报告
-            if verdict.terminate:
-                snapshot["valid_ratio"] = float(valid_ratio)
-                snapshot["valid_ratio_code"] = verdict.code
-                task_repo.update_snapshot(run_id, snapshot)
-                task_repo.update_status(run_id, "FAILED",
-                                        finished_at=utc_now(), error_code=verdict.code)
-                raise ApiError(verdict.code, run_id=run_id)
+        valid_ratio = compute_valid_ratio(valid)
+        verdict = judge_valid_ratio(valid_ratio, mask=valid)
+        if on_stage is not None:
+            on_stage("mask")  # 阶段 2：掩膜
 
-            profile = scenes["t1"]["profile"]
-
-            # EX5(0.10–0.50) 告警可继续档：200 且 params_snapshot 带 warning，检测继续
-            if verdict.warn:
-                snapshot["warning"] = {"code": verdict.code, "message": verdict.message}
-
-            # NF4：先掩膜后缩放
-            rho = {}
-            for phase in ("t1", "t2"):
-                baseline = scenes[phase]["baseline"]
-                rho[phase] = {
-                    band: _mask_then_scale(scenes[phase]["dn"][band], sensor, baseline, valid)
-                    for band in _BANDS_10M
-                }
-
-            # REQ-10：双时相真彩合成落盘 t1_composite.png / t2_composite.png
-            # （批次 2 卷帘对比消费）；假彩合成仍按既有链路在 t1 验证纯函数。
-            out_dir = run_dir(run_id)
-            for tag in ("t1", "t2"):
-                rgb = true_color(
-                    rho[tag]["B04"], rho[tag]["B03"], rho[tag]["B02"],
-                    valid_mask=valid,
-                )
-                write_composite_png(rgb, out_dir / f"{tag}_composite.png")
-            false_color(rho["t1"]["B08"], rho["t1"]["B04"], rho["t1"]["B03"], valid_mask=valid)
-
-            # 产物清单（REQ-10/12/14）：主三件套 + 带 index 小写后缀归档 + 双时相合成图。
-            # NDVI 沿用历史主名（缺省行为不变）；NDWI 另存 change_ndwi.* 等，互不覆盖。
-            artifacts = artifact_manifest(run_id, key)
-
-            snapshot.update({
-                "block_size": int(block_size),
-                "index": key,
-                "index_bands": list(_INDEX_BANDS[key]),
-                "sensor": sensor,
-                "formula": S2_FORMULA,  # 常量源口径，绝不使用 scene 表历史旧字段
-                "baselines": {k: scenes[k]["baseline"] for k in ("t1", "t2")},
-                "valid_ratio": float(valid_ratio),
-                "valid_ratio_code": verdict.code,
-                "valid_ratio_min": VALID_RATIO_MIN,
-                "valid_ratio_warn": VALID_RATIO_WARN,
-                "artifacts": artifacts,
-            })
-
-            # REQ-06/07：NDVI 走 ndvi(R,NIR)，NDWI 走 ndwi(G,NIR)；
-            # 后续 Δ / 阈值 / 三类判别 / 形态学 / 面积统计对两种指数完全一致。
-            idx_t1 = _build_index(key, rho["t1"], profile, valid, run_id, snapshot)
-            idx_t2 = _build_index(key, rho["t2"], profile, valid, run_id, snapshot)
-
-            d = delta_ndvi(idx_t2.data, idx_t1.data)
-            if manual is None:
-                thr, otsu_fallback, otsu_reason = otsu_threshold(d, valid_mask=valid)
-                threshold_source = "otsu"
-            else:
-                thr = float(manual)
-                otsu_fallback, otsu_reason = False, "手动阈值覆盖，跳过 Otsu 自适应（REQ-07）"
-                threshold_source = "manual"
-            # 对称阈值 T 需非负；(-1,1) 内负值取 |T| 判别等价，快照/响应如实记录原值。
-            change_raw = classify_change(d, abs(thr), valid_mask=valid)
-            change = clean_change_map(change_raw)
-            summary = change_stats(change, profile=profile, valid_mask=valid,
-                                   run_id=run_id, params_snapshot=snapshot)
-            ratio_change = change_pixel_ratio(change, valid_mask=valid)
-            stats = summary["stats"]
-
-            snapshot.update({
-                "threshold": float(thr),
-                "threshold_source": threshold_source,
-                "otsu_threshold": float(thr),
-                "otsu_fallback": bool(otsu_fallback),
-                "otsu_reason": str(otsu_reason),
-                "change_pixel_ratio": float(ratio_change),
-                "stats": stats,
-                "pixel_area_m2": float(summary["pixel_area_m2"]),
-            })
-
-            year = str(snapshot.get("t1") or "")[:4] or "2023"
-            report = {
-                "run_id": run_id,
-                "year": year,
-                "t1_date": snapshot.get("t1"),
-                "valid_ratio": float(valid_ratio),
-                "valid_ratio_code": verdict.code,
-                "index": key,
-                "threshold": float(thr),
-                "threshold_source": threshold_source,
-                "otsu_threshold": float(thr),
-                "otsu_fallback": bool(otsu_fallback),
-                "otsu_reason": str(otsu_reason),
-                "change_pixel_ratio": float(ratio_change),
-                "stats": stats,
-                "accuracy": None,  # 样本由 /accuracy/sample 提交，此处不伪造
-                "params_snapshot": snapshot,
-                "attribution_lines": [
-                    ATTRIBUTION_S2.format(year=year),
-                    ATTRIBUTION_S2_MODIFIED.format(year=year),
-                ],
-            }
-
-            exported = export_triplet(
-                change, profile, valid_ratio, report, out_dir,
-                formats=EXPORT_FORMATS, run_id=run_id, params_snapshot=snapshot,
-            )
-            # 归档一份带 index 小写后缀的三件套副本：NDVI / NDWI 各自留存，互不覆盖；
-            # 主名三件套仍保持历史文件名，sample / report / e2e 链路不受影响。
-            for src_name, dst_name in index_artifact_names(key).items():
-                src = out_dir / src_name
-                if src.is_file():
-                    shutil.copy2(src, out_dir / dst_name)
-            # 报告元数据落盘，供 /report/export 复用（不伪造数据）
-            (out_dir / "run_report.json").write_text(
-                json.dumps(report, ensure_ascii=False, default=str), encoding="utf-8"
-            )
-
-            change_geotiff_path = str(exported["files"]["geotiff"])
-            change_png_path = str(exported["files"]["png"])
-
-            # REQ-08/11/12：三类统计幂等入库 + task 终态
-            # change_result 表仍登记本地绝对路径，schema / 仓储层均不改
-            change_result_repo.upsert_stats(run_id, stats, change_geotiff_path, change_png_path)
+        # EX3(=0) / EX11(<0.10) 终止档：不产出结果，如实报告
+        if verdict.terminate:
+            snapshot["valid_ratio"] = float(valid_ratio)
+            snapshot["valid_ratio_code"] = verdict.code
             task_repo.update_snapshot(run_id, snapshot)
-            task_repo.update_status(run_id, "SUCCESS", finished_at=utc_now())
+            task_repo.update_status(run_id, "FAILED",
+                                    finished_at=utc_now(), error_code=verdict.code)
+            raise ApiError(verdict.code, run_id=run_id)
 
-            # 响应改为同源相对 URL：浏览器 image source / <a download> 可直接加载，
-            # 避免把本地绝对路径或 minio:// 自定义 scheme 暴露给前端（REQ-10/REQ-12）。
-            # NDVI 保持历史主名（缺省行为不变）；NDWI 指向带后缀归档，避免互相覆盖。
-            resp_names = index_artifact_names(key) if key != "NDVI" else {}
-            return {
-                "run_id": run_id,
-                "change_geotiff": artifact_url(
-                    run_id, resp_names.get("change.tif", "change.tif")),
-                "change_png": artifact_url(
-                    run_id, resp_names.get("change.png", "change.png")),
-                "threshold": float(thr),
-                "valid_ratio": float(valid_ratio),
-                "stats": stats,
-                "params_snapshot": snapshot,
-                "index": key,
-                "threshold_source": threshold_source,
-                "artifacts": artifacts,
+        profile = scenes["t1"]["profile"]
+
+        # EX5(0.10–0.50) 告警可继续档：200 且 params_snapshot 带 warning，检测继续
+        if verdict.warn:
+            snapshot["warning"] = {"code": verdict.code, "message": verdict.message}
+
+        # NF4：先掩膜后缩放
+        rho = {}
+        for phase in ("t1", "t2"):
+            baseline = scenes[phase]["baseline"]
+            rho[phase] = {
+                band: _mask_then_scale(scenes[phase]["dn"][band], sensor, baseline, valid)
+                for band in _BANDS_10M
             }
+
+        # REQ-10：双时相真彩合成落盘 t1_composite.png / t2_composite.png
+        # （批次 2 卷帘对比消费）；假彩合成仍按既有链路在 t1 验证纯函数。
+        out_dir = run_dir(run_id)
+        for tag in ("t1", "t2"):
+            rgb = true_color(
+                rho[tag]["B04"], rho[tag]["B03"], rho[tag]["B02"],
+                valid_mask=valid,
+            )
+            write_composite_png(rgb, out_dir / f"{tag}_composite.png")
+        false_color(rho["t1"]["B08"], rho["t1"]["B04"], rho["t1"]["B03"], valid_mask=valid)
+
+        # 产物清单（REQ-10/12/14）：主三件套 + 带 index 小写后缀归档 + 双时相合成图。
+        # NDVI 沿用历史主名（缺省行为不变）；NDWI 另存 change_ndwi.* 等，互不覆盖。
+        artifacts = artifact_manifest(run_id, key)
+
+        snapshot.update({
+            "block_size": int(block_size),
+            "index": key,
+            "index_bands": list(_INDEX_BANDS[key]),
+            "sensor": sensor,
+            "formula": S2_FORMULA,  # 常量源口径，绝不使用 scene 表历史旧字段
+            "baselines": {k: scenes[k]["baseline"] for k in ("t1", "t2")},
+            "valid_ratio": float(valid_ratio),
+            "valid_ratio_code": verdict.code,
+            "valid_ratio_min": VALID_RATIO_MIN,
+            "valid_ratio_warn": VALID_RATIO_WARN,
+            "artifacts": artifacts,
+        })
+
+        # REQ-06/07：NDVI 走 ndvi(R,NIR)，NDWI 走 ndwi(G,NIR)；
+        # 后续 Δ / 阈值 / 三类判别 / 形态学 / 面积统计对两种指数完全一致。
+        if on_stage is not None:
+            on_stage("index")  # 阶段 3：指数
+        idx_t1 = _build_index(key, rho["t1"], profile, valid, run_id, snapshot)
+        idx_t2 = _build_index(key, rho["t2"], profile, valid, run_id, snapshot)
+
+        if on_stage is not None:
+            on_stage("change_detect")  # 阶段 4：变化检测
+        d = delta_ndvi(idx_t2.data, idx_t1.data)
+        if manual is None:
+            thr, otsu_fallback, otsu_reason = otsu_threshold(d, valid_mask=valid)
+            threshold_source = "otsu"
+        else:
+            thr = float(manual)
+            otsu_fallback, otsu_reason = False, "手动阈值覆盖，跳过 Otsu 自适应（REQ-07）"
+            threshold_source = "manual"
+        # 对称阈值 T 需非负；(-1,1) 内负值取 |T| 判别等价，快照/响应如实记录原值。
+        change_raw = classify_change(d, abs(thr), valid_mask=valid)
+        change = clean_change_map(change_raw)
+        summary = change_stats(change, profile=profile, valid_mask=valid,
+                               run_id=run_id, params_snapshot=snapshot)
+        ratio_change = change_pixel_ratio(change, valid_mask=valid)
+        stats = summary["stats"]
+
+        snapshot.update({
+            "threshold": float(thr),
+            "threshold_source": threshold_source,
+            "otsu_threshold": float(thr),
+            "otsu_fallback": bool(otsu_fallback),
+            "otsu_reason": str(otsu_reason),
+            "change_pixel_ratio": float(ratio_change),
+            "stats": stats,
+            "pixel_area_m2": float(summary["pixel_area_m2"]),
+        })
+
+        year = str(snapshot.get("t1") or "")[:4] or "2023"
+        report = {
+            "run_id": run_id,
+            "year": year,
+            "t1_date": snapshot.get("t1"),
+            "valid_ratio": float(valid_ratio),
+            "valid_ratio_code": verdict.code,
+            "index": key,
+            "threshold": float(thr),
+            "threshold_source": threshold_source,
+            "otsu_threshold": float(thr),
+            "otsu_fallback": bool(otsu_fallback),
+            "otsu_reason": str(otsu_reason),
+            "change_pixel_ratio": float(ratio_change),
+            "stats": stats,
+            "accuracy": None,  # 样本由 /accuracy/sample 提交，此处不伪造
+            "params_snapshot": snapshot,
+            "attribution_lines": [
+                ATTRIBUTION_S2.format(year=year),
+                ATTRIBUTION_S2_MODIFIED.format(year=year),
+            ],
+        }
+
+        if on_stage is not None:
+            on_stage("render_export")  # 阶段 5：渲染导出
+        exported = export_triplet(
+            change, profile, valid_ratio, report, out_dir,
+            formats=EXPORT_FORMATS, run_id=run_id, params_snapshot=snapshot,
+        )
+        # 归档一份带 index 小写后缀的三件套副本：NDVI / NDWI 各自留存，互不覆盖；
+        # 主名三件套仍保持历史文件名，sample / report / e2e 链路不受影响。
+        for src_name, dst_name in index_artifact_names(key).items():
+            src = out_dir / src_name
+            if src.is_file():
+                shutil.copy2(src, out_dir / dst_name)
+        # 报告元数据落盘，供 /report/export 复用（不伪造数据）
+        (out_dir / "run_report.json").write_text(
+            json.dumps(report, ensure_ascii=False, default=str), encoding="utf-8"
+        )
+
+        change_geotiff_path = str(exported["files"]["geotiff"])
+        change_png_path = str(exported["files"]["png"])
+
+        # REQ-08/11/12：三类统计幂等入库 + task 终态
+        # change_result 表仍登记本地绝对路径，schema / 仓储层均不改
+        change_result_repo.upsert_stats(run_id, stats, change_geotiff_path, change_png_path)
+        task_repo.update_snapshot(run_id, snapshot)
+        task_repo.update_status(run_id, "SUCCESS", finished_at=utc_now())
+
+        # 响应改为同源相对 URL：浏览器 image source / <a download> 可直接加载，
+        # 避免把本地绝对路径或 minio:// 自定义 scheme 暴露给前端（REQ-10/REQ-12）。
+        # NDVI 保持历史主名（缺省行为不变）；NDWI 指向带后缀归档，避免互相覆盖。
+        resp_names = index_artifact_names(key) if key != "NDVI" else {}
+        return {
+            "run_id": run_id,
+            "change_geotiff": artifact_url(
+                run_id, resp_names.get("change.tif", "change.tif")),
+            "change_png": artifact_url(
+                run_id, resp_names.get("change.png", "change.png")),
+            "threshold": float(thr),
+            "valid_ratio": float(valid_ratio),
+            "stats": stats,
+            "params_snapshot": snapshot,
+            "index": key,
+            "threshold_source": threshold_source,
+            "artifacts": artifacts,
+        }
     except ApiError:
         raise
     except Exception as exc:  # noqa: BLE001 - 统一封装为带 run_id 的 EX*/SYS-*
