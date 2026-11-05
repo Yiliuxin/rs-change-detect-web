@@ -509,3 +509,27 @@ table.tbl td.diag { background: rgba(33, 160, 76, .1); font-weight: 800; }
 .onl-prog-foot { display: flex; align-items: center; justify-content: space-between; margin-top: 7px; min-height: 14px; }
 .onl-prog-foot .hint { font-size: 10px; word-break: break-all; }
 .onl-prog-foot .spinner { flex: 0 0 13px; }
+
+/* ===== 批次 1：指数切换 / 高级选项 / CSV 导出 / 自动选优（REQ-07/08/11/14） ===== */
+.index-radios { display: flex; align-items: center; gap: 12px; min-height: 35px; }
+.index-radios .chk { white-space: nowrap; }
+
+.advanced {
+  margin-top: 10px; padding: 8px 10px;
+  border: 1px dashed var(--line); border-radius: 9px; background: var(--card2);
+}
+.advanced > summary {
+  cursor: pointer; user-select: none; list-style: none;
+  font-size: 11.5px; font-weight: 700; color: var(--muted);
+}
+.advanced > summary::-webkit-details-marker { display: none; }
+.advanced > summary::before { content: '▸'; display: inline-block; margin-right: 6px; color: var(--accent); }
+.advanced[open] > summary::before { content: '▾'; }
+.advanced > summary .req { margin-left: 4px; }
+.adv-body { padding-top: 8px; }
+.adv-row { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.adv-label { flex: 0 0 46px; font-size: 11px; color: var(--muted); }
+input[type="range"]:disabled { opacity: .45; cursor: not-allowed; }
+.slider-val.wide { width: 58px; font-size: 12px; color: var(--accent2); }
+.adv-note { margin-top: 6px; font-size: 10.5px; color: var(--muted2); line-height: 1.5; }
+.subtitle-btn { margin-left: auto; padding: 3px 8px; font-size: 10.5px; font-weight: 700; }

@@ -38,6 +38,7 @@ const S = {
   opacity: 0.85,
   samples: [], sampleSeq: 0, curClass: 1, accuracy: null, accBusy: false,
   exportResult: null, exportBusy: false,
+  csvBusy: false,
 };
 
 // 在线取数（可选）卡片独立状态，与离线 S 完全隔离，互不污染。
@@ -371,6 +372,32 @@ function isUnsafeImageUrl(u) {
     || /^\\\\/.test(u);                // UNC \\server\share
 }
 
+// ===== 批次 1（REQ-07）：C 卡指数切换 + 「高级选项」手动阈值 =====
+// 开关关闭时 threshold 为 undefined：api.runChange 不会下发该字段，后端走 Otsu 自适应。
+function runParams() {
+  const checked = document.querySelector('input[name="index-type"]:checked');
+  const index = (checked && String(checked.value).toUpperCase()) || 'NDVI';
+  const manual = !!($('manual-threshold') && $('manual-threshold').checked);
+  const threshold = manual ? Number($('threshold-slider').value) : undefined;
+  return { index, threshold };
+}
+
+// 折叠区实时态：开关控制滑块可用性，滑块拖动实时显值（step 0.01 / -0.5~0.5）
+function syncRunAdvancedUi() {
+  const manual = !!($('manual-threshold') && $('manual-threshold').checked);
+  const slider = $('threshold-slider');
+  const v = Number((slider && slider.value) || 0);
+  if (slider) slider.disabled = !manual;
+  const valEl = $('advanced-threshold-val');
+  if (valEl) valEl.textContent = (v >= 0 ? '+' : '') + v.toFixed(2);
+  const mode = $('threshold-mode');
+  if (mode) {
+    mode.textContent = manual
+      ? '当前：手动阈值 T=' + v.toFixed(2) + '（跳过 Otsu，threshold_source=manual）'
+      : '当前：Otsu 自适应（请求不携带 threshold）';
+  }
+}
+
 async function runChangeDetection() {
   if (S.changeBusy) return;
   if (!(S.aoiResult && S.selectedPair)) { refreshGates(); return; }
@@ -379,9 +406,13 @@ async function runChangeDetection() {
   btn.disabled = true;
   btn.textContent = '运行中…';
   $('run-progress').hidden = false;
-  $('run-status').textContent = '正在运行变化检测（读取 COG → 掩膜 → ΔNDVI → OTSU → 渲染专题图）…';
+  const { index, threshold } = runParams();
+  $('run-status').textContent = '正在运行变化检测（读取 COG → 掩膜 → Δ' + index
+    + (threshold === undefined ? ' → Otsu 自适应阈值' : ' → 手动阈值 T=' + threshold.toFixed(2))
+    + ' → 渲染专题图）…';
   $('run-done').hidden = true;
-  const body = { run_id: currentRunId(), index: 'NDVI', block_size: Number($('block-size').value) || 256 };
+  const body = { run_id: currentRunId(), index, block_size: Number($('block-size').value) || 256 };
+  if (threshold !== undefined) body.threshold = threshold;
   try {
     const res = await api.runChange(body);
     if (res.demo) markDemo();
@@ -399,7 +430,10 @@ async function runChangeDetection() {
     renderSnapshot();
     refreshExportState();
     $('run-done').hidden = false;
-    $('run-done').textContent = '✓ 检测完成 · run_id ' + res.data.run_id;
+    $('run-done').textContent = '✓ 检测完成 · ' + index
+      + (res.data.threshold_source ? ' · ' + res.data.threshold_source : '')
+      + (res.data.threshold != null ? ' T=' + Number(res.data.threshold).toFixed(2) : '')
+      + ' · run_id ' + res.data.run_id;
     showToast(res.demo ? '变化检测完成（演示数据）' : '变化检测完成', 'ok');
   } catch (e) {
     handleErr(e);
@@ -620,6 +654,44 @@ function triggerDownload(f) {
   document.body.appendChild(a);
   a.click();
   a.remove();
+}
+
+// ===== 批次 1（REQ-08/11/14）：面积统计 CSV → Blob 同源下载 =====
+// 与 triggerDownload 同为「<a download> 触发」，区别仅在于 href 用 Blob URL
+// （后端 CSV 带 \ufeff BOM，用 Blob 下载可原样保留编码，不做二次文本转换）。
+async function downloadAreaStatsCsv() {
+  const rid = currentRunId();
+  if (!rid) { showToast('尚无 run_id，请先完成一次变化检测', 'warn'); return; }
+  if (S.csvBusy) return;
+  const btn = $('btn-export-csv');
+  const label = btn.textContent;
+  S.csvBusy = true;
+  btn.disabled = true;
+  btn.textContent = '导出中…';
+  try {
+    const blob = await api.exportAreaStatsCsv(rid);
+    if (!blob) { showToast('面积统计 CSV 为空，导出未完成', 'warn'); return; }
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'area_stats_' + rid + '.csv';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 2000);
+    showToast('面积统计 CSV 已导出', 'ok');
+  } catch (e) {
+    // 后端业务错误体 → 全局中文横幅；非契约错误 → 内联 toast，绝不产生未捕获 JS 异常
+    if (e instanceof ApiError) {
+      showError({ code: e.code, message: e.message, run_id: e.run_id });
+    } else {
+      showToast('面积统计 CSV 导出失败：' + (e && e.message ? e.message : '未知原因'), 'warn');
+    }
+  } finally {
+    S.csvBusy = false;
+    btn.disabled = false;
+    btn.textContent = label;
+  }
 }
 
 async function doExport(formats) {
@@ -880,6 +952,27 @@ function selectOnlineCandidate(i) {
   ON.selected = i;
   renderOnlineCandidates();
   updateOnlineFetchGate();
+}
+
+// ===== 批次 1（REQ-02 在线分支）：「自动选最优」 =====
+// 取 combined_cloud 数值最小的候选，调用既有 selectOnlineCandidate(i)：
+// 与用户手点该 .onl-cand 完全等价（同一 ON.selected / 同一高亮 / 同一 fetch 门控）。
+function autoSelectBestOnlineCandidate() {
+  if (!ON.candidates.length) {
+    showToast('请先「查询候选影像」，再自动选最优', 'warn');
+    return;
+  }
+  let best = 0, bestCloud = Infinity;
+  ON.candidates.forEach((c, i) => {
+    const v = Number(c && c.combined_cloud);
+    if (Number.isFinite(v) && v < bestCloud) { bestCloud = v; best = i; }
+  });
+  if (!Number.isFinite(bestCloud)) {
+    showToast('候选缺少综合云量 combined_cloud，无法自动选优', 'warn');
+    return;
+  }
+  selectOnlineCandidate(best);
+  showToast('已自动选定综合云量最低的候选（' + fmtCloud(bestCloud) + '）', 'ok');
 }
 
 // ---------- fetch：提交 + 2s 轮询状态 ----------
@@ -1150,6 +1243,13 @@ function bindEvents() {
     const card = e.target.closest && e.target.closest('.onl-cand');
     if (card) selectOnlineCandidate(Number(card.dataset.idx));
   });
+
+  // ===== 批次 1：C 卡高级选项 / 统计区 CSV / 在线候选自动选优 =====
+  $('manual-threshold').addEventListener('change', syncRunAdvancedUi);
+  $('threshold-slider').addEventListener('input', syncRunAdvancedUi);
+  $('btn-export-csv').onclick = downloadAreaStatsCsv;
+  $('btn-onl-auto-best').onclick = autoSelectBestOnlineCandidate;
+  syncRunAdvancedUi(); // 初始化开关/滑块/实时显值，不改变任何既有门控与离线路径
 }
 
 function bindMapEvents() {

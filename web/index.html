@@ -88,10 +88,28 @@
                 </select>
               </div>
               <div>
-                <label class="fld" for="index-type">指数类型 index</label>
-                <input type="text" id="index-type" value="NDVI" readonly title="MVP 仅支持 NDVI（REQ-07），口径锁定不可修改" />
+                <label class="fld">指数类型 index<span class="req">REQ-07</span></label>
+                <div class="index-radios" id="index-radios" role="group" aria-label="变化检测指数">
+                  <label class="chk" title="NDVI =(NIR−R)/(NIR+R)，默认"><input type="radio" name="index-type" value="NDVI" checked /> NDVI</label>
+                  <label class="chk" title="NDWI =(G−NIR)/(G+NIR)，水体变化"><input type="radio" name="index-type" value="NDWI" /> NDWI</label>
+                </div>
               </div>
             </div>
+
+            <!-- 高级选项（REQ-07）：开关关闭时不传 threshold，后端走 Otsu 自适应 -->
+            <details class="advanced" id="run-advanced">
+              <summary>高级选项 · 变化阈值<span class="req">REQ-07</span></summary>
+              <div class="adv-body">
+                <label class="chk"><input type="checkbox" id="manual-threshold" /> 手动覆盖 Otsu 阈值</label>
+                <div class="adv-row">
+                  <span class="adv-label">阈值 T</span>
+                  <input type="range" id="threshold-slider" min="-0.5" max="0.5" step="0.01" value="0.10" disabled />
+                  <span class="slider-val wide" id="advanced-threshold-val">+0.10</span>
+                </div>
+                <div class="adv-note" id="threshold-mode">当前：Otsu 自适应（请求不携带 threshold）</div>
+              </div>
+            </details>
+
             <button type="button" class="btn btn-primary btn-block gap-top" id="btn-run-change" disabled
               title="需先应用 AOI（A 卡片）并选择影像对（B 卡片）">运行变化检测 · POST /result/change</button>
             <div class="status-line gap-top" id="run-progress" hidden><span class="spinner"></span><span id="run-status">正在运行变化检测…</span></div>
@@ -141,7 +159,10 @@
               <div class="status-line gap-top" id="onl-discover-loading" hidden><span class="spinner"></span>正在检索 STAC 候选影像…</div>
 
               <!-- 候选清单（tile / 两时相日期 / 云量 / combined_cloud；点选即同时选定 t1+t2） -->
-              <div class="card-subtitle">候选影像对<span class="req">REQ-02</span><span class="hint" id="onl-cand-count">—</span></div>
+              <div class="card-subtitle">候选影像对<span class="req">REQ-02</span><span class="hint" id="onl-cand-count">—</span>
+                <button type="button" class="btn btn-sm btn-ghost subtitle-btn" id="btn-onl-auto-best"
+                  title="选中综合云量 combined_cloud 最小的候选（与手点该项完全等价）">自动选最优</button>
+              </div>
               <div class="onl-cand-list" id="onl-cand-list">
                 <div class="empty-state compact"><p>尚未检索</p><p class="empty-sub">设置 t1 / t2 窗口后点击「查询候选影像」。</p></div>
               </div>
@@ -208,6 +229,11 @@
                 <div class="metric"><div class="k">run_id<span class="req">REQ-14</span></div><div class="v v-sm" id="runid-val">—</div></div>
               </div>
               <div class="gap-top"><table class="tbl" id="stats-table"></table></div>
+              <!-- 面积统计 CSV 导出（REQ-08/11/14）：GET /report/area_stats/{run_id}.csv → Blob 同源下载 -->
+              <div class="btn-row gap-top">
+                <button type="button" class="btn btn-sm" id="btn-export-csv"
+                  title="按本轮 run_id 导出三类面积统计 CSV（UTF-8 BOM，Excel 可直接打开）">导出面积统计 CSV</button>
+              </div>
               <div class="chart" id="chart-pie"></div>
               <div class="chart" id="chart-bar"></div>
             </div>

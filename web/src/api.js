@@ -206,12 +206,19 @@ export function matchScene(payload) {
 }
 
 // ---------- 4) REQ-05/08/10/11：变化检测主流程 ----------
+// 批次 1 扩展（REQ-07）：payload 可选携带 index / threshold。
+// 签名与 {data, demo} 返回结构不变；threshold 未提供时**不下发该字段**，
+// 后端走 Otsu 自适应（threshold_source=otsu），缺省行为与历史版本一致。
 export function runChange(payload) {
+  const body = { ...(payload || {}) };
+  body.index = String(body.index || 'NDVI').toUpperCase();
+  if (body.threshold == null) delete body.threshold;
+  else body.threshold = Number(body.threshold);
   return call(
     '/result/change',
-    payload,
+    body,
     (d) => !d.run_id && !d.change_png && (!d.stats || !d.stats.length),
-    () => demo.demoChange(payload),
+    () => demo.demoChange(body),
   );
 }
 
@@ -322,4 +329,45 @@ export function pollFetch(fetchId) {
     TIMEOUT_MS,
     true,
   );
+}
+
+// ==========================================================================
+// 批次 1 扩展（REQ-07/13/14）：面积统计 CSV + 历史 run 查询
+// 与既有 5 接口 / 在线取数分支完全独立；沿用 fetchWithTimeout 与 safeError，
+// 不改动 TIMEOUT_MS、演示降级层或任何既有导出函数的签名与返回结构。
+// 后端业务错误体 {code,message,run_id} 一律抛 ApiError → 全局中文横幅；
+// 非契约错误（超时 / 裸错误页）抛普通 Error，由调用方内联提示，不产生 JS 异常。
+// ==========================================================================
+async function apiGet(path, asBlob = false) {
+  let resp;
+  try {
+    resp = await fetchWithTimeout(BASE + path, { method: 'GET' });
+  } catch (_) {
+    throw new Error('请求超时或后端不可达：' + path);
+  }
+  if (!resp.ok) {
+    const err = await safeError(resp);
+    if (err) throw err;
+    throw new Error('请求失败（HTTP ' + resp.status + '）：' + path);
+  }
+  return asBlob ? resp.blob() : resp.json();
+}
+
+// GET /report/area_stats/{run_id}.csv → Blob（含 UTF-8 BOM），由调用方 Blob URL 同源下载
+export function exportAreaStatsCsv(runId) {
+  return apiGet('/report/area_stats/' + encodeURIComponent(runId) + '.csv', true);
+}
+
+// GET /runs?limit=&offset= → { total, limit, offset, items:[...] }（按 created_at 倒序）
+export function listRuns(params = {}) {
+  const q = new URLSearchParams();
+  if (params.limit != null) q.set('limit', String(params.limit));
+  if (params.offset != null) q.set('offset', String(params.offset));
+  const qs = q.toString();
+  return apiGet('/runs' + (qs ? '?' + qs : ''));
+}
+
+// GET /runs/{run_id} → 摘要 + params_snapshot 全量 + 全部产物下载 URL
+export function getRunDetail(runId) {
+  return apiGet('/runs/' + encodeURIComponent(runId));
 }
