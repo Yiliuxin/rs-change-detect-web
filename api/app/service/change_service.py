@@ -4,8 +4,8 @@
 照算法样板 ``app.algorithm._smoke.run_group`` 编排，去掉 print、返回结构化 dict：
   task 取 aoi/scenes → COG 解析(read_aoi) → 网格对齐(EX4) → 辐射口径(EX8/EX9) →
   掩膜 valid_ratio 四段判定(EX3/EX11 终止、EX5 告警可继续) → 先掩膜后缩放(NF4) →
-  NDVI → ΔNDVI → Otsu(退化回退) → 三类分类 → 形态学 → 面积统计 →
-  export_triplet 三件套 → 写 change_result/task 状态。
+  NDVI / NDWI → Δ → Otsu(退化回退) 或手动阈值 → 三类分类 → 形态学 → 面积统计 →
+  export_triplet 三件套 + 按 index 归档 + 双时相真彩合成 → 写 change_result/task 状态。
 
 辐射定标铁律：一律 ``radiometric.to_reflectance(dn, sensor, proc_baseline)``，
 绝不写 (DN-1000)/10000；公式常量取 ``constants.S2_FORMULA``（rho=DN/10000）。
@@ -13,17 +13,22 @@
 from __future__ import annotations
 
 import json
-from typing import Dict, Optional
+import math
+import shutil
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 
+from app.algorithm import index_calculator
 from app.algorithm.change_detector import (
     change_pixel_ratio, change_stats, classify_change, delta_ndvi,
 )
 from app.algorithm.cog_reader import read_aoi
-from app.algorithm.composite import assert_grid_aligned, false_color, true_color
+from app.algorithm.composite import (
+    assert_grid_aligned, false_color, true_color, write_composite_png,
+)
 from app.algorithm.geotransform import BBox
-from app.algorithm.index_raster import build_index_raster
+from app.algorithm.index_raster import IndexRaster
 from app.algorithm.mask_pipeline import (
     compute_valid_ratio, judge_valid_ratio, run_mask_pipeline,
 )
@@ -34,16 +39,68 @@ from app.algorithm.writers import export_triplet
 from app.api.errors import ApiError, as_api_error
 from app.config.constants import (
     ATTRIBUTION_S2, ATTRIBUTION_S2_MODIFIED, BLOCK_SIZE, EXPORT_FORMATS,
-    S2_FORMULA, VALID_RATIO_MIN, VALID_RATIO_WARN,
+    MANUAL_THRESHOLD_RANGE, S2_FORMULA, VALID_INDEXES,
+    VALID_RATIO_MIN, VALID_RATIO_WARN,
 )
 from app.repository import aoi_repo, change_result_repo, scene_repo, task_repo
 from app.service.cog_source import resolve_bands
-from app.service.common import artifact_url, run_dir, utc_now
+from app.service.common import (
+    artifact_manifest, artifact_url, index_artifact_names, run_dir, utc_now,
+)
 from app.service.concurrency import serial
 
 __all__ = ["load_scene", "run"]
 
 _BANDS_10M = ("B02", "B03", "B04", "B08")
+# REQ-06/07：指数 → (band_a, band_b)，NDVI=(R,NIR)，NDWI=(G,NIR)。
+# 仅波段对与所调用的 index_calculator 纯函数不同；后续 Δ/三类/统计口径完全一致。
+_INDEX_BANDS: Dict[str, Tuple[str, str]] = {
+    "NDVI": ("B04", "B08"),
+    "NDWI": ("B03", "B08"),
+}
+
+
+def _validate_index(index: str, run_id: str) -> str:
+    """index 归一化为大写并校验白名单；非法 → EX12（REQ-07）。"""
+    key = str(index or "").strip().upper()
+    if key not in VALID_INDEXES:
+        raise ApiError("EX12", run_id=run_id,
+                       detail=f"index 非法：{index!r}，仅支持 {list(VALID_INDEXES)}")
+    return key
+
+
+def _validate_threshold(threshold, run_id: str) -> Optional[float]:
+    """可选手动阈值：须为有限数且落在 (-1, 1) 开区间；否则 → EX12（REQ-07）。"""
+    if threshold is None:
+        return None
+    try:
+        value = float(threshold)
+    except (TypeError, ValueError) as exc:
+        raise ApiError("EX12", run_id=run_id,
+                       detail=f"threshold 非法：{threshold!r}（需为数字）") from exc
+    lo, hi = MANUAL_THRESHOLD_RANGE
+    if not (math.isfinite(value) and lo < value < hi):
+        raise ApiError("EX12", run_id=run_id,
+                       detail=f"threshold 越界：{value!r}，需满足 {lo} < T < {hi}")
+    return value
+
+
+def _build_index(key: str, rho_t: Dict, profile: dict, valid: np.ndarray,
+                 run_id: str, snapshot: Dict) -> IndexRaster:
+    """REQ-06/07：NDVI 走 ``index_calculator.ndvi``，NDWI 走 ``index_calculator.ndwi``。
+
+    两者共用 clip_index 物理定义域约束、有效掩膜与 IndexRaster 值对象；
+    变化检测的 Δ / Otsu / 三类判别 / 形态学 / 面积统计对两种指数完全一致。
+    """
+    band_a, band_b = _INDEX_BANDS[key]
+    calc = index_calculator.ndvi if key == "NDVI" else index_calculator.ndwi
+    data = index_calculator.clip_index(
+        calc(rho_t[band_a], rho_t[band_b], valid_mask=valid)
+    )
+    return IndexRaster(
+        data=data, profile=dict(profile), name=key, valid_mask=valid,
+        run_id=run_id, params_snapshot=dict(snapshot),
+    )
 
 
 def _mask_then_scale(dn: np.ndarray, sensor: str, baseline: Optional[str],
@@ -109,8 +166,18 @@ def _resolve_bbox(task: dict) -> BBox:
     return BBox.from_sequence(list(box))
 
 
-def run(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE) -> dict:
-    """变化检测主流程（REQ-05/06/07/08/14）。"""
+def run(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
+        threshold: Optional[float] = None) -> dict:
+    """变化检测主流程（REQ-05/06/07/08/14）。
+
+    参数扩展（向后兼容、缺省行为不变）：
+      * ``index``：NDVI（缺省，红+近红外）/ NDWI（绿+近红外），非法 → EX12；
+      * ``threshold``：提供时跳过 Otsu 直接作对称阈值，须落在 (-1, 1)，越界 → EX12；
+        ``params_snapshot`` 记录 ``threshold`` 与 ``threshold_source``("manual"/"otsu")。
+    """
+    # 参数校验放在 try 之前：非法参数不应把 task 误标为 FAILED
+    key = _validate_index(index, run_id)
+    manual = _validate_threshold(threshold, run_id)
     try:
         task = task_repo.get_task(run_id)
         if not task:
@@ -141,9 +208,9 @@ def run(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE) -> dict:
 
             # 双时相有效掩膜交集 + 剔除 NODATA(=0)
             valid = scenes["t1"]["masks"].valid & scenes["t2"]["masks"].valid
-            for key in ("t1", "t2"):
+            for phase in ("t1", "t2"):
                 for band in ("B04", "B08"):
-                    valid &= scenes[key]["dn"][band] > 0
+                    valid &= scenes[phase]["dn"][band] > 0
 
             valid_ratio = compute_valid_ratio(valid)
             verdict = judge_valid_ratio(valid_ratio, mask=valid)
@@ -165,20 +232,32 @@ def run(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE) -> dict:
 
             # NF4：先掩膜后缩放
             rho = {}
-            for key in ("t1", "t2"):
-                baseline = scenes[key]["baseline"]
-                rho[key] = {
-                    band: _mask_then_scale(scenes[key]["dn"][band], sensor, baseline, valid)
+            for phase in ("t1", "t2"):
+                baseline = scenes[phase]["baseline"]
+                rho[phase] = {
+                    band: _mask_then_scale(scenes[phase]["dn"][band], sensor, baseline, valid)
                     for band in _BANDS_10M
                 }
 
-            # 真彩/假彩合成（验证 composite 纯函数链路，REQ-10）
-            true_color(rho["t1"]["B04"], rho["t1"]["B03"], rho["t1"]["B02"], valid_mask=valid)
+            # REQ-10：双时相真彩合成落盘 t1_composite.png / t2_composite.png
+            # （批次 2 卷帘对比消费）；假彩合成仍按既有链路在 t1 验证纯函数。
+            out_dir = run_dir(run_id)
+            for tag in ("t1", "t2"):
+                rgb = true_color(
+                    rho[tag]["B04"], rho[tag]["B03"], rho[tag]["B02"],
+                    valid_mask=valid,
+                )
+                write_composite_png(rgb, out_dir / f"{tag}_composite.png")
             false_color(rho["t1"]["B08"], rho["t1"]["B04"], rho["t1"]["B03"], valid_mask=valid)
+
+            # 产物清单（REQ-10/12/14）：主三件套 + 带 index 小写后缀归档 + 双时相合成图。
+            # NDVI 沿用历史主名（缺省行为不变）；NDWI 另存 change_ndwi.* 等，互不覆盖。
+            artifacts = artifact_manifest(run_id, key)
 
             snapshot.update({
                 "block_size": int(block_size),
-                "index": str(index).strip().upper(),
+                "index": key,
+                "index_bands": list(_INDEX_BANDS[key]),
                 "sensor": sensor,
                 "formula": S2_FORMULA,  # 常量源口径，绝不使用 scene 表历史旧字段
                 "baselines": {k: scenes[k]["baseline"] for k in ("t1", "t2")},
@@ -186,21 +265,24 @@ def run(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE) -> dict:
                 "valid_ratio_code": verdict.code,
                 "valid_ratio_min": VALID_RATIO_MIN,
                 "valid_ratio_warn": VALID_RATIO_WARN,
+                "artifacts": artifacts,
             })
 
-            # REQ-06 NDVI（MVP 仅 NDVI；build_index_raster 兼容 NDWI，契约不改）
-            idx_t1 = build_index_raster(
-                rho["t1"]["B04"], rho["t1"]["B08"], profile, valid_mask=valid,
-                index=index, clip=True, run_id=run_id, params_snapshot=snapshot,
-            )
-            idx_t2 = build_index_raster(
-                rho["t2"]["B04"], rho["t2"]["B08"], profile, valid_mask=valid,
-                index=index, clip=True, run_id=run_id, params_snapshot=snapshot,
-            )
+            # REQ-06/07：NDVI 走 ndvi(R,NIR)，NDWI 走 ndwi(G,NIR)；
+            # 后续 Δ / 阈值 / 三类判别 / 形态学 / 面积统计对两种指数完全一致。
+            idx_t1 = _build_index(key, rho["t1"], profile, valid, run_id, snapshot)
+            idx_t2 = _build_index(key, rho["t2"], profile, valid, run_id, snapshot)
 
             d = delta_ndvi(idx_t2.data, idx_t1.data)
-            threshold, otsu_fallback, otsu_reason = otsu_threshold(d, valid_mask=valid)
-            change_raw = classify_change(d, threshold, valid_mask=valid)
+            if manual is None:
+                thr, otsu_fallback, otsu_reason = otsu_threshold(d, valid_mask=valid)
+                threshold_source = "otsu"
+            else:
+                thr = float(manual)
+                otsu_fallback, otsu_reason = False, "手动阈值覆盖，跳过 Otsu 自适应（REQ-07）"
+                threshold_source = "manual"
+            # 对称阈值 T 需非负；(-1,1) 内负值取 |T| 判别等价，快照/响应如实记录原值。
+            change_raw = classify_change(d, abs(thr), valid_mask=valid)
             change = clean_change_map(change_raw)
             summary = change_stats(change, profile=profile, valid_mask=valid,
                                    run_id=run_id, params_snapshot=snapshot)
@@ -208,7 +290,9 @@ def run(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE) -> dict:
             stats = summary["stats"]
 
             snapshot.update({
-                "otsu_threshold": float(threshold),
+                "threshold": float(thr),
+                "threshold_source": threshold_source,
+                "otsu_threshold": float(thr),
                 "otsu_fallback": bool(otsu_fallback),
                 "otsu_reason": str(otsu_reason),
                 "change_pixel_ratio": float(ratio_change),
@@ -223,7 +307,10 @@ def run(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE) -> dict:
                 "t1_date": snapshot.get("t1"),
                 "valid_ratio": float(valid_ratio),
                 "valid_ratio_code": verdict.code,
-                "otsu_threshold": float(threshold),
+                "index": key,
+                "threshold": float(thr),
+                "threshold_source": threshold_source,
+                "otsu_threshold": float(thr),
                 "otsu_fallback": bool(otsu_fallback),
                 "otsu_reason": str(otsu_reason),
                 "change_pixel_ratio": float(ratio_change),
@@ -236,11 +323,16 @@ def run(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE) -> dict:
                 ],
             }
 
-            out_dir = run_dir(run_id)
             exported = export_triplet(
                 change, profile, valid_ratio, report, out_dir,
                 formats=EXPORT_FORMATS, run_id=run_id, params_snapshot=snapshot,
             )
+            # 归档一份带 index 小写后缀的三件套副本：NDVI / NDWI 各自留存，互不覆盖；
+            # 主名三件套仍保持历史文件名，sample / report / e2e 链路不受影响。
+            for src_name, dst_name in index_artifact_names(key).items():
+                src = out_dir / src_name
+                if src.is_file():
+                    shutil.copy2(src, out_dir / dst_name)
             # 报告元数据落盘，供 /report/export 复用（不伪造数据）
             (out_dir / "run_report.json").write_text(
                 json.dumps(report, ensure_ascii=False, default=str), encoding="utf-8"
@@ -256,15 +348,22 @@ def run(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE) -> dict:
             task_repo.update_status(run_id, "SUCCESS", finished_at=utc_now())
 
             # 响应改为同源相对 URL：浏览器 image source / <a download> 可直接加载，
-            # 避免把本地绝对路径或 minio:// 自定义 scheme 暴露给前端（REQ-10/REQ-12）
+            # 避免把本地绝对路径或 minio:// 自定义 scheme 暴露给前端（REQ-10/REQ-12）。
+            # NDVI 保持历史主名（缺省行为不变）；NDWI 指向带后缀归档，避免互相覆盖。
+            resp_names = index_artifact_names(key) if key != "NDVI" else {}
             return {
                 "run_id": run_id,
-                "change_geotiff": artifact_url(run_id, "change.tif"),
-                "change_png": artifact_url(run_id, "change.png"),
-                "threshold": float(threshold),
+                "change_geotiff": artifact_url(
+                    run_id, resp_names.get("change.tif", "change.tif")),
+                "change_png": artifact_url(
+                    run_id, resp_names.get("change.png", "change.png")),
+                "threshold": float(thr),
                 "valid_ratio": float(valid_ratio),
                 "stats": stats,
                 "params_snapshot": snapshot,
+                "index": key,
+                "threshold_source": threshold_source,
+                "artifacts": artifacts,
             }
     except ApiError:
         raise

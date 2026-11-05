@@ -9,11 +9,12 @@ from __future__ import annotations
 from typing import List, Optional
 
 from fastapi import APIRouter
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
 from app.api.v1.schemas import ErrorResponse, ExportFile
 from app.config.constants import ATTRIBUTION_S2, EXPORT_FORMATS
-from app.service import report_service
+from app.service import report_service, run_service
 
 router = APIRouter(prefix="/report", tags=["Report"])
 
@@ -49,3 +50,23 @@ def export_report(payload: ReportExportRequest) -> ReportExportResponse:
     """
     result = report_service.export(payload.run_id, payload.formats)
     return ReportExportResponse(**result)
+
+
+@router.get(
+    "/area_stats/{run_id}.csv",
+    response_class=PlainTextResponse,
+    responses={404: {"model": ErrorResponse, "description": "EX2 run 不存在"},
+               500: {"model": ErrorResponse, "description": "SYS-04 数据库异常"}},
+    summary="面积统计 CSV 导出（UTF-8 BOM，增强/退化/稳定各一行）",
+)
+def export_area_stats_csv(run_id: str) -> PlainTextResponse:
+    """GET /api/v1/report/area_stats/{run_id}.csv（REQ-08/11/14）。
+
+    ``PlainTextResponse`` 内容前置 ``\\ufeff`` BOM，保证 Excel 正确识别中文表头
+    ``类别,像元数,面积_公顷``；三类各一行，run 不存在 → EX2 404。
+    """
+    return PlainTextResponse(
+        content=run_service.CSV_BOM + run_service.area_stats_csv(run_id),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="area_stats_{run_id}.csv"'},
+    )

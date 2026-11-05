@@ -16,9 +16,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from app.api.errors import install as install_error_handlers
-from app.api.v1 import accuracy, aoi, change, online, report, scene
+from app.api.v1 import accuracy, aoi, change, online, report, runs, scene
 from app.config.storage import COG_BUCKET, RESULT_BUCKET, ensure_buckets, get_client
-from app.service.common import ARTIFACT_URL_PREFIX, RUNS_ROOT
+from app.service.common import ARTIFACT_MEDIA_TYPES, ARTIFACT_URL_PREFIX, RUNS_ROOT
 
 # API 版本前缀（HLD 2.2.3）
 API_V1_PREFIX = "/api/v1"
@@ -26,12 +26,8 @@ API_V1_PREFIX = "/api/v1"
 WEB_ORIGIN = "http://localhost:5173"
 # 产物静态端点根：run_dir(run_id).parent，即 api/runs（REQ-10 / REQ-12）
 ARTIFACT_ROOT = RUNS_ROOT
-# filename 白名单 → Content-Type（同时充当防穿越白名单）
-ARTIFACT_MEDIA_TYPES = {
-    "change.tif": "image/tiff",
-    "change.png": "image/png",
-    "report.pdf": "application/pdf",
-}
+# filename 白名单 → Content-Type（同时充当防穿越白名单）由 common.py 统一提供，
+# 含按 index 归档的 change_<index>.* 与 t1/t2_composite.png（REQ-07/10/14）。
 
 logger = logging.getLogger(__name__)
 
@@ -67,8 +63,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 注册 5 个 REST 路由（HLD 2.2.3.1 ~ 2.2.3.5）
-for _router in (aoi.router, scene.router, change.router, accuracy.router, report.router):
+# 注册 5 个 REST 路由（HLD 2.2.3.1 ~ 2.2.3.5）+ 历史 run 查询（REQ-14）
+for _router in (aoi.router, scene.router, change.router, accuracy.router,
+                report.router, runs.router):
     app.include_router(_router, prefix=API_V1_PREFIX)
 
 # B 级扩展：在线取数（STAC discover + 按需下载入库），与 5 个 MVP 路由并存不改
@@ -87,10 +84,10 @@ def health() -> dict:
 @app.get(
     f"{ARTIFACT_URL_PREFIX}/{{run_id}}/{{filename}}",
     tags=["Artifacts"],
-    summary="读取本轮产物（GeoTIFF / 静态专题图 / PDF 报告）",
+    summary="读取本轮产物（GeoTIFF / 专题图 / PDF / 双时相真彩合成）",
 )
 def get_artifact(run_id: str, filename: str) -> FileResponse:
-    """同源暴露 ``api/runs/<run_id>/`` 下三件套（REQ-10 / REQ-12）。
+    """同源暴露 ``api/runs/<run_id>/`` 下白名单产物（REQ-10 / REQ-12 / REQ-14）。
 
     防目录穿越三重校验：
       1) ``filename`` 必须命中白名单；

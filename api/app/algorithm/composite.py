@@ -6,9 +6,13 @@
 from __future__ import annotations
 
 import math
+import warnings
+from pathlib import Path
 from typing import Dict, Optional, Sequence, Tuple
 
 import numpy as np
+import rasterio
+from rasterio.errors import NotGeoreferencedWarning
 
 from app.config.constants import ERROR_MESSAGES
 
@@ -26,6 +30,7 @@ __all__ = [
     "true_color",
     "false_color",
     "rgb_to_hwc",
+    "write_composite_png",
 ]
 
 
@@ -162,3 +167,26 @@ def false_color(nir, red, green, valid_mask: Optional[np.ndarray] = None,
 def rgb_to_hwc(rgb_band_first: np.ndarray) -> np.ndarray:
     """(3,H,W) → (H,W,3)，供 PIL 等行优先库使用。"""
     return np.moveaxis(np.asarray(rgb_band_first), 0, -1)
+
+
+def write_composite_png(rgb_band_first: np.ndarray, output_path) -> str:
+    """把 ``true_color`` / ``false_color`` 的 (3,H,W) uint8 结果写成 PNG。
+
+    REQ-10：双时相真彩合成 ``t1_composite.png`` / ``t2_composite.png`` 供
+    批次 2 卷帘对比消费。只用已有依赖 rasterio 的 PNG driver，不新增 npm/Python 包。
+    返回落盘绝对路径；调用方（service）再经 ``artifact_url`` 暴露同源 URL。
+    """
+    arr = np.ascontiguousarray(np.asarray(rgb_band_first, dtype=np.uint8))
+    if arr.ndim != 3 or arr.shape[0] != 3:
+        raise ValueError(f"合成图需为 (3,H,W) uint8，实际 {arr.shape}")
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", NotGeoreferencedWarning)
+        with rasterio.open(
+            str(path), "w", driver="PNG",
+            width=int(arr.shape[2]), height=int(arr.shape[1]),
+            count=3, dtype="uint8",
+        ) as dst:
+            dst.write(arr)
+    return str(path.resolve())

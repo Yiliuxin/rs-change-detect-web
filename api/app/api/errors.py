@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-"""统一错误封装（HLD 2.2.3 / 第 5 章 EX1–EX11、SYS-01–05）。
+"""统一错误封装（HLD 2.2.3 / 第 5 章 EX1–EX12、SYS-01–05）。
 
 - :class:`ApiError` 由 service 层显式抛出，携带 code / run_id；
 - :func:`install` 在 ``main.py`` 注册异常处理器，统一输出 ``{code,message,run_id}``；
 - 文案逐字取自 ``constants.ERROR_MESSAGES``，不臆造；
 - HTTP 映射按 HLD 表 5-2：EX2→404；EX7/EX8/EX9→409；
-  其余 EX*→400；SYS-*→500（EX5 为告警档，不走错误体）。
+  其余 EX*→400（EX12 参数非法同为 400）；SYS-*→500（EX5 为告警档，不走错误体）。
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 CODE_HTTP = {
     "EX1": 400, "EX2": 404, "EX3": 400, "EX4": 400, "EX5": 400,
     "EX6": 400, "EX7": 409, "EX8": 409, "EX9": 409,
-    "EX10": 400, "EX11": 400,
+    "EX10": 400, "EX11": 400, "EX12": 400,
     "SYS-01": 500, "SYS-02": 500, "SYS-03": 500, "SYS-04": 500, "SYS-05": 500,
     "SYS-06": 500, "SYS-07": 500,
 }
