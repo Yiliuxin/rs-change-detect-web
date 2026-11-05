@@ -371,3 +371,32 @@ export function listRuns(params = {}) {
 export function getRunDetail(runId) {
   return apiGet('/runs/' + encodeURIComponent(runId));
 }
+
+// ==========================================================================
+// 2B：样本「图上点选」—— POST /sample/from_lnglat（REQ-09）
+// 只新增本导出；既有导出签名、演示降级层与 5 接口行为完全不动。
+// 判别式返回（调用方无需 try/catch，绝不产生未捕获 JS 异常）：
+//   { ok:true, data:{sample_id,px_x,px_y,ref_class} }   成功
+//   { ok:false, code, message, run_id, status }          后端业务错误体（含 EX12 AOI 外）
+//   { ok:false, unavailable:true, status }               网络失败 / 非契约错误页
+// ==========================================================================
+export async function fromLngLat(payload) {
+  let resp;
+  try {
+    resp = await fetchWithTimeout(BASE + '/sample/from_lnglat', jsonOptions(payload));
+  } catch (_) {
+    return { ok: false, unavailable: true, status: 0 };
+  }
+  if (resp.ok) {
+    try {
+      return { ok: true, data: await resp.json() };
+    } catch (_) {
+      return { ok: false, unavailable: true, status: resp.status };
+    }
+  }
+  const err = await safeError(resp);
+  if (err) {
+    return { ok: false, code: err.code, message: err.message, run_id: err.run_id, status: resp.status };
+  }
+  return { ok: false, unavailable: true, status: resp.status };
+}

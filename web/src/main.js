@@ -12,6 +12,8 @@ import * as api from './api.js';
 import * as demo from './demo.js';
 import * as M from './map.js';
 import * as C from './charts.js';
+import * as HIST from './history.js';
+import * as SWIPE from './swipe.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
@@ -39,6 +41,8 @@ const S = {
   samples: [], sampleSeq: 0, curClass: 1, accuracy: null, accBusy: false,
   exportResult: null, exportBusy: false,
   csvBusy: false,
+  // 2B：图上点选（独立于既有 mapMode；关闭后恢复开启前的地图模式）
+  pickMode: false, pickPrevMode: null, pickBusy: false, picks: [],
 };
 
 // 在线取数（可选）卡片独立状态，与离线 S 完全隔离，互不污染。
@@ -428,7 +432,9 @@ async function runChangeDetection() {
     $('map-legend').hidden = false;
     renderChangeResult();
     renderSnapshot();
+    refreshSwipeFromChange(res.data); // 本轮合成图同步到「双时相对比」视图（缺图则置灰）
     refreshExportState();
+    updatePickRunLabel();
     $('run-done').hidden = false;
     $('run-done').textContent = '✓ 检测完成 · ' + index
       + (res.data.threshold_source ? ' · ' + res.data.threshold_source : '')
@@ -723,6 +729,171 @@ async function doExport(formats) {
     S.exportBusy = false;
     btn.textContent = '导出所选格式 · POST /report/export';
     refreshGates();
+  }
+}
+
+// ==========================================================================
+// 2B 扩展：结果卡视图标签页 / 历史运行载入 / 双时相卷帘 / 样本图上点选
+// 全部为新增状态与回调：离线 A~F、gate()、在线取数卡、既有 5 接口语义零变化。
+// ==========================================================================
+
+// 结果卡两个并列视图：既有「专题图 / 统计」与新增「双时相对比」
+function setResultView(view) {
+  const v = view === 'swipe' ? 'swipe' : 'thematic';
+  document.querySelectorAll('#result-tabs .view-tab').forEach((b) => {
+    const on = b.dataset.view === v;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+  $('view-thematic').hidden = v !== 'thematic';
+  $('view-swipe').hidden = v !== 'swipe';
+  if (v === 'thematic') C.resizeCharts();
+}
+
+// 本轮 /result/change 成功后同步卷帘图源（artifacts 为 {name:url} 清单）
+function refreshSwipeFromChange(data) {
+  const arts = (data && typeof data.artifacts === 'object' && data.artifacts) || {};
+  const snap = (data && data.params_snapshot) || {};
+  SWIPE.setSwipeSources({
+    t1Url: arts['t1_composite.png'] || '',
+    t2Url: arts['t2_composite.png'] || '',
+    t1: snap.t1 || S.t1, t2: snap.t2 || S.t2,
+    runId: data && data.run_id,
+  });
+}
+
+// 「载入到结果区」：把历史 run 的专题图与统计填入既有结果卡（不改 A 卡 AOI 输入）
+function loadHistoryRun(d) {
+  if (!d || !d.run_id) return;
+  const snap = d.params_snapshot || {};
+  const arts = Array.isArray(d.artifacts) ? d.artifacts : [];
+  const artUrl = (names) => {
+    for (const n of names) {
+      const a = arts.find((x) => x && x.name === n);
+      if (a && a.url) return String(a.url);
+    }
+    return '';
+  };
+  const png = artUrl(['change.png', 'change_ndvi.png', 'change_ndwi.png']);
+  S.change = {
+    run_id: d.run_id,
+    change_png: png,
+    stats: Array.isArray(snap.stats) ? snap.stats : [],
+    valid_ratio: snap.valid_ratio != null ? Number(snap.valid_ratio) : 0,
+    threshold: d.threshold != null ? d.threshold : snap.threshold,
+    threshold_source: d.threshold_source || snap.threshold_source,
+    params_snapshot: snap,
+    index: d.index || snap.index,
+  };
+  S.changePngUrl = png;
+  const b = (Array.isArray(d.bbox) && d.bbox.length === 4) ? boundsFromArray(d.bbox) : S.aoi;
+  if (png && !isUnsafeImageUrl(png) && b) {
+    // 地图 style 未就绪时跳过叠加即可，结果区填充不受影响，且绝不产生未捕获异常
+    try {
+      M.setImage(map, png, b);        // 用该 run 的 bbox 定位专题图，不覆盖用户当前 AOI 输入
+      M.setImageOpacity(map, S.opacity);
+      M.fitBounds(map, b, 90);
+    } catch (_) { /* 地图尚未 load */ }
+  }
+  $('map-legend').hidden = false;
+  renderChangeResult();
+  renderSnapshot();
+  refreshExportState();
+  // 历史 run 若未记录 valid_ratio，如实显示「—」，不误触发 EX11 告警横幅
+  if (snap.valid_ratio == null) {
+    const v = $('valid-ratio'); v.textContent = '—'; v.className = 'ratio-v';
+    const note = $('valid-note');
+    note.className = 'ratio-note';
+    note.textContent = '该历史运行未记录有效像元占比';
+    $('ex5-bar').hidden = true;
+  }
+  SWIPE.setSwipeRun(d);
+  updatePickRunLabel();
+  showToast('已载入历史运行 ' + String(d.run_id).slice(0, 8) + ' 到结果区', 'ok');
+}
+
+// ---------- 样本「图上点选」（REQ-09） ----------
+function updatePickRunLabel() {
+  const el = $('pick-run-id');
+  if (!el) return;
+  const rid = currentRunId();
+  el.textContent = '当前 run：' + (rid || '—（请先载入历史运行或运行检测）');
+}
+
+function syncPickUi() {
+  const chk = $('chk-pick-mode');
+  if (chk) chk.checked = S.pickMode;
+  const box = $('pick-box');
+  if (box) box.classList.toggle('active', S.pickMode);
+  const st = $('pick-mode-status');
+  if (st) {
+    st.textContent = S.pickMode
+      ? '已开启：点击地图按当前类别写入 sample 表（AOI 外会提示「超出 AOI 范围」）'
+      : '关闭：地图行为保持原样';
+  }
+  updatePickRunLabel();
+}
+
+function togglePickMode(on) {
+  const want = !!on;
+  if (want === S.pickMode) return;
+  if (want) {
+    S.pickPrevMode = S.mapMode;
+    S.pickMode = true;
+    setMapMode('browse');           // 开启期间不触发 AOI 框选 / 既有样本打点
+  } else {
+    S.pickMode = false;
+    setMapMode(S.pickPrevMode || 'aoi'); // 关闭后地图行为恢复原样
+    S.pickPrevMode = null;
+  }
+  syncPickUi();
+}
+
+function appendPickRow(body, lng, lat, ref) {
+  const tbody = $('pick-table').querySelector('tbody');
+  const tr = document.createElement('tr');
+  tr.dataset.sampleId = String(body.sample_id || '');
+  tr.innerHTML = '<td>' + S.picks.length + '</td>'
+    + '<td>' + esc(ref) + '</td>'
+    + '<td>' + Number(lng).toFixed(4) + ', ' + Number(lat).toFixed(4) + '</td>'
+    + '<td>' + esc(body.px_x) + ', ' + esc(body.px_y) + '</td>'
+    + '<td><code>' + esc(String(body.sample_id || '').slice(0, 8)) + '</code></td>';
+  tbody.appendChild(tr);
+  $('pick-count').textContent = S.picks.length + ' 条';
+}
+
+async function handleMapPick(lng, lat) {
+  if (S.pickBusy) return;
+  const rid = currentRunId();
+  if (!rid) {
+    showToast('请先载入一条历史运行，或完成一次变化检测后再图上点选', 'warn');
+    return;
+  }
+  const info = demo.CLASS_INFO[S.curClass] || demo.CLASS_INFO[3];
+  const ref = info.ref;
+  S.pickBusy = true;
+  let res;
+  try {
+    res = await api.fromLngLat({
+      run_id: rid, lng, lat, ref_class: ref, label: '图上点选 · ' + ref,
+    });
+  } catch (_) {
+    res = { ok: false, unavailable: true, status: 0 };
+  }
+  S.pickBusy = false;
+  if (res.ok && res.data) {
+    const b = res.data;
+    S.picks.push({
+      sample_id: b.sample_id || '', lng, lat,
+      px_x: b.px_x, px_y: b.px_y, ref_class: b.ref_class || ref,
+    });
+    appendPickRow(b, lng, lat, b.ref_class || ref);
+    addSample(lng, lat, S.curClass);   // 地图打点：复用既有样本图层
+    showToast('样本已入库 · ' + (b.ref_class || ref) + ' · 像元 (' + b.px_x + ', ' + b.px_y + ')', 'ok');
+  } else if (res.code === 'EX12') {
+    showToast('超出 AOI 范围', 'warn'); // AOI 外：不插入、不打点
+  } else {
+    showToast('样本点选失败：' + errorMessage({ code: res.code, message: res.message }), 'error');
   }
 }
 
@@ -1186,7 +1357,11 @@ function bindEvents() {
   });
 
   document.querySelectorAll('.mode-btn').forEach((b) => {
-    b.onclick = () => setMapMode(b.dataset.mode);
+    b.onclick = () => {
+      // 手切地图模式时同步退出「图上点选」，避免两种点击语义叠加
+      if (S.pickMode) { S.pickMode = false; S.pickPrevMode = null; syncPickUi(); }
+      setMapMode(b.dataset.mode);
+    };
   });
 
   $('class-btns').querySelectorAll('.class-btn').forEach((el) => {
@@ -1250,13 +1425,25 @@ function bindEvents() {
   $('btn-export-csv').onclick = downloadAreaStatsCsv;
   $('btn-onl-auto-best').onclick = autoSelectBestOnlineCandidate;
   syncRunAdvancedUi(); // 初始化开关/滑块/实时显值，不改变任何既有门控与离线路径
+
+  // ===== 2B：结果卡标签页 / 图上点选 / 历史运行（第七张常驻卡） =====
+  document.querySelectorAll('#result-tabs .view-tab').forEach((b) => {
+    b.onclick = () => setResultView(b.dataset.view);
+  });
+  $('chk-pick-mode').addEventListener('change', (e) => togglePickMode(e.target.checked));
+  SWIPE.initSwipe();
+  HIST.initHistory({
+    onSelect: (d) => SWIPE.setSwipeRun(d),  // 展开详情即切换卷帘图源（无合成图 → 置灰提示）
+    onLoad: loadHistoryRun,                  // 「载入到结果区」填充既有结果卡
+  });
+  syncPickUi();
 }
 
 function bindMapEvents() {
   // 矩形框选（AOI 框选模式，REQ-01）
   let drawing = false, moved = false, startPx = null, startLL = null;
   map.on('mousedown', (e) => {
-    if (S.mapMode !== 'aoi') return;
+    if (S.mapMode !== 'aoi' || S.pickMode) return;
     drawing = true; moved = false;
     startPx = { x: e.point.x, y: e.point.y };
     startLL = map.unproject(e.point);
@@ -1280,6 +1467,8 @@ function bindMapEvents() {
 
   // 样本点打点 / 删除（样本打点模式，REQ-09）
   map.on('click', (e) => {
+    // 图上点选优先：调用 POST /sample/from_lnglat（EX12 → toast，不插入）
+    if (S.pickMode) { handleMapPick(e.lngLat.lng, e.lngLat.lat); return; }
     if (S.mapMode !== 'sample') return;
     const feats = map.queryRenderedFeatures(e.point, { layers: ['sample-circles'] });
     if (feats.length) {
@@ -1327,6 +1516,8 @@ function init() {
   refreshExportState();
   refreshGates();
   setMapMode('aoi');
+  setResultView('thematic');
+  updatePickRunLabel();
 
   // 影像对清单启动即加载（自由流程：无 AOI 也可浏览，GET /scene/match 不强制 aoi_id）
   loadPairs();
