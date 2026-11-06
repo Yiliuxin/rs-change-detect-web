@@ -16,7 +16,7 @@ from typing import List, Optional
 from app.algorithm.geotransform import BBox
 from app.algorithm.radiometric import assert_same_caliber, check_baseline
 from app.api.errors import ApiError, as_api_error
-from app.config.constants import BLOCK_SIZE, RADIOMETRIC_FORMULAS
+from app.config.constants import BLOCK_SIZE, RADIOMETRIC_FORMULAS, SENSOR_S2
 from app.repository import aoi_repo, scene_repo, task_repo
 from app.service.change_service import load_scene
 
@@ -101,6 +101,14 @@ def match_get(aoi_id: Optional[str], t1: Optional[date], t2: Optional[date],
     run_id = task_repo.find_run_id_by_aoi(aoi_id) if aoi_id else None
     try:
         candidates = _resolve_candidates(aoi_id, scene_t1_id, scene_t2_id)
+        # 兼容既有契约：GET 的"全量清单"分支（无 aoi_id / 无显式 scene id）响应里
+        # 只有一个 sensor + formula_id 字段，无法表达混合辐射口径；历史语义是
+        # 返回同口径的 S2 预置景清单并做 EX8/EX9 校验。新增 Landsat C2 L2 景后
+        # 该分支仍只列 S2，避免把"混源"误报成 EX8；Landsat 景由 /aoi/select
+        # （ST_Intersects + 日期配对）以及带 aoi_id / scene id 的精确查询消费。
+        if not aoi_id and not (scene_t1_id and scene_t2_id):
+            candidates = [s for s in candidates
+                          if str(s["sensor"]).strip().upper() == SENSOR_S2]
         selected = _filter_by_dates(candidates, t1, t2)
         if not selected:
             raise ApiError("EX2", run_id=run_id)

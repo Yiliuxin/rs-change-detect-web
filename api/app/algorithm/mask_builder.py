@@ -15,6 +15,14 @@ from rasterio.enums import Resampling
 from rasterio.warp import reproject
 
 from app.algorithm.cog_reader import open_cog
+from app.config.constants import (
+    LANDSAT_NODATA_DN,
+    QA_PIXEL_BIT_FILL,
+    QA_PIXEL_CLOUD_BITS,
+    QA_PIXEL_INVALID_BITS,
+    QA_PIXEL_SHADOW_BITS,
+    QA_PIXEL_SNOW_BITS,
+)
 
 # Sentinel-2 Scene Classification Layer（SCL）类别定义
 SCL_NODATA = 0
@@ -112,3 +120,84 @@ def build_masks(
 
     valid = ~(cloud | cloud_shadow | snow | invalid)
     return MaskSet(cloud=cloud, cloud_shadow=cloud_shadow, snow=snow, invalid=invalid, valid=valid)
+
+
+# --------------------------------------------------------------------------- #
+# Landsat Collection 2 Level-2 QA_PIXEL 位解析（REQ-04 / REQ-05）
+# --------------------------------------------------------------------------- #
+# 重投影未覆盖区域的填充值：只置 bit0(Fill)，使之外于有效区（SCL 的 0 在 QA_PIXEL
+# 中恰好是"全清"，不能沿用 resample_scl 的填 0 策略，否则无效区会被判为有效）。
+QA_PIXEL_FILL_VALUE: int = 1 << QA_PIXEL_BIT_FILL
+
+
+def qa_pixel_bit_mask(qa_aligned, bits) -> np.ndarray:
+    """QA_PIXEL 位组合解析：命中任一给定位即 True（bit 编号从 0 起）。"""
+    arr = np.asarray(qa_aligned).astype(np.uint32, copy=False)
+    out = np.zeros(arr.shape, dtype=bool)
+    for bit in bits:
+        out |= (arr & (np.uint32(1) << np.uint32(int(bit)))) != 0
+    return out
+
+
+def landsat_dn_nodata_mask(dn_bands: dict, band_keys) -> Optional[np.ndarray]:
+    """Landsat SR 波段 ``DN == LANDSAT_NODATA_DN(0)`` 归 NODATA（任一波段命中即无效）。
+
+    先掩膜后缩放（NF4）：本函数只产出掩膜，绝不改动 DN 或做定标。
+    """
+    out: Optional[np.ndarray] = None
+    for key in band_keys:
+        arr = np.asarray(dn_bands[key])
+        hit = arr == LANDSAT_NODATA_DN
+        out = hit if out is None else (out | hit)
+    return out
+
+
+def resample_qa_pixel(qa_path, ref_profile: dict) -> np.ndarray:
+    """把 QA_PIXEL 对齐到参考网格（同网格直读，异网格最近邻重投影）。
+
+    返回 ``uint32``，避免把 QA_PIXEL 的 16 位位域截断成 uint8；未覆盖区域填
+    ``QA_PIXEL_FILL_VALUE``（仅置 Fill 位）而不是 0（0 = 全清，会被误判为有效）。
+    """
+    dst_shape = (int(ref_profile["height"]), int(ref_profile["width"]))
+    with open_cog(qa_path) as src:
+        same_grid = (
+            (src.height, src.width) == dst_shape
+            and tuple(float(v) for v in src.transform[:6])
+            == tuple(float(v) for v in ref_profile["transform"][:6])
+            and str(src.crs) == str(ref_profile["crs"])
+        )
+        if same_grid:
+            return src.read(1).astype(np.uint32)
+        dst = np.full(dst_shape, QA_PIXEL_FILL_VALUE, dtype=np.uint32)
+        reproject(
+            source=rasterio.band(src, 1),
+            destination=dst,
+            src_transform=src.transform,
+            src_crs=src.crs,
+            dst_transform=ref_profile["transform"],
+            dst_crs=ref_profile["crs"],
+            resampling=Resampling.nearest,
+        )
+        return dst
+
+
+def build_qa_pixel_masks(
+    qa_aligned,
+    nodata_mask: Optional[np.ndarray] = None,
+) -> MaskSet:
+    """由（已对齐的）QA_PIXEL 位域构建云 / 云影 / 雪 / 无效 / 有效掩膜。
+
+    bit0 Fill / bit1 Dilated Cloud / bit3 Cloud / bit4 Cloud Shadow / bit5 Snow
+    **任一命中即判无效**（``QA_PIXEL_INVALID_BITS`` 取自常量源）；bit2 cirrus /
+    bit6 clear / bit7 water 不参与判定。分组统计与 SCL 版本同口径。
+    """
+    qa = np.asarray(qa_aligned)
+    cloud = qa_pixel_bit_mask(qa, QA_PIXEL_CLOUD_BITS)
+    cloud_shadow = qa_pixel_bit_mask(qa, QA_PIXEL_SHADOW_BITS)
+    snow = qa_pixel_bit_mask(qa, QA_PIXEL_SNOW_BITS)
+    invalid = qa_pixel_bit_mask(qa, QA_PIXEL_INVALID_BITS)
+    if nodata_mask is not None:
+        invalid = invalid | np.asarray(nodata_mask, dtype=bool)
+    valid = ~invalid
+    return MaskSet(cloud=cloud, cloud_shadow=cloud_shadow, snow=snow,
+                   invalid=invalid, valid=valid)

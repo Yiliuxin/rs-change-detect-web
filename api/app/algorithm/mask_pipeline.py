@@ -14,7 +14,9 @@ from typing import Optional
 
 import numpy as np
 
-from app.algorithm.mask_builder import MaskSet, build_masks, resample_scl
+from app.algorithm.mask_builder import (
+    MaskSet, build_masks, build_qa_pixel_masks, resample_qa_pixel, resample_scl,
+)
 from app.config.constants import ERROR_MESSAGES, VALID_RATIO_MIN, VALID_RATIO_WARN
 
 CODE_OK = "OK"
@@ -97,13 +99,23 @@ def run_mask_pipeline(
     scl_path,
     ref_profile: dict,
     dn_nodata_mask: Optional[np.ndarray] = None,
+    qa_kind: str = "scl",
 ) -> tuple[MaskSet, ValidRatioResult]:
-    """掩膜流水线：SCL 重采样对齐 → 构建掩膜 → 计算占比 → 四段判定。
+    """掩膜流水线：QA 层重采样对齐 → 构建掩膜 → 计算占比 → **四段判定（不改）**。
 
-    返回 (MaskSet, ValidRatioResult)。调用方依据 ``terminate`` 决定是否中断流程。
+    ``qa_kind="scl"``（缺省）走 Sentinel-2 SCL 类别解析；``qa_kind="qa_pixel"``
+    走 Landsat C2 L2 QA_PIXEL 位解析。两条分支都在定标之前完成（NF4），且共用
+    同一个 ``judge_valid_ratio``，四段阈值口径完全不变。
     """
-    scl_aligned = resample_scl(scl_path, ref_profile)
-    masks = build_masks(scl_aligned, nodata_mask=dn_nodata_mask)
+    key = str(qa_kind or "scl").strip().lower()
+    if key == "qa_pixel":
+        qa_aligned = resample_qa_pixel(scl_path, ref_profile)
+        masks = build_qa_pixel_masks(qa_aligned, nodata_mask=dn_nodata_mask)
+    elif key == "scl":
+        scl_aligned = resample_scl(scl_path, ref_profile)
+        masks = build_masks(scl_aligned, nodata_mask=dn_nodata_mask)
+    else:
+        raise ValueError(f"不支持的 QA 层类型：{qa_kind!r}，仅支持 scl / qa_pixel")
     ratio = compute_valid_ratio(masks.valid)
     result = judge_valid_ratio(ratio, mask=masks.valid)
     return masks, result

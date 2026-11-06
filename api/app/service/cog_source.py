@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 from app.api.errors import ApiError
-from app.config.constants import COG_BUCKET
+from app.config.constants import COG_BUCKET, LANDSAT_BAND_ALIASES, LANDSAT_SENSORS
 from app.config.storage import StorageSettings, get_client, list_objects
 from app.service.common import DATA_ROOT, RUNS_ROOT
 
@@ -29,6 +29,19 @@ BANDS: Tuple[str, ...] = ("B02", "B03", "B04", "B08", "SCL")
 _TAG_RE = re.compile(r"^t[12]$", re.IGNORECASE)
 
 __all__ = ["BANDS", "parse_cog_path", "resolve_bands"]
+
+
+def _band_names(band: str, sensor: Optional[str] = None) -> Tuple[str, ...]:
+    """按 sensor 分派波段文件名别名（REQ-04 / Landsat C2 L2 链路接通）。
+
+    S2：``B02/B03/B04/B08/SCL``；L8/L9：额外接受
+    ``blue/green/red/nir08/qa_pixel`` 与 ``SR_B2/SR_B3/SR_B4/SR_B5/QA_PIXEL``。
+    内部统一键仍是 BANDS，服务层 / 算法层无需感知资产命名差异。
+    """
+    names = [band]
+    if str(sensor or "").strip().upper() in LANDSAT_SENSORS:
+        names.extend(LANDSAT_BAND_ALIASES.get(band, ()))
+    return tuple(dict.fromkeys(names))
 
 
 def parse_cog_path(cog_path: str) -> Tuple[str, str, str, str]:
@@ -48,13 +61,16 @@ def parse_cog_path(cog_path: str) -> Tuple[str, str, str, str]:
     return bucket, prefix, pair_name, tag
 
 
-def _match_band(object_name: str, band: str) -> bool:
-    """对象 basename 是否以 ``_<band>.tif`` 结尾（大小写不敏感）。"""
+def _match_band(object_name: str, band: str,
+                sensor: Optional[str] = None) -> bool:
+    """对象 basename 是否以 ``_<波段名>.tif`` 结尾（大小写不敏感，按 sensor 取别名）。"""
     base = object_name.rsplit("/", 1)[-1].upper()
-    return base.endswith(f"_{band.upper()}.TIF")
+    return any(base.endswith(f"_{name.upper()}.TIF")
+               for name in _band_names(band, sensor))
 
 
-def _from_minio(prefix: str, tag: str, run_id: str) -> Optional[Dict[str, Path]]:
+def _from_minio(prefix: str, tag: str, run_id: str,
+                sensor: Optional[str] = None) -> Optional[Dict[str, Path]]:
     """从 MinIO 下载 5 波段到 ``api/runs/<run_id>/_cog/<pair_name>/<tag>/``；失败返回 None。
 
     缓存目录**必须按 pair_name 隔离**：不同影像对的波段文件名完全相同
@@ -67,7 +83,7 @@ def _from_minio(prefix: str, tag: str, run_id: str) -> Optional[Dict[str, Path]]
         objects = list_objects(client, COG_BUCKET, prefix=prefix)
         picked: Dict[str, str] = {}
         for band in BANDS:
-            hits = [o for o in objects if _match_band(o, band)]
+            hits = [o for o in objects if _match_band(o, band, sensor)]
             if not hits:
                 logger.warning("MinIO prefix=%s 缺少波段 %s", prefix, band)
                 return None
@@ -88,31 +104,38 @@ def _from_minio(prefix: str, tag: str, run_id: str) -> Optional[Dict[str, Path]]
         return None
 
 
-def _from_local(pair_name: str, tag: str) -> Optional[Dict[str, Path]]:
+def _from_local(pair_name: str, tag: str,
+                sensor: Optional[str] = None) -> Optional[Dict[str, Path]]:
     """回退本地 data/pair_<name>_*/ 目录（只读，不修改）。"""
     if not pair_name or not DATA_ROOT.exists():
         return None
     for pair_dir in sorted(p for p in DATA_ROOT.glob(f"{pair_name}*") if p.is_dir()):
         paths: Dict[str, Path] = {}
         for band in BANDS:
-            # 兼容 t1_B04.tif 与 t1_20231102_B04.tif 两种命名
-            hits = sorted(pair_dir.glob(f"{tag}*_{band}.tif"))
-            if not hits:
-                hits = sorted(pair_dir.glob(f"{tag}*_{band}.TIF"))
-            if hits:
-                paths[band] = hits[0]
+            # 兼容 t1_B04.tif 与 t1_20231102_B04.tif 两种命名，以及 Landsat 资产别名
+            for name in _band_names(band, sensor):
+                hits = sorted(pair_dir.glob(f"{tag}*_{name}.tif"))
+                if not hits:
+                    hits = sorted(pair_dir.glob(f"{tag}*_{name}.TIF"))
+                if hits:
+                    paths[band] = hits[0]
+                    break
         if len(paths) == len(BANDS):
             return paths
     return None
 
 
-def resolve_bands(cog_path: str, run_id: str) -> Dict[str, Path]:
-    """把目录前缀解析为 5 波段本地文件路径（MinIO 优先，本地回退）。"""
+def resolve_bands(cog_path: str, run_id: str,
+                  sensor: Optional[str] = None) -> Dict[str, Path]:
+    """把目录前缀解析为 5 波段本地文件路径（MinIO 优先，本地回退）。
+
+    ``sensor`` 为 L8/L9 时按 Landsat C2 L2 资产别名匹配；缺省 / S2 时行为不变。
+    """
     _bucket, prefix, pair_name, tag = parse_cog_path(cog_path)
 
-    paths = _from_minio(prefix, tag, run_id)
+    paths = _from_minio(prefix, tag, run_id, sensor)
     if paths is None:
-        paths = _from_local(pair_name, tag)
+        paths = _from_local(pair_name, tag, sensor)
 
     if paths is None or len(paths) != len(BANDS):
         raise ApiError("SYS-01", run_id=run_id,

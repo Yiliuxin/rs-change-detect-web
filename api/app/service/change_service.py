@@ -29,6 +29,7 @@ from app.algorithm.composite import (
 )
 from app.algorithm.geotransform import BBox
 from app.algorithm.index_raster import IndexRaster
+from app.algorithm.mask_builder import landsat_dn_nodata_mask
 from app.algorithm.mask_pipeline import (
     compute_valid_ratio, judge_valid_ratio, run_mask_pipeline,
 )
@@ -42,7 +43,7 @@ from app.algorithm.writers import export_triplet
 from app.api.errors import ApiError, as_api_error
 from app.config.constants import (
     ATTRIBUTION_S2, ATTRIBUTION_S2_MODIFIED, BLOCK_SIZE, EXPORT_FORMATS,
-    MANUAL_THRESHOLD_RANGE, METHOD_OTSU, METHOD_REGRESSION,
+    LANDSAT_SENSORS, MANUAL_THRESHOLD_RANGE, METHOD_OTSU, METHOD_REGRESSION,
     REGRESSION_MAX_ROUNDS, REGRESSION_SIGMA_FACTOR, radiometric_formula,
     VALID_CHANGE_METHODS, VALID_INDEXES,
     VALID_RATIO_MIN, VALID_RATIO_WARN,
@@ -139,8 +140,10 @@ def load_scene(cog_path: str, sensor: str, baseline: Optional[str],
 
     供 change_service 与 scene_service(POST 补 clip_window/valid_ratio) 复用。
     """
-    check_baseline(sensor, baseline)  # EX9：基线缺失 / <04.00
-    paths = resolve_bands(cog_path, run_id)  # SYS-01：COG 5 波段解析失败
+    check_baseline(sensor, baseline)  # EX9：基线缺失 / <04.00 / 非 C2 L2
+    # 按 scene 的 sensor 分派资产别名（L8/L9 → SR_B2..B5 / QA_PIXEL）
+    paths = resolve_bands(cog_path, run_id, sensor)  # SYS-01：COG 5 波段解析失败
+    is_landsat = str(sensor or "").strip().upper() in LANDSAT_SENSORS
 
     dn, profiles, ref_window = {}, {}, None
     for band in _BANDS_10M:
@@ -154,17 +157,24 @@ def load_scene(cog_path: str, sensor: str, baseline: Optional[str],
     for band in ("B02", "B03", "B08"):
         assert_grid_aligned(ref_profile, profiles[band])  # EX4
 
-    nodata_value = ref_profile.get("nodata")
-    if nodata_value is not None:
-        nodata_mask = np.zeros(dn["B04"].shape, dtype=bool)
-        for band in _BANDS_10M:
-            nodata_mask |= dn[band] == nodata_value
+    if is_landsat:
+        # Landsat C2 L2：SR 波段 DN=0 即 NODATA（不因 nodata 元信息缺失而漏掩）
+        nodata_mask = landsat_dn_nodata_mask(dn, _BANDS_10M)
+        qa_kind = "qa_pixel"
     else:
-        nodata_mask = None
+        nodata_value = ref_profile.get("nodata")
+        if nodata_value is not None:
+            nodata_mask = np.zeros(dn["B04"].shape, dtype=bool)
+            for band in _BANDS_10M:
+                nodata_mask |= dn[band] == nodata_value
+        else:
+            nodata_mask = None
+        qa_kind = "scl"
 
-    # SCL 20m → 10m 重采样对齐后构建掩膜
+    # NF4：先掩膜后缩放。SCL 20m→10m 重采样 / QA_PIXEL 位域解析，四段判定共用不改
     masks, ratio_result = run_mask_pipeline(
-        str(paths["SCL"]), ref_profile, dn_nodata_mask=nodata_mask
+        str(paths["SCL"]), ref_profile, dn_nodata_mask=nodata_mask,
+        qa_kind=qa_kind,
     )
     return {
         "dn": dn, "profile": ref_profile, "paths": paths,
