@@ -93,6 +93,12 @@
                   <label class="chk" title="NDVI =(NIR−R)/(NIR+R)，默认"><input type="radio" name="index-type" value="NDVI" checked /> NDVI</label>
                   <label class="chk" title="NDWI =(G−NIR)/(G+NIR)，水体变化"><input type="radio" name="index-type" value="NDWI" /> NDWI</label>
                 </div>
+                <!-- 4A（REQ-11）：检测方法与 index / 手动阈值 / 后台运行各自独立，默认差值法 -->
+                <label class="fld method-label" for="change-method">检测方法 method<span class="req">REQ-11</span></label>
+                <select id="change-method" title="差值法=既有 Otsu 自适应；回归法=对 NDVI 稳健回归残差做 Otsu">
+                  <option value="otsu" selected>差值法（Otsu）</option>
+                  <option value="regression">回归法（回归残差）</option>
+                </select>
               </div>
             </div>
 
@@ -276,6 +282,7 @@
               <div class="metric-row gap-top">
                 <div class="metric"><div class="k">变化阈值 ΔNDVI<span class="req">REQ-07</span></div><div class="v" id="threshold-val">—</div></div>
                 <div class="metric"><div class="k">run_id<span class="req">REQ-14</span></div><div class="v v-sm" id="runid-val">—</div></div>
+                <div class="metric"><div class="k">检测方法<span class="req">REQ-11</span></div><div class="v" id="method-val">—</div></div>
               </div>
               <div class="gap-top"><table class="tbl" id="stats-table"></table></div>
               <!-- 面积统计 CSV 导出（REQ-08/11/14）：GET /report/area_stats/{run_id}.csv → Blob 同源下载 -->
@@ -314,6 +321,17 @@
               <p class="empty-sub">将地图切到<strong>「样本打点」</strong>模式点击打点（按类别着色），每类 ≥ 30 个方可计算精度。</p>
             </div>
             <div id="acc-body">
+              <!-- 4A（REQ-11）：method=regression 时展示回归摘要，数值只读取自 params_snapshot -->
+              <div class="inner-card reg-box" id="reg-summary" hidden>
+                <div class="card-subtitle reg-title">回归拟合摘要<span class="req">REQ-11 / REQ-14</span><span class="readonly-badge">NF9 · 只读</span></div>
+                <div class="reg-grid">
+                  <div class="reg-item"><div class="k">斜率 a</div><div class="v" id="reg-a">—</div></div>
+                  <div class="reg-item"><div class="k">截距 b</div><div class="v" id="reg-b">—</div></div>
+                  <div class="reg-item"><div class="k">残差 σ</div><div class="v" id="reg-sigma">—</div></div>
+                  <div class="reg-item"><div class="k">reg_threshold</div><div class="v" id="reg-threshold">—</div></div>
+                </div>
+                <div class="reg-note" id="reg-note"></div>
+              </div>
               <div class="card-subtitle">当前打点类别</div>
               <div class="class-btns" id="class-btns">
                 <div class="class-btn active" data-cls="1" title="切换打点类别为 1 增强"><span class="dot" style="background:#21a04c"></span>1 增强</div>

@@ -229,6 +229,31 @@ async function submitAoi() {
 }
 
 // ===== UI-02：影像对（REQ-02 / REQ-04） =====
+// 4A：只把 landsat_<地名> 组的两期日期补进 A 卡时相下拉，保证新入库影像对
+// 可被 /aoi/select 精确匹配；既有 3 组 seed 的 PRESET_DATES 与 11 组 S2 选项、
+// 已选时相完全不变，演示降级路径不下发任何补充日期。
+function extendPresetDates(pairs) {
+  const extra = [];
+  (pairs || []).forEach((p) => {
+    if (!/^landsat_/.test(String((p && p.key) || ''))) return;
+    const t1 = p.scenes && p.scenes.t1, t2 = p.scenes && p.scenes.t2;
+    if (t1 && t1.date) extra.push(String(t1.date));
+    if (t2 && t2.date) extra.push(String(t2.date));
+  });
+  if (!extra.length) return;
+  const current = Array.from($('t1').options).map((o) => o.value).filter(Boolean);
+  const all = Array.from(new Set(current.concat(extra))).sort();
+  const v1 = $('t1').value, v2 = $('t2').value;
+  const html = '<option value="">— 选择时相 —</option>'
+    + all.map((d) => '<option value="' + esc(d) + '">' + esc(d) + '</option>').join('');
+  $('t1').innerHTML = html;
+  $('t2').innerHTML = html;
+  $('t1').value = v1;
+  $('t2').value = v2;
+  S.t1 = $('t1').value;
+  S.t2 = $('t2').value;
+}
+
 async function loadPairs() {
   const box = $('pair-list');
   box.innerHTML = '<div class="status-line"><span class="spinner"></span>正在获取影像对…</div>';
@@ -240,6 +265,7 @@ async function loadPairs() {
     S.pairVia = res.via || '';
     const viaLabel = { GET: 'GET /scene/match', POST: 'POST /scene/match', SEED: '本地演示 seed' }[S.pairVia] || S.pairVia;
     $('pair-count').textContent = '共 ' + S.pairs.length + ' 组 · ' + viaLabel;
+    extendPresetDates(S.pairs);
     renderPairs();
     autoSelectPair();
   } catch (e) {
@@ -253,7 +279,7 @@ function pairMatchesFilter(p) {
   if (!q) return true;
   const t1 = (p.scenes && p.scenes.t1) || {};
   const t2 = (p.scenes && p.scenes.t2) || {};
-  return [p.label, p.tile, t1.date, t2.date, t1.cloud_cover, t2.cloud_cover, t1.scene_id, t2.scene_id]
+  return [p.label, p.key, p.tile, p.source, t1.date, t2.date, t1.cloud_cover, t2.cloud_cover, t1.scene_id, t2.scene_id]
     .some((v) => v != null && String(v).toLowerCase().includes(q));
 }
 
@@ -273,6 +299,8 @@ function renderPairs() {
     const t2 = (p.scenes && p.scenes.t2) || {};
     const hi1 = Number(t1.cloud_cover) > 50, hi2 = Number(t2.cloud_cover) > 50;
     const sel = S.selectedPair === p ? ' selected' : '';
+    const source = String(p.source || 'Sentinel-2 L2A');
+    const isLs = source === 'Landsat C2 L2';
     const sceneRow = (tag, sc, hi) => `
       <div class="pair-scene">
         <span class="tag ${tag === 't1' ? 'tag-t1' : 'tag-t2'}">${tag.toUpperCase()}</span>
@@ -282,7 +310,7 @@ function renderPairs() {
       <div class="pair-meta">基线 ${esc(sc.proc_baseline || '—')} · 传感器 ${esc(sc.sensor || '—')}</div>`;
     return `
       <div class="pair-card${sel}" data-idx="${i}">
-        <div class="pair-head"><span class="radio"></span><span class="pair-name">${esc(p.label || p.name || '影像对 ' + (i + 1))}</span><span class="pair-tile">${esc(p.tile || '—')}</span></div>
+        <div class="pair-head"><span class="radio"></span><span class="pair-name">${esc(p.label || p.name || '影像对 ' + (i + 1))}</span><span class="pair-source${isLs ? ' pair-source-landsat' : ''}">${esc(source)}</span><span class="pair-tile">${esc(p.tile || '—')}</span></div>
         ${sceneRow('t1', t1, hi1)}
         ${sceneRow('t2', t2, hi2)}
         ${(hi1 || hi2) ? '<div class="cloud-note">⚠ 云量 &gt; 50%，该时相影像质量偏低</div>' : ''}
@@ -378,12 +406,19 @@ function isUnsafeImageUrl(u) {
 
 // ===== 批次 1（REQ-07）：C 卡指数切换 + 「高级选项」手动阈值 =====
 // 开关关闭时 threshold 为 undefined：api.runChange 不会下发该字段，后端走 Otsu 自适应。
+// 4A（REQ-11）：method 与 index / threshold / 后台运行开关各自独立读取，互不改写对方状态。
+const METHOD_LABELS = { otsu: '差值法', regression: '回归法' };
+const VALID_METHODS = ['otsu', 'regression'];
+
 function runParams() {
   const checked = document.querySelector('input[name="index-type"]:checked');
   const index = (checked && String(checked.value).toUpperCase()) || 'NDVI';
   const manual = !!($('manual-threshold') && $('manual-threshold').checked);
   const threshold = manual ? Number($('threshold-slider').value) : undefined;
-  return { index, threshold };
+  const sel = $('change-method');
+  const raw = String((sel && sel.value) || 'otsu').trim().toLowerCase();
+  const method = VALID_METHODS.includes(raw) ? raw : 'otsu';
+  return { index, threshold, method };
 }
 
 // 折叠区实时态：开关控制滑块可用性，滑块拖动实时显值（step 0.01 / -0.5~0.5）
@@ -416,6 +451,7 @@ function applyChangeResult(data) {
   $('map-legend').hidden = false;
   renderChangeResult();
   renderSnapshot();
+  renderRegressionSummary(); // 4A：回归法摘要（同步 / 后台 SUCCESS 共用同一渲染口径）
   refreshSwipeFromChange(data); // 本轮合成图同步到「双时相对比」视图（缺图则置灰）
   refreshExportState();
   updatePickRunLabel();
@@ -431,12 +467,15 @@ async function runChangeDetection() {
   btn.disabled = true;
   btn.textContent = '运行中…';
   $('run-progress').hidden = false;
-  const { index, threshold } = runParams();
-  $('run-status').textContent = '正在运行变化检测（读取 COG → 掩膜 → Δ' + index
+  const { index, threshold, method } = runParams();
+  $('run-status').textContent = '正在运行变化检测（' + METHOD_LABELS[method] + ' · 读取 COG → 掩膜 → Δ' + index
     + (threshold === undefined ? ' → Otsu 自适应阈值' : ' → 手动阈值 T=' + threshold.toFixed(2))
     + ' → 渲染专题图）…';
   $('run-done').hidden = true;
-  const body = { run_id: currentRunId(), index, block_size: Number($('block-size').value) || 256 };
+  const body = {
+    run_id: currentRunId(), index, method,
+    block_size: Number($('block-size').value) || 256,
+  };
   if (threshold !== undefined) body.threshold = threshold;
   try {
     const res = await api.runChange(body);
@@ -444,7 +483,7 @@ async function runChangeDetection() {
     else setDataBadge(false, 'POST /result/change');
     applyChangeResult(res.data);
     $('run-done').hidden = false;
-    $('run-done').textContent = '✓ 检测完成 · ' + index
+    $('run-done').textContent = '✓ 检测完成 · ' + METHOD_LABELS[method] + ' · ' + index
       + (res.data.threshold_source ? ' · ' + res.data.threshold_source : '')
       + (res.data.threshold != null ? ' T=' + Number(res.data.threshold).toFixed(2) : '')
       + ' · run_id ' + res.data.run_id;
@@ -575,8 +614,9 @@ function bgTerminal(status, data) {
       setDataBadge(false, 'POST /result/change (async)');
       applyChangeResult(result);
       $('run-done').hidden = false;
-      $('run-done').textContent = '✓ 后台运行完成 · ' + (result.index || 'NDVI')
-        + ' · run_id ' + result.run_id + ' · 耗时 ' + elapsed + 's';
+      $('run-done').textContent = '✓ 后台运行完成 · '
+        + (METHOD_LABELS[String(result.method || 'otsu').toLowerCase()] || '差值法') + ' · '
+        + (result.index || 'NDVI') + ' · run_id ' + result.run_id + ' · 耗时 ' + elapsed + 's';
       showToast('后台运行完成，结果已渲染（耗时 ' + elapsed + 's）', 'ok', 4200);
     } else {
       bgShowFailure('后台任务成功但未返回结果数据（result 为空）');
@@ -656,8 +696,11 @@ async function runChangeAsync() {
   $('run-async-progress').dataset.seen = '';
   $('run-async-failed').hidden = true;
   $('run-async-failed').textContent = '';
-  const { index, threshold } = runParams();
-  const body = { run_id: currentRunId(), index, block_size: Number($('block-size').value) || 256 };
+  const { index, threshold, method } = runParams();
+  const body = {
+    run_id: currentRunId(), index, method,
+    block_size: Number($('block-size').value) || 256,
+  };
   if (threshold !== undefined) body.threshold = threshold;
   try {
     const res = await api.startAsyncChange(body);
@@ -686,6 +729,8 @@ function renderChangeResult() {
   renderValidRatio();
   $('threshold-val').textContent = d.threshold != null ? Number(d.threshold).toFixed(3) : '—';
   $('runid-val').textContent = d.run_id || '—';
+  const method = String(d.method || (d.params_snapshot && d.params_snapshot.method) || 'otsu').toLowerCase();
+  $('method-val').textContent = METHOD_LABELS[method] || method || '—';
   const stats = d.stats || [];
   const totalPx = stats.reduce((a, s) => a + Number(s.pixel_count || 0), 0);
   const names = { 1: '增强', 2: '退化', 3: '稳定' };
@@ -840,6 +885,31 @@ function refreshExportState() {
   refreshGates();
 }
 
+// 4A（REQ-11 / REQ-14）：method=regression 时展示回归摘要，a / b / σ / reg_threshold
+// 一律取自后端 params_snapshot（NF9 只读）；差值法或字段缺失时整块隐藏。
+function renderRegressionSummary() {
+  const box = $('reg-summary');
+  if (!box) return;
+  const d = S.change || {};
+  const ps = d.params_snapshot || {};
+  const method = String(ps.method || d.method || '').toLowerCase();
+  const vals = [ps.a, ps.b, ps.sigma, ps.reg_threshold];
+  const has = method === 'regression' && vals.every((v) => v != null && v !== '');
+  box.hidden = !has;
+  if (!has) return;
+  const fmt = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n.toFixed(4) : '—';
+  };
+  $('reg-a').textContent = fmt(ps.a);
+  $('reg-b').textContent = fmt(ps.b);
+  $('reg-sigma').textContent = fmt(ps.sigma);
+  $('reg-threshold').textContent = fmt(ps.reg_threshold);
+  $('reg-note').textContent = 'index_t2 = a·index_t1 + b，对残差 r 做 Otsu'
+    + (ps.rounds != null ? ' · 稳健拟合 ' + ps.rounds + ' 轮' : '')
+    + ' · 取自 params_snapshot（NF9 只读）';
+}
+
 function renderSnapshot() {
   const ps = (S.change && S.change.params_snapshot) || {};
   // 后端快照字段可能为对象（如基线 {S2: ...}），统一安全字符串化，避免 [object Object]
@@ -861,6 +931,7 @@ function renderSnapshot() {
     ['变化阈值 ΔNDVI', fmt(ps.threshold, '—'), false],
     ['分块尺寸 (px)', fmt(ps.block_size, '—'), false],
     ['指数类型', fmt(ps.index, 'NDVI'), false],
+    ['检测方法 method', fmt(ps.method || (S.change && S.change.method), 'otsu'), false],
   ];
   $('snapshot-table').innerHTML = '<tbody>' + rows.map(([k, v, code]) =>
     `<tr><td class="k">${esc(k)}</td><td>${code ? '<code>' + esc(v) + '</code>' : esc(v)}</td></tr>`).join('') + '</tbody>';
@@ -1023,6 +1094,7 @@ function loadHistoryRun(d) {
   $('map-legend').hidden = false;
   renderChangeResult();
   renderSnapshot();
+  renderRegressionSummary(); // 历史 run 的 params_snapshot 同样驱动回归摘要
   refreshExportState();
   // 历史 run 若未记录 valid_ratio，如实显示「—」，不误触发 EX11 告警横幅
   if (snap.valid_ratio == null) {
@@ -1741,6 +1813,7 @@ function init() {
 
   updateCounts();
   renderSnapshot();
+  renderRegressionSummary();
   renderFiles([], false);
   refreshExportState();
   refreshGates();

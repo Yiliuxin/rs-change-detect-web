@@ -80,13 +80,30 @@ const PAIR_LABELS = {
   qinghaihu: '青海湖 高寒草甸 生长期→枯黄期(湖岸草甸季相)',
   hetao: '河套灌区 作物生长期→收割后(灌溉农业)',
   xilingol: '锡林郭勒草原 草生长期→枯黄期(草甸季相)',
+  landsat_poyang: '鄱阳湖 Landsat 2023夏→2024夏(水体与植被季相)',
 };
+
+// 4A：新入库 Landsat C2 L2 影像对索引（命名规则 landsat_<地名>）。
+// 无参 GET /scene/match 按既有契约只列 S2 预置景，故按 scene_id 精确查询补齐清单；
+// 这里只登记索引 id，日期/云量/基线/传感器等真实元数据一律由后端返回，前端不臆造。
+// scene_id 由 data/fetch_landsat.py 的 uuid5 确定性生成，与库内记录一一对应；
+// 精确查询不可用或该组未入库时静默跳过，既有 S2 主清单完全不受影响。
+const LANDSAT_PAIR_IDS = [
+  {
+    key: 'landsat_poyang',
+    scene_t1_id: 'd9af7fed-3f4f-51d0-abf8-fa62150f5a49',
+    scene_t2_id: 'f465db6c-74dd-5639-bb0d-9e778c5712f4',
+  },
+];
 
 function pairGroupKey(sc) {
   const cp = sc && sc.cog_path;
   if (typeof cp === 'string') {
     const m = cp.match(/pair_([A-Za-z0-9_-]+)/);
     if (m) return { key: m[1], byTile: false };
+    // Landsat C2 L2 的 cog_path 形如 minio://scenes/landsat_<地名>/<t1|t2>/（无 pair_ 前缀）
+    const l = cp.match(/(?:^|\/)landsat_([A-Za-z0-9_-]+?)(?=\/|$)/);
+    if (l) return { key: 'landsat_' + l[1], byTile: false };
   }
   // cog_path 缺失时回退按 tile 分组（加前缀避免与 pair_<name> 键冲突）
   if (sc && sc.tile) return { key: 'tile_' + sc.tile, byTile: true };
@@ -111,6 +128,14 @@ function sceneVO(sc, phase) {
     phase,
     cog_path: sc.cog_path,
   };
+}
+
+// source 徽标口径：L8/L9 或 landsat_ 组 → Landsat C2 L2；其余沿用 S2 L2A。
+// 逐字对应后端常量 LS_COLLECTION="C2L2" 与库内 proc_baseline，不臆造数据源名称。
+function pairSource(key, t1, t2) {
+  const sensor = String((t1 && t1.sensor) || (t2 && t2.sensor) || '').trim().toUpperCase();
+  if (/^landsat_/.test(key) || sensor === 'L8' || sensor === 'L9') return 'Landsat C2 L2';
+  return 'Sentinel-2 L2A';
 }
 
 export function pickPairs(j) {
@@ -146,15 +171,45 @@ export function pickPairs(j) {
     if (mk1 && mk2) { t1 = mk1; t2 = mk2; }
 
     const tile = t1.tile || t2.tile || '—';
-    const label = PAIR_LABELS[key] || (key + ' · ' + t1.acq_date + ' → ' + t2.acq_date);
+    const label = PAIR_LABELS[key]
+      || (/^landsat_/.test(key)
+        ? (key.slice('landsat_'.length) + ' · Landsat C2 L2 · ' + t1.acq_date + ' → ' + t2.acq_date)
+        : (key + ' · ' + t1.acq_date + ' → ' + t2.acq_date));
     pairs.push({
       key,
       label,
       tile,
+      source: pairSource(key, t1, t2),
       scenes: { t1: sceneVO(t1, 't1'), t2: sceneVO(t2, 't2') },
     });
   }
   return pairs.length ? pairs : null;
+}
+
+// 4A 补充清单：无参 GET /scene/match 按既有契约只返回 S2 预置景，已入库的
+// Landsat C2 L2 组按 scene_id 走同一 GET 的精确查询分支取回真实元数据。
+// 与主清单相互独立：失败/未入库静默跳过，绝不改变既有 11 组 S2 与演示降级路径。
+async function extraLandsatPairs() {
+  const out = [];
+  for (const item of LANDSAT_PAIR_IDS) {
+    try {
+      const q = '?scene_t1_id=' + encodeURIComponent(item.scene_t1_id)
+        + '&scene_t2_id=' + encodeURIComponent(item.scene_t2_id);
+      const r = await fetchWithTimeout(BASE + '/scene/match' + q, {
+        method: 'GET', headers: { 'Content-Type': 'application/json' },
+      });
+      if (!r.ok) continue;
+      const got = pickPairs(await r.json());
+      if (got) out.push(...got);
+    } catch (_) { /* 可选补充清单不可用：保持既有主清单 */ }
+  }
+  return out;
+}
+
+async function withExtraPairs(pairs) {
+  const extra = await extraLandsatPairs();
+  extra.forEach((p) => { if (!pairs.some((x) => x.key === p.key)) pairs.push(p); });
+  return pairs;
 }
 
 export async function listScenePairs(aoiId) {
@@ -165,7 +220,7 @@ export async function listScenePairs(aoiId) {
     });
     if (g.ok) {
       const pairs = pickPairs(await g.json());
-      if (pairs) return { data: { pairs }, demo: false, via: 'GET' };
+      if (pairs) return { data: { pairs: await withExtraPairs(pairs) }, demo: false, via: 'GET' };
     } else {
       const err = await safeError(g);
       if (err) throw err;
@@ -182,7 +237,7 @@ export async function listScenePairs(aoiId) {
     }));
     if (p.ok) {
       const pairs = pickPairs(await p.json());
-      if (pairs) return { data: { pairs }, demo: false, via: 'POST' };
+      if (pairs) return { data: { pairs: await withExtraPairs(pairs) }, demo: false, via: 'POST' };
     } else {
       const err = await safeError(p);
       if (err) throw err;
@@ -206,12 +261,17 @@ export function matchScene(payload) {
 }
 
 // ---------- 4) REQ-05/08/10/11：变化检测主流程 ----------
-// 批次 1 扩展（REQ-07）：payload 可选携带 index / threshold。
+// 批次 1 扩展（REQ-07）+ 4A（REQ-11）：payload 可选携带 index / threshold / method。
 // 签名与 {data, demo} 返回结构不变；threshold 未提供时**不下发该字段**，
 // 后端走 Otsu 自适应（threshold_source=otsu），缺省行为与历史版本一致。
+// method 仅接受后端白名单 constants.py VALID_CHANGE_METHODS；缺省/非法一律 otsu，
+// 既不向后端提交非法值触发 EX12，也保证切回差值法时请求与旧行为等价。
+const VALID_CHANGE_METHODS = ['otsu', 'regression'];
 export function runChange(payload) {
   const body = { ...(payload || {}) };
   body.index = String(body.index || 'NDVI').toUpperCase();
+  const method = String(body.method || 'otsu').trim().toLowerCase();
+  body.method = VALID_CHANGE_METHODS.includes(method) ? method : 'otsu';
   if (body.threshold == null) delete body.threshold;
   else body.threshold = Number(body.threshold);
   return call(
