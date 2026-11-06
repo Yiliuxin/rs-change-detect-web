@@ -681,3 +681,18 @@ input[type="range"]:disabled { opacity: .45; cursor: not-allowed; }
 .reg-item .k { font-size: 10px; color: var(--muted2); }
 .reg-item .v { font-size: 13px; font-weight: 800; font-variant-numeric: tabular-nums; margin-top: 2px; word-break: break-all; }
 .reg-note { margin-top: 7px; font-size: 10.5px; color: var(--muted); line-height: 1.5; }
+
+/* ===== 任务 A：A 卡「预置地点」下拉 + E 卡「自动分层采样」===== */
+.preset-aoi-row { display: flex; align-items: flex-end; gap: 8px; }
+.preset-aoi-field { flex: 1 1 auto; min-width: 0; }
+.preset-aoi-ctl { display: flex; align-items: center; gap: 6px; }
+.preset-aoi-ctl select { flex: 1 1 auto; min-width: 0; }
+.preset-aoi-row > .btn { flex: 0 0 auto; }
+.preset-sensor {
+  flex: 0 0 auto; white-space: nowrap; font-size: 10px; font-weight: 700;
+  padding: 3px 6px; border-radius: 5px;
+  border: 1px solid var(--line); background: var(--card2); color: var(--muted2);
+}
+.preset-sensor-landsat { color: #7a4a12; background: #fdf0dc; border-color: rgba(185, 126, 15, .45); }
+.preset-hint { margin-top: 5px; font-size: 10.5px; color: var(--muted2); line-height: 1.5; word-break: break-all; }
+#auto-sample-wrap .preset-hint { margin-top: 7px; }

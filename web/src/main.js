@@ -43,6 +43,8 @@ const S = {
   csvBusy: false,
   // 2B：图上点选（独立于既有 mapMode；关闭后恢复开启前的地图模式）
   pickMode: false, pickPrevMode: null, pickBusy: false, picks: [],
+  // 任务 A：预置地点清单（GET /scene/preset_aois）与自动分层采样，独立于离线/在线状态
+  presets: [], presetBusy: false, autoSampleBusy: false,
 };
 
 // 在线取数（可选）卡片独立状态，与离线 S 完全隔离，互不污染。
@@ -226,6 +228,139 @@ async function submitAoi() {
     btn.textContent = '应用 AOI · POST /aoi/select';
     refreshGates();
   }
+}
+
+// ==========================================================================
+// 任务 A：A 卡「预置地点」下拉 + 「填入」（GET /scene/preset_aois，12 组）
+// 只新增一条快捷填充通道：既有 3 个 seed 按钮、PRESET_DATES 演示降级层、B 卡
+// 12 组清单、在线取数卡与后台运行零变化。接口不可用时仅内联提示，绝不弹全局
+// 错误横幅、绝不把后端错误码抛成未捕获异常，因此不影响离线预置路径。
+// 中文短名与 api.js PAIR_LABELS 同名对齐；Landsat 组按任务书用「鄱阳湖(Landsat)」。
+// ==========================================================================
+const PRESET_LABELS = {
+  poyang: '鄱阳湖(汛期→枯水期)',
+  farmland: '赣中农田(生长期→枯黄期)',
+  nanchang: '南昌(初冬→深冬)',
+  dongting: '洞庭湖(汛期→枯水期)',
+  taihu: '太湖(夏季作物→冬季裸地)',
+  yellow_delta: '黄河三角洲(生长季→枯水期)',
+  north_china: '华北平原(夏玉米→冬小麦)',
+  sanjiang: '三江平原(水田生长期→收割后)',
+  qinghaihu: '青海湖(高寒草甸季相)',
+  hetao: '河套灌区(灌溉农业)',
+  xilingol: '锡林郭勒草原(草甸季相)',
+  landsat_poyang: '鄱阳湖(Landsat)',
+};
+const PRESET_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function presetLabel(p) {
+  return (p && PRESET_LABELS[p.name]) || (p && p.name) || '—';
+}
+
+function presetSensor(p) {
+  return String((p && p.sensor) || '').trim().toUpperCase() || '—';
+}
+
+function selectedPreset() {
+  const name = $('preset-aoi') && $('preset-aoi').value;
+  return name ? S.presets.find((p) => p.name === name) || null : null;
+}
+
+// 原生 option 不支持内嵌 HTML，故把 sensor 作为文本徽标写进选项，
+// 同时用下拉右侧的 .preset-sensor 徽标实时显示当前选中组的传感器。
+function renderPresetOptions() {
+  const html = '<option value="">— 选择预置地点 —</option>' + S.presets.map((p) => {
+    const label = presetLabel(p) + ' · ' + presetSensor(p);
+    return '<option value="' + esc(p.name) + '">' + esc(label) + '</option>';
+  }).join('');
+  $('preset-aoi').innerHTML = html;
+}
+
+function syncPresetMeta() {
+  const p = selectedPreset();
+  const badge = $('preset-sensor');
+  if (!p) {
+    badge.hidden = true;
+    badge.textContent = '—';
+    $('preset-hint').textContent = S.presets.length
+      ? '共 ' + S.presets.length + ' 组；选择后点「填入」自动填入 AOI 与 t1/t2。'
+      : '预置地点不可用（后端接口未启用或网络不可达），既有 seed 快捷按钮仍可正常使用。';
+    gate('btn-preset-fill', false, '请先选择一组预置地点');
+    return;
+  }
+  const sensor = presetSensor(p);
+  badge.hidden = false;
+  badge.textContent = sensor;
+  badge.className = 'preset-sensor' + (/^L[89]$/.test(sensor) ? ' preset-sensor-landsat' : '');
+  $('preset-hint').textContent = presetLabel(p) + ' · bbox [' + p.bbox.join(', ')
+    + '] · ' + p.t1.date + ' → ' + p.t2.date;
+  gate('btn-preset-fill', true, '');
+  $('btn-preset-fill').title = '填入 ' + presetLabel(p) + ' 的 AOI 与时相并应用';
+}
+
+async function loadPresetAois() {
+  if (S.presetBusy) return;
+  S.presetBusy = true;
+  try {
+    const res = await api.getPresetAois();
+    const raw = res.ok && Array.isArray(res.data) ? res.data : [];
+    S.presets = raw.filter((p) => p && p.name && Array.isArray(p.bbox) && p.bbox.length === 4
+      && p.t1 && p.t2 && PRESET_DATE_RE.test(String(p.t1.date)) && PRESET_DATE_RE.test(String(p.t2.date)));
+    const prev = $('preset-aoi').value;
+    renderPresetOptions();
+    if (S.presets.some((p) => p.name === prev)) $('preset-aoi').value = prev;
+    syncPresetMeta();
+    if (!res.ok) {
+      $('preset-hint').textContent = '预置地点不可用（后端接口未启用或网络不可达），既有 seed 快捷按钮仍可正常使用。';
+    }
+  } catch (_) {
+    $('preset-hint').textContent = '预置地点加载失败，既有 seed 快捷按钮仍可正常使用。';
+  } finally {
+    S.presetBusy = false;
+  }
+}
+
+// 日期不在既有 t1/t2 下拉选项时动态补入（Landsat 组 2023-08-05 / 2024-07-22 必须可选）。
+// 与 extendPresetDates 同口径：只补缺失项、按字典序重排、保留用户已选值，
+// 不删除任何既有 PRESET_DATES / S2 / Landsat 选项，也不下发演示降级层。
+function ensureDateOptions(dates) {
+  const extra = (dates || []).map((d) => String(d == null ? '' : d).trim())
+    .filter((d) => PRESET_DATE_RE.test(d));
+  const current = Array.from($('t1').options).map((o) => o.value).filter(Boolean);
+  if (!extra.some((d) => !current.includes(d))) return;
+  const all = Array.from(new Set(current.concat(extra))).sort();
+  const v1 = $('t1').value, v2 = $('t2').value;
+  const html = '<option value="">— 选择时相 —</option>'
+    + all.map((d) => '<option value="' + esc(d) + '">' + esc(d) + '</option>').join('');
+  $('t1').innerHTML = html;
+  $('t2').innerHTML = html;
+  $('t1').value = v1;
+  $('t2').value = v2;
+  S.t1 = $('t1').value;
+  S.t2 = $('t2').value;
+}
+
+// 「填入」：bbox 填四至并应用（走既有 POST /aoi/select 自动确认口径），
+// t1/t2 填时相下拉；用户仍可改小 AOI 后再点既有「应用 AOI」按钮。
+async function applyPresetAoi() {
+  const p = selectedPreset();
+  if (!p) { showToast('请先选择一组预置地点', 'warn'); return; }
+  const b = boundsFromArray(p.bbox.map(Number));
+  if (![b.w, b.s, b.e, b.n].every(Number.isFinite)) { showToast('预置 AOI 坐标非法', 'warn'); return; }
+  pushAoiHistory();
+  applyAoi(b);
+  if (map) M.fitBounds(map, b, 90);
+  const d1 = String(p.t1.date), d2 = String(p.t2.date);
+  ensureDateOptions([d1, d2]);
+  $('t1').value = d1;
+  $('t2').value = d2;
+  S.t1 = $('t1').value; S.t2 = $('t2').value;
+  updateAoiMetrics();
+  if (S.pairs.length) autoSelectPair(); // 按 t1/t2 命中 B 卡同组影像对，不改写清单
+  const st = aoiStatus();
+  if (!st.ok || !phaseValid()) { showToast('预置 AOI 或时相不合法，请检查后重试', 'warn'); return; }
+  showToast('已填入 ' + presetLabel(p) + '（' + presetSensor(p) + '）· 正在应用 AOI', 'ok');
+  await submitAoi();
 }
 
 // ===== UI-02：影像对（REQ-02 / REQ-04） =====
@@ -833,6 +968,68 @@ function fillSamplesDemo() {
   showToast('已补齐演示样本（每类 32 个，可继续点击补齐）', 'ok');
 }
 
+// ===== 任务 A：精度区「自动分层采样」（POST /accuracy/auto_sample，REQ-09）=====
+// 后端只返回抽样点、不写 sample 表：把 {lng,lat,ref_class} 归一为既有本地样本
+// 结构 {id,x,y,cls} 填入 S.samples，复用 M.setSamples 地图打点与 updateCounts 计数。
+// 不自动调用 /accuracy/sample：用户仍可用既有类别按钮 / 撤销上一点 / 清空样本 /
+// 地图点选删点修正，再走既有「计算精度」按钮提交。
+const AUTO_SAMPLE_PER_CLASS = 32;
+const AUTO_SAMPLE_CLASSES = ['增强', '退化', '稳定'];
+const AUTO_REF_TO_CLS = { 增强: 1, 退化: 2, 稳定: 3 };
+
+async function autoStratifiedSample() {
+  if (S.autoSampleBusy) return;
+  const rid = currentRunId();
+  if (!S.change || !rid) { showToast('请先运行检测', 'warn'); return; }
+  const btn = $('btn-auto-sample');
+  const label = btn.textContent;
+  S.autoSampleBusy = true;
+  btn.disabled = true;
+  btn.textContent = '采样中…';
+  try {
+    const res = await api.autoSample({ run_id: rid, per_class: AUTO_SAMPLE_PER_CLASS });
+    if (!res.ok) {
+      const detail = res.code ? errorMessage(res) : '后端接口不可用或网络超时';
+      $('auto-sample-note').textContent = '自动分层采样失败：' + detail;
+      showToast('自动分层采样失败：' + detail, 'error');
+      return;
+    }
+    const d = res.data || {};
+    const pts = Array.isArray(d.samples) ? d.samples : [];
+    const filled = [];
+    pts.forEach((q) => {
+      const cls = AUTO_REF_TO_CLS[String(q && q.ref_class)];
+      const x = Number(q && q.lng), y = Number(q && q.lat);
+      if (cls && Number.isFinite(x) && Number.isFinite(y)) {
+        filled.push({ id: 's' + (++S.sampleSeq), x, y, cls });
+      }
+    });
+    S.samples = filled; // 覆盖本地列表：每类恰为后端 per_class_actual 的如实数量
+    M.setSamples(map, S.samples);
+    S.accuracy = null;
+    $('accuracy-result').hidden = true;
+    updateCounts();
+
+    const actual = d.per_class_actual || {};
+    const num = (c) => Number(actual[c] != null ? actual[c] : 0);
+    $('auto-sample-note').textContent = '已填入 ' + filled.length + ' 个样本点（'
+      + AUTO_SAMPLE_CLASSES.map((c) => c + ' ' + num(c)).join(' / ')
+      + '）· 每类实际数来自 per_class_actual；可手动改类别 / 删点后再计算精度。';
+    const short = AUTO_SAMPLE_CLASSES.filter((c) => num(c) < 30);
+    short.forEach((c) => showToast(
+      c + '：该类仅 ' + num(c) + ' 个，不足 30 无法计算精度', 'warn', 5200));
+    if (!short.length) showToast('自动分层采样完成：已填入 ' + filled.length + ' 个样本点', 'ok');
+  } catch (_) {
+    // 兜底：任何异常只内联提示，绝不产生未捕获 JS 异常、不污染离线路径
+    $('auto-sample-note').textContent = '自动分层采样失败，可稍后重试。';
+    showToast('自动分层采样失败，可稍后重试', 'error');
+  } finally {
+    S.autoSampleBusy = false;
+    btn.textContent = label;
+    refreshGates();
+  }
+}
+
 async function calcAccuracy() {
   if (S.accBusy) return;
   const samples = S.samples.map((p) => ({ x: p.x, y: p.y, ref_class: demo.CLASS_INFO[p.cls].ref }));
@@ -1210,6 +1407,10 @@ function refreshGates() {
   const fmts = ['cb-geotiff', 'cb-png', 'cb-pdf'].filter((id) => $(id) && $(id).checked);
   gate('btn-export', !!currentRunId() && fmts.length > 0 && !S.exportBusy,
     !currentRunId() ? '需先完成一次变化检测获得 run_id' : '请至少勾选一种导出格式');
+
+  // 任务 A：未跑过检测时置灰，title 如实提示「请先运行检测」
+  gate('btn-auto-sample', !!S.change && !!currentRunId() && !S.autoSampleBusy,
+    !S.change || !currentRunId() ? '请先运行检测' : '自动采样中，请稍候…');
 }
 
 // ===== 地图模式（浏览 / AOI 框选 / 样本打点） =====
@@ -1676,6 +1877,11 @@ function bindEvents() {
   };
   $('btn-accuracy').onclick = calcAccuracy;
 
+  // ===== 任务 A：A 卡预置地点下拉 / 精度区自动分层采样 =====
+  $('preset-aoi').onchange = syncPresetMeta;
+  $('btn-preset-fill').onclick = applyPresetAoi;
+  $('btn-auto-sample').onclick = autoStratifiedSample;
+
   ['cb-geotiff', 'cb-png', 'cb-pdf'].forEach((id) => {
     $(id).addEventListener('change', refreshGates);
   });
@@ -1823,6 +2029,8 @@ function init() {
 
   // 影像对清单启动即加载（自由流程：无 AOI 也可浏览，GET /scene/match 不强制 aoi_id）
   loadPairs();
+  // 任务 A：12 组预置地点独立加载；失败仅内联提示，不触碰演示降级层与既有流程
+  loadPresetAois();
 
   window.addEventListener('resize', () => {
     try { if (map) map.resize(); } catch (_) { /* style 未就绪 */ }

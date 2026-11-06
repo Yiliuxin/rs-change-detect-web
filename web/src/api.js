@@ -494,3 +494,59 @@ export async function fromLngLat(payload) {
   }
   return { ok: false, unavailable: true, status: resp.status };
 }
+
+// ==========================================================================
+// 任务 A（REQ-02 / REQ-09）：预置地点清单 + 自动分层采样
+// 只新增 getPresetAois / autoSample 两个导出；既有导出签名、返回结构、
+// TIMEOUT_MS、SEEDS 演示降级层与 5 接口行为完全不动。
+//
+// 与 fromLngLat 同款「判别式返回」，调用方无需 try/catch 即可零未捕获 JS 异常：
+//   { ok:true,  data }                                 成功
+//   { ok:false, code, message, run_id, status }       后端业务错误体（复用既有错误码）
+//   { ok:false, unavailable:true, status }            网络失败 / 超时 / 非契约错误页
+// 两者均不做演示降级：接口不可用时由调用方内联提示，绝不污染离线预置路径。
+// ==========================================================================
+// GET /scene/preset_aois → 12 组预置影像对 [{name,bbox,t1:{date,source},t2:{...},sensor}]
+export async function getPresetAois() {
+  let resp;
+  try {
+    resp = await fetchWithTimeout(BASE + '/scene/preset_aois', { method: 'GET' });
+  } catch (_) {
+    return { ok: false, unavailable: true, status: 0 };
+  }
+  if (resp.ok) {
+    try {
+      return { ok: true, data: await resp.json() };
+    } catch (_) {
+      return { ok: false, unavailable: true, status: resp.status };
+    }
+  }
+  const err = await safeError(resp);
+  if (err) {
+    return { ok: false, code: err.code, message: err.message, run_id: err.run_id, status: resp.status };
+  }
+  return { ok: false, unavailable: true, status: resp.status };
+}
+
+// POST /accuracy/auto_sample → {run_id, samples:[{lng,lat,ref_class}], per_class_actual}
+// 只返回抽样点、不写 sample 表；样本由调用方填入本地列表后再走 /accuracy/sample。
+export async function autoSample(payload) {
+  let resp;
+  try {
+    resp = await fetchWithTimeout(BASE + '/accuracy/auto_sample', jsonOptions(payload || {}));
+  } catch (_) {
+    return { ok: false, unavailable: true, status: 0 };
+  }
+  if (resp.ok) {
+    try {
+      return { ok: true, data: await resp.json() };
+    } catch (_) {
+      return { ok: false, unavailable: true, status: resp.status };
+    }
+  }
+  const err = await safeError(resp);
+  if (err) {
+    return { ok: false, code: err.code, message: err.message, run_id: err.run_id, status: resp.status };
+  }
+  return { ok: false, unavailable: true, status: resp.status };
+}

@@ -45,6 +45,19 @@
               <button type="button" class="btn btn-sm btn-ghost" id="btn-aoi-undo" title="撤销上一次 AOI 修改">撤销</button>
               <button type="button" class="btn btn-sm btn-ghost" id="btn-aoi-clear" title="清空当前 AOI">清空</button>
             </div>
+            <!-- 任务 A：预置地点下拉（GET /scene/preset_aois，12 组）；既有 3 个 seed 快捷按钮与演示降级层不受影响 -->
+            <div class="preset-aoi-row gap-top">
+              <div class="preset-aoi-field">
+                <label class="fld" for="preset-aoi">预置地点<span class="req">REQ-02</span></label>
+                <div class="preset-aoi-ctl">
+                  <select id="preset-aoi" aria-label="预置地点"><option value="">— 选择预置地点 —</option></select>
+                  <span class="preset-sensor" id="preset-sensor" hidden>—</span>
+                </div>
+              </div>
+              <button type="button" class="btn btn-sm" id="btn-preset-fill" disabled
+                title="请先选择一组预置地点">填入</button>
+            </div>
+            <div class="preset-hint" id="preset-hint">正在获取 12 组预置地点…</div>
             <div class="grid2 gap-top">
               <div>
                 <label class="fld" for="t1">时相 t1（较早）<span class="req">REQ-01/02</span></label>
@@ -360,6 +373,13 @@
                 </table>
               </div>
 
+              <!-- 任务 A：自动分层采样（POST /accuracy/auto_sample，只填本地样本列表，不自动计算精度） -->
+              <div class="inner-card" id="auto-sample-wrap">
+                <div class="card-subtitle">自动分层采样<span class="req">REQ-09</span></div>
+                <button type="button" class="btn btn-sm btn-block" id="btn-auto-sample" disabled
+                  title="请先运行检测">自动分层采样 · POST /accuracy/auto_sample</button>
+                <div class="preset-hint" id="auto-sample-note">按当前 run 每类抽取 32 个样本点；填入后仍可手动改类别 / 删点，再点「计算精度」。</div>
+              </div>
               <div class="inner-card" id="fill-wrap">
                 <div class="card-subtitle">样本快速录入<span class="demo-tag">演示数据</span></div>
                 <button type="button" class="btn btn-sm btn-block" id="btn-fill-samples" title="每类随机补 32 个样本点，可多次点击直至每类 ≥ 30（EX10）">一键补齐每类 32 个样本点</button>
