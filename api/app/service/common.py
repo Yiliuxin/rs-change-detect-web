@@ -142,13 +142,13 @@ def artifact_manifest(run_id: str, index: str,
         reg = regression_artifact_names()
         names = [
             *reg.values(), "t1_composite.png", "t2_composite.png",
-            *regression_archive_names(index).values(),
+            "area_chart.png", *regression_archive_names(index).values(),
         ]
     else:
         names = [
             "change.tif", "change.png", "report.pdf",
             "t1_composite.png", "t2_composite.png",
-            *index_artifact_names(index).values(),
+            "area_chart.png", *index_artifact_names(index).values(),
         ]
     return {n: artifact_url(run_id, n) for n in dict.fromkeys(names)
             if n in ARTIFACT_MEDIA_TYPES}

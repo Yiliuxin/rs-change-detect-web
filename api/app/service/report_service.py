@@ -14,11 +14,12 @@ from typing import Dict, List, Optional
 
 import rasterio
 
-from app.algorithm.writers import export_triplet, validate_export_formats
+from app.algorithm.writers import (
+    attribution_lines, export_triplet, validate_export_formats,
+)
 from app.api.errors import ApiError, as_api_error
 from app.config.constants import (
-    ATTRIBUTION_S2, ATTRIBUTION_S2_MODIFIED, EXPORT_FORMATS, METHOD_OTSU,
-    METHOD_REGRESSION, RESULT_BUCKET,
+    EXPORT_FORMATS, METHOD_OTSU, METHOD_REGRESSION, RESULT_BUCKET,
 )
 from app.config.storage import (
     StorageSettings, ensure_buckets, get_client, upload_file,
@@ -148,11 +149,8 @@ def export(run_id: str, formats: List[str]) -> dict:
                     "size": size,
                 })
 
-        year = str(report.get("year") or "2023")
-        attribution = "; ".join([
-            ATTRIBUTION_S2.format(year=year),
-            ATTRIBUTION_S2_MODIFIED.format(year=year),
-        ])
+        # REQ-15 / NF6 / NF7：与 PDF 署名页共用同一常量源，逐字复用不重写
+        attribution = "; ".join(attribution_lines(report))
         return {
             "files": files,
             "run_id": run_id,

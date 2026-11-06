@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """变化专题图 PNG 渲染（HLD 模块4 功能一，REQ-10 / NF6 / NF7）。
 
-依赖约束：requirements 无 matplotlib，禁止新增大包。本模块用 numpy 生成
-RGB 画布、用内置 **5×7 ASCII 点阵字模**逐像素绘制 ``VALID_RATIO=0.xxx``；
+依赖约束：专题图本体不依赖 matplotlib（PDF 报告的面积柱状图由 writers 单独使用
+matplotlib Agg）。本模块用 numpy 生成 RGB 画布、用内置 **5×7 ASCII 点阵字模**
+逐像素绘制 ``VALID_RATIO=0.xxx``；
 中文（图例 / EX5 告警）在 PIL + ``C:\\Windows\\Fonts\\msyh.ttc`` 可用时使用，
 否则退化为 5×7 ASCII 点阵文字并在返回元数据中如实说明。PNG 优先用 rasterio
 ``driver="PNG"``（3 波段 uint8）落盘，失败再退 PIL。

@@ -39,10 +39,10 @@ from app.algorithm.radiometric import (
     assert_same_caliber, check_baseline, to_reflectance,
 )
 from app.algorithm.regression_detector import detect_change_regression
-from app.algorithm.writers import export_triplet
+from app.algorithm.writers import attribution_lines, export_triplet
 from app.api.errors import ApiError, as_api_error
 from app.config.constants import (
-    ATTRIBUTION_S2, ATTRIBUTION_S2_MODIFIED, BLOCK_SIZE, EXPORT_FORMATS,
+    BLOCK_SIZE, EXPORT_FORMATS,
     LANDSAT_SENSORS, MANUAL_THRESHOLD_RANGE, METHOD_OTSU, METHOD_REGRESSION,
     REGRESSION_MAX_ROUNDS, REGRESSION_SIGMA_FACTOR, radiometric_formula,
     VALID_CHANGE_METHODS, VALID_INDEXES,
@@ -445,10 +445,8 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
             "stats": stats,
             "accuracy": None,  # 样本由 /accuracy/sample 提交，此处不伪造
             "params_snapshot": snapshot,
-            "attribution_lines": [
-                ATTRIBUTION_S2.format(year=year),
-                ATTRIBUTION_S2_MODIFIED.format(year=year),
-            ],
+            # NF6 / NF7 常量逐字复用（PDF 署名页 / PNG / 导出响应同源）
+            "attribution_lines": attribution_lines({"year": year}),
         }
 
         if on_stage is not None:

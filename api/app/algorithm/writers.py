@@ -11,15 +11,16 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 import rasterio
 
-from app.algorithm.change_detector import CHANGE_NODATA
+from app.algorithm.change_detector import CHANGE_CODES, CHANGE_NODATA
 from app.algorithm.mask_pipeline import judge_valid_ratio
 from app.algorithm.renderer import render_change_png
 from app.config.constants import (
+    ATTRIBUTION_LS,
     ATTRIBUTION_S2,
     ATTRIBUTION_S2_MODIFIED,
     ERROR_MESSAGES,
@@ -33,6 +34,7 @@ _CJK_FONT_NAME: str = "MSYH"
 
 __all__ = [
     "ExportFormatError", "validate_export_formats", "valid_ratio_notice",
+    "render_area_chart", "attribution_lines",
     "write_geotiff", "write_png", "write_pdf", "export_triplet",
 ]
 
@@ -142,8 +144,65 @@ def _register_cjk(font_path: str = DEFAULT_FONT_PATH):
         return "Helvetica", False
 
 
+def attribution_lines(report: dict) -> List[str]:
+    """REQ-15 / NF6 / NF7 合规署名，**逐字复用常量源文案**（不重写、不翻译）。
+
+    Copernicus 两条带年份占位符，USGS 一条为固定串；PDF 署名页、PNG 与
+    ``/report/export`` 响应共用此处唯一来源，避免三处措辞漂移。
+    """
+    year = _resolve_year(report)
+    return [
+        ATTRIBUTION_S2.format(year=year),
+        ATTRIBUTION_S2_MODIFIED.format(year=year),
+        ATTRIBUTION_LS,
+    ]
+
+
+def render_area_chart(stats, output_path) -> str:
+    """REQ-12：matplotlib(Agg) 生成三类面积柱状图 PNG（无随机、无交互后端）。
+
+    三类编码与顺序取自 ``change_detector.CHANGE_CODES``；``stats`` 缺类记 0，
+    不伪造数值。返回的 PNG 既嵌入 PDF，也作为独立产物 ``area_chart.png`` 供前端复用。
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    by_code = {int(s.get("change_class", 0)): float(s.get("area_ha", 0.0))
+               for s in (stats or [])}
+    values = [by_code.get(int(code), 0.0) for code in CHANGE_CODES]
+    labels = ["ENHANCED", "DEGRADED", "STABLE"]   # ASCII 标签，规避中文字体缺字警告
+    colors = ["#2EA043", "#D63031", "#788CA0"]
+
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(6.4, 3.0), dpi=150)
+    try:
+        bars = ax.bar(labels, values, color=colors, width=0.55)
+        ax.set_ylabel("Area (ha)")
+        ax.set_title("Change class area (REQ-08 / REQ-11)")
+        ax.grid(axis="y", linestyle=":", linewidth=0.6, alpha=0.6)
+        ax.set_axisbelow(True)
+        top = max(values) if values else 0.0
+        ax.set_ylim(0.0, top * 1.18 if top > 0 else 1.0)
+        for bar, value in zip(bars, values):
+            ax.text(bar.get_x() + bar.get_width() / 2.0, bar.get_height(),
+                    f"{value:.2f}", ha="center", va="bottom", fontsize=8)
+        fig.tight_layout()
+        fig.savefig(str(path), format="png")
+    finally:
+        plt.close(fig)
+    return str(path.resolve())
+
+
 def write_pdf(report: dict, output_path, font_path: str = DEFAULT_FONT_PATH) -> Dict[str, object]:
-    """生成 PDF 报告：首页回显 valid_ratio 与阈值提示，含三类统计表 / Otsu / 署名。"""
+    """生成 PDF 报告（REQ-12 / REQ-15）。
+
+    首页：valid_ratio 与四段阈值提示、Otsu、三类统计表 + 统计数字 ASCII 行、
+    三类面积柱状图；method=regression 时追加差值法 / 回归法阈值与面积对比表；
+    末页为独立**数据署名页**，逐字复用 NF6/NF7 常量中的 Copernicus / USGS 文案。
+    页内容流不压缩，ASCII 行可直接字节检索，便于真链路抽验。
+    """
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
     from reportlab.pdfgen import canvas as pdf_canvas
@@ -173,6 +232,23 @@ def write_pdf(report: dict, output_path, font_path: str = DEFAULT_FONT_PATH) -> 
         pdf.setFont(font_name, size)
         pdf.drawString(left, y, str(text))
         y -= gap
+
+    def _ascii_line(text, size=8.5, gap=14, color=(90, 90, 90)):
+        """强制 Helvetica 写纯 ASCII，保证 PDF 字节流里可直接检索数值 / 署名。"""
+        nonlocal y
+        pdf.setFillColorRGB(*(v / 255.0 for v in color))
+        pdf.setFont("Helvetica", size)
+        pdf.drawString(left, y, str(text))
+        y -= gap
+
+    def _new_page():
+        nonlocal y
+        pdf.showPage()
+        y = page_h - 48
+
+    def _ensure(space):
+        if y - space < 40:
+            _new_page()
 
     _line(L("变化检测专题报告 / CHANGE DETECTION REPORT", "CHANGE DETECTION REPORT"),
           size=15, gap=26)
@@ -240,6 +316,15 @@ def write_pdf(report: dict, output_path, font_path: str = DEFAULT_FONT_PATH) -> 
     table.drawOn(pdf, left, y - table_h)
     y -= table_h + 22
 
+    # 纯 ASCII 统计数字行：TTFont 表格单元格会被编码成字形十六进制，
+    # 另给一行可直接字节检索的真实统计值（供真链路抽验，不伪造数值）
+    st_map = {int(s.get("change_class", 0)): s for s in stats}
+    _ascii_line("STATS " + " ".join(
+        f"CLASS{code}:PIXELS={int(st_map.get(code, {}).get('pixel_count', 0))}"
+        f":AREA_HA={float(st_map.get(code, {}).get('area_ha', 0.0)):.4f}"
+        for code in CHANGE_CODES
+    ))
+
     # —— 精度（EX10 时如实标注禁用）——
     acc = report.get("accuracy")
     if isinstance(acc, dict):
@@ -259,21 +344,82 @@ def write_pdf(report: dict, output_path, font_path: str = DEFAULT_FONT_PATH) -> 
                 "ACCURACY: SAMPLES INSUFFICIENT (EX10), ACCURACY DISABLED"),
               gap=18, color=(150, 30, 30))
 
-    # —— 合规署名（REQ-15 / NF6 / NF7）——
+    # —— 三类面积柱状图（matplotlib PNG → reportlab 内嵌，REQ-12）——
     y -= 4
-    _line(L("署名 / ATTRIBUTION:", "ATTRIBUTION:"), size=10, gap=16)
-    _line(ATTRIBUTION_S2.format(year=year), size=9, gap=15, color=(70, 70, 70))
-    _line(ATTRIBUTION_S2_MODIFIED.format(year=year), size=9, gap=20, color=(70, 70, 70))
+    _ensure(215)
+    _line(L("三类面积柱状图 / AREA CHART", "AREA CHART"), size=10, gap=16)
+    _ascii_line("AREA CHART: ENHANCED / DEGRADED / STABLE (ha)", gap=14)
+    chart_path = render_area_chart(stats, path.parent / "area_chart.png")
+    chart_w, chart_h = 400.0, 187.5
+    pdf.drawImage(chart_path, left, y - chart_h, width=chart_w, height=chart_h)
+    y -= chart_h + 20
+
+    # —— method=regression：差值法 / 回归法 阈值与面积对比表（REQ-11）——
+    comparison = report.get("comparison")
+    comparison_used = False
+    if isinstance(comparison, dict) and {"difference", "regression"} <= set(comparison):
+        comparison_used = True
+        _ensure(190)
+        _line(L("差值法 / 回归法 阈值与面积对比", "DIFFERENCE vs REGRESSION COMPARISON"),
+              size=10, gap=16)
+        cmp_rows = [["METHOD", "THRESHOLD T", "SOURCE",
+                     "ENHANCED ha", "DEGRADED ha", "STABLE ha"]]
+        for key, label in (("difference", "DIFF_OTSU"), ("regression", "REGRESSION")):
+            item = comparison[key]
+            areas = {int(s.get("change_class", 0)): float(s.get("area_ha", 0.0))
+                     for s in (item.get("stats") or [])}
+            cmp_rows.append([
+                label,
+                f"{float(item.get('threshold', 0.0)):.4f}",
+                str(item.get("threshold_source", "")),
+                *[f"{areas.get(int(code), 0.0):.4f}" for code in CHANGE_CODES],
+            ])
+        cmp_table = Table(cmp_rows, colWidths=[95, 85, 65, 85, 85, 85])
+        cmp_table.setStyle(TableStyle([
+            ("FONTNAME", (0, 0), (-1, -1), font_name),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#DCE6F1")),
+            ("ALIGN", (1, 0), (-1, -1), "CENTER"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        _, cmp_h = cmp_table.wrap(page_w - 2 * left, page_h)
+        cmp_table.drawOn(pdf, left, y - cmp_h)
+        y -= cmp_h + 16
+        diff_item, reg_item = comparison["difference"], comparison["regression"]
+        diff_area = sum(float(s.get("area_ha", 0.0)) for s in (diff_item.get("stats") or []))
+        reg_area = sum(float(s.get("area_ha", 0.0)) for s in (reg_item.get("stats") or []))
+        _ascii_line(
+            f"METHOD COMPARISON DIFF_T={float(diff_item.get('threshold', 0.0)):.4f} "
+            f"REG_T={float(reg_item.get('threshold', 0.0)):.4f} "
+            f"DIFF_TOTAL_AREA_HA={diff_area:.4f} REG_TOTAL_AREA_HA={reg_area:.4f}"
+        )
+
+    # —— 独立数据署名页（REQ-15 / NF6 / NF7）：逐字复用常量源文案 ——
+    _new_page()
+    _line(L("数据署名 / DATA ATTRIBUTION", "DATA ATTRIBUTION"), size=15, gap=26)
+    _ascii_line("DATA ATTRIBUTION / NF6 NF7 VERBATIM", gap=18)
+    lines = attribution_lines(report)
+    for text in lines:
+        _ascii_line(text, size=10, gap=18, color=(40, 40, 40))
+    _ascii_line("SOURCE: Copernicus Sentinel / USGS NASA Landsat Collection 2 Level-2",
+                size=8.5, gap=20, color=(90, 90, 90))
+    _line(L("以上署名逐字取自系统常量（NF6 / NF7），未经改写。",
+            "Attribution texts are verbatim from NF6 / NF7 constants."),
+          size=9, gap=22, color=(90, 90, 90))
 
     # —— 参数快照（REQ-14，确定性，不含时间戳）——
     snapshot = report.get("params_snapshot") or {}
     raw = json.dumps(snapshot, ensure_ascii=not cn_ok, sort_keys=True, default=str)
-    _line(L("参数快照 / PARAMS SNAPSHOT:", "PARAMS SNAPSHOT:"), size=9, gap=15, color=(90, 90, 90))
+    _ensure(40)
+    _line(L("参数快照 / PARAMS SNAPSHOT:", "PARAMS SNAPSHOT:"),
+          size=9, gap=15, color=(90, 90, 90))
     for i in range(0, len(raw), 95):
-        _line(raw[i:i + 95], size=7.5, gap=11, color=(110, 110, 110))
         if y < 40:
-            pdf.showPage()
-            y = page_h - 48
+            _new_page()
+        _line(raw[i:i + 95], size=7.5, gap=11, color=(110, 110, 110))
 
     pdf.showPage()
     pdf.save()
@@ -285,8 +431,9 @@ def write_pdf(report: dict, output_path, font_path: str = DEFAULT_FONT_PATH) -> 
         "font_mode": "ttf-msyh" if cn_ok else "helvetica",
         "degraded": not cn_ok,
         "reason": "" if cn_ok else "reportlab 中文字体注册失败，PDF 退化为纯英文并如实说明",
-        "attribution": [ATTRIBUTION_S2.format(year=year),
-                        ATTRIBUTION_S2_MODIFIED.format(year=year)],
+        "attribution": lines,
+        "area_chart": chart_path,
+        "comparison_table": comparison_used,
     }
 
 

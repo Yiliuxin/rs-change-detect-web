@@ -11,5 +11,8 @@ psycopg2-binary==2.9.13
 minio==7.2.20
 python-dotenv==1.1.0
 reportlab==5.1.0
+# REQ-12 / REQ-15：PDF 报告三类面积柱状图（matplotlib Agg 后端仅生成 PNG，
+# 不引入 SciPy 生态以外的科学计算包；renderer.py 仍只用 numpy/rasterio 绘专题图）
+matplotlib==3.9.1
 pytest==9.1.1
 httpx==0.28.1
