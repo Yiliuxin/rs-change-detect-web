@@ -19,18 +19,23 @@ import rasterio
 from rasterio.warp import transform as warp_transform
 
 from app.algorithm.accuracy import SampleInsufficientError, accuracy_report
+from app.algorithm.change_detector import CHANGE_LABELS_ZH
 from app.algorithm.geotransform import BBox, lonlat_to_pixel, pixel_to_lonlat
+from app.algorithm.stratified_sampler import stratified_pixels
 from app.api.errors import ApiError, as_api_error
-from app.config.constants import MIN_SAMPLES_PER_CLASS
+from app.config.constants import (
+    AUTO_SAMPLE_PER_CLASS_MAX, METHOD_OTSU, METHOD_REGRESSION,
+    MIN_SAMPLES_PER_CLASS,
+)
 from app.repository import aoi_repo, sample_repo, task_repo
-from app.service.common import run_dir
+from app.service.common import regression_artifact_names, run_dir
 
 # 中文参考类别 → 三类编码（与 change_detector.CHANGE_CODES 一致）
 REF_CLASS_CODE = {"增强": 1, "退化": 2, "稳定": 3}
 VALID_CLASSES = ("增强", "退化", "稳定")
 
 __all__ = ["REF_CLASS_CODE", "VALID_CLASSES", "open_change", "build_xy",
-           "accuracy_for_run", "submit", "from_lnglat"]
+           "accuracy_for_run", "submit", "from_lnglat", "auto_sample"]
 
 
 def open_change(run_id: str) -> rasterio.DatasetReader:
@@ -241,4 +246,68 @@ def from_lnglat(run_id: str, lng: float, lat: float,
     except ApiError:
         raise
     except Exception as exc:  # noqa: BLE001
+        raise as_api_error(exc, run_id=run_id) from exc
+
+
+# --------------------------------------------------------------------------- #
+# 半自动分层抽样（REQ-09 自动化）：只返回样本点，不写 sample 表
+# --------------------------------------------------------------------------- #
+def _validate_per_class(per_class, run_id: str) -> int:
+    """per_class ∈ (0, AUTO_SAMPLE_PER_CLASS_MAX]；非法 → EX12（既有 400 映射）。"""
+    if (isinstance(per_class, bool) or not isinstance(per_class, int)
+            or not (0 < per_class <= AUTO_SAMPLE_PER_CLASS_MAX)):
+        raise ApiError(
+            "EX12", run_id=run_id,
+            detail=f"per_class 需为 (0, {AUTO_SAMPLE_PER_CLASS_MAX}] 内整数：{per_class!r}",
+        )
+    return int(per_class)
+
+
+def _auto_change_path(run_id: str, task: dict) -> Path:
+    """按 params_snapshot.method 选结果栅格（与 report_service._files_for 同口径）。
+
+    regression → ``change_reg.tif``（回归法独立主名）；其余（含老 run 快照无
+    method 字段）→ ``change.tif``。``/sample/from_lnglat`` 与 ``/accuracy/sample``
+    经 ``open_change`` 固定读 change.tif 的既有行为完全不动。
+    """
+    snapshot = task.get("params_snapshot") or {}
+    method = str(snapshot.get("method") or METHOD_OTSU).strip().lower()
+    filename = (regression_artifact_names()["geotiff"]
+                if method == METHOD_REGRESSION else "change.tif")
+    return run_dir(run_id) / filename
+
+
+def auto_sample(run_id: str, per_class: int, seed: Optional[int] = None) -> dict:
+    """POST /accuracy/auto_sample（REQ-09 自动化）：分层随机抽样，半自动流程。
+
+    读该 run 的变化检测结果栅格，按 1/2/3 三类分层用 ``RandomState(seed)`` 各抽
+    ``per_class`` 个像元，像元中心经 ``geotransform.pixel_to_lonlat`` 反算 WGS84
+    经纬度。**不写 sample 表**：样本点由前端填入本地列表，用户修正 ref_class 后
+    再走既有 POST /accuracy/sample 提交并计算精度。
+
+    run 不存在 → EX2(404)；per_class 非法 → EX12(400)；栅格缺失/不可读 → SYS-01
+    （沿用既有 CODE_HTTP 映射，不改错误码表）。某类可用像元不足时
+    ``per_class_actual`` 如实记实际数，不报错、不凑数。
+    """
+    try:
+        n_per_class = _validate_per_class(per_class, run_id)
+        task = _require_task(run_id)
+        path = _auto_change_path(run_id, task)
+        if not path.is_file():
+            raise ApiError("SYS-01", run_id=run_id,
+                           detail=f"{path.name} 不存在，请先执行 /result/change")
+        with rasterio.open(str(path)) as ds:
+            change = ds.read(1)
+            picks, actual = stratified_pixels(change, n_per_class, seed)
+            samples = []
+            for row, col, code in picks:
+                lng, lat = pixel_to_lonlat(ds, row, col)
+                samples.append({
+                    "lng": float(lng), "lat": float(lat),
+                    "ref_class": CHANGE_LABELS_ZH[code],
+                })
+        return {"run_id": run_id, "samples": samples, "per_class_actual": actual}
+    except ApiError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 栅格读取/换算失败统一 SYS-01
         raise as_api_error(exc, run_id=run_id) from exc

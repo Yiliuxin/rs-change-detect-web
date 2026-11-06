@@ -77,6 +77,10 @@ MAX_PIXELS: Final[int] = 11000 * 11000
 MIN_SAMPLES_PER_CLASS: Final[int] = 30
 # Kappa 教学级下限，低于则标注"教学级，非工程级"。来源：REQ-09 / HLD 3.7
 KAPPA_TEACHING_MIN: Final[float] = 0.60
+# REQ-09 自动化分层抽样（半自动：只返回样本点，不写 sample 表）：
+# 每类默认抽样数与上限；per_class 需落在 (0, AUTO_SAMPLE_PER_CLASS_MAX]，越界 → EX12。
+AUTO_SAMPLE_PER_CLASS_DEFAULT: Final[int] = 32
+AUTO_SAMPLE_PER_CLASS_MAX: Final[int] = 200
 
 # ---------------------------------------------------------------------------
 # REQ-13 并发与时效
