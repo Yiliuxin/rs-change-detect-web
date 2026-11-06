@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-"""路由：scene/match（HLD 2.2.3.2，REQ-02/03/04）。
+"""路由：scene/match + scene/preset_aois（HLD 2.2.3.2，REQ-02/03/04）。
 
 - POST /api/v1/scene/match：保留原 SceneMatchResponse 契约（前端在用）。
-- GET  /api/v1/scene/match：新增，返回匹配影像对清单（用户明确要求）。
+- GET  /api/v1/scene/match：返回匹配影像对清单（全量分支按既有契约只列 S2）。
+- GET  /api/v1/scene/preset_aois：新增，12 组预置影像对的 AOI 与时相（含 Landsat）。
 
 薄封装：Pydantic 校验 + 调 scene_service + 统一异常封装（errors.install 全局处理）。
 """
@@ -67,6 +68,23 @@ class ScenePairListResponse(BaseModel):
     scenes: List[SceneMatchItem] = Field(default_factory=list)
 
 
+class PresetPhase(BaseModel):
+    """预置影像对单个时相（REQ-02）。"""
+
+    date: str = Field(..., description="成像日期 YYYY-MM-DD（取自 scene.acq_date）")
+    source: str = Field(..., description="COG 数据源路径（取自 scene.cog_path）")
+
+
+class PresetAoiItem(BaseModel):
+    """预置影像对 AOI 清单单项（REQ-02，GET /scene/preset_aois）。"""
+
+    name: str = Field(..., description="影像对名（pair_<name> 去前缀；Landsat 组保留 landsat_*）")
+    bbox: List[float] = Field(..., description="AOI 外接矩形 [w,s,e,n]（WGS84）")
+    t1: PresetPhase = Field(..., description="较早时相")
+    t2: PresetPhase = Field(..., description="较晚时相")
+    sensor: str = Field(..., description="传感器标识（S2 / L8 / L9）")
+
+
 @router.post(
     "/match",
     response_model=SceneMatchResponse,
@@ -105,3 +123,19 @@ def list_matched_scenes(
         aoi_id, t1, t2, scene_t1_id, scene_t2_id, block_size
     )
     return ScenePairListResponse(**result)
+
+
+@router.get(
+    "/preset_aois",
+    response_model=List[PresetAoiItem],
+    responses={500: {"model": ErrorResponse, "description": "SYS-01/04 栅格或数据库不可用"}},
+    summary="查询 12 组预置影像对的 AOI 与时相（含 Landsat）",
+)
+def list_preset_aois() -> List[PresetAoiItem]:
+    """GET /scene/preset_aois（REQ-02）：按 name 字典序返回 12 组预置影像对。
+
+    数据源为 seed aoi（不被 task 引用的那批）与其关联 scene，按
+    ``pair_<name>`` 分组；与 GET /scene/match 全量清单同一批 scene，
+    但额外包含既有契约不列出的 ``landsat_poyang`` 组。
+    """
+    return [PresetAoiItem(**item) for item in scene_service.preset_aois()]

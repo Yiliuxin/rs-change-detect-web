@@ -30,7 +30,8 @@ def _normalize(row) -> dict:
     cc = d.get("cloud_cover")
     if cc is not None:
         d["cloud_cover"] = float(cc)
-    for k in ("minx", "miny", "maxx", "maxy"):
+    for k in ("minx", "miny", "maxx", "maxy",
+              "aoi_minx", "aoi_miny", "aoi_maxx", "aoi_maxy"):
         if d.get(k) is not None:
             d[k] = float(d[k])
     return d
@@ -56,6 +57,35 @@ def find_all() -> List[dict]:
     """列出全部预置场景（GET /scene/match 未带 AOI 时的兜底）。"""
     with db_cursor() as cur:
         cur.execute(f"SELECT {_COLS} FROM scene ORDER BY acq_date, cog_path")
+        return [_normalize(r) for r in cur.fetchall()]
+
+
+def find_seed_pairs() -> List[dict]:
+    """预置影像对查询（REQ-02 / GET /scene/preset_aois 专用，只读）。
+
+    与 ``find_all()`` 查询同一批 ``scene`` 行（不加 sensor 过滤，故含 S2 与 L8），
+    但额外 JOIN 只取 **seed aoi**：即未被任何 ``task`` 引用、却拥有 scene 的 AOI，
+    （``/aoi/select`` 每次会新建 aoi+task，不能混进预置清单）。同时返回
+    ``aoi_*``（seed AOI 外接矩形）与 ``minx..maxy``（scene.footprint 外接矩形），
+    供服务层按组还原 bbox：Landsat 组复用其它组的 seed aoi 作 FK（见
+    ``data/fetch_landsat.py``），其 AOI 几何不代表真实范围，需以 footprint 为准。
+    """
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT s.scene_id::text AS scene_id, s.aoi_id::text AS aoi_id, s.sensor,
+                   s.acq_date, s.cloud_cover, s.cog_path, s.proc_baseline, s.tile,
+                   ST_XMin(s.footprint) AS minx, ST_YMin(s.footprint) AS miny,
+                   ST_XMax(s.footprint) AS maxx, ST_YMax(s.footprint) AS maxy,
+                   ST_XMin(a.aoi_geom) AS aoi_minx, ST_YMin(a.aoi_geom) AS aoi_miny,
+                   ST_XMax(a.aoi_geom) AS aoi_maxx, ST_YMax(a.aoi_geom) AS aoi_maxy
+            FROM scene s
+            JOIN aoi a ON a.aoi_id = s.aoi_id
+            WHERE s.footprint IS NOT NULL
+              AND NOT EXISTS (SELECT 1 FROM task t WHERE t.aoi_id = a.aoi_id)
+            ORDER BY s.cog_path, s.acq_date
+            """
+        )
         return [_normalize(r) for r in cur.fetchall()]
 
 

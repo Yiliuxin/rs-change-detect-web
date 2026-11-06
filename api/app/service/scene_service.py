@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import date
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from app.algorithm.geotransform import BBox
 from app.algorithm.radiometric import assert_same_caliber, check_baseline
@@ -19,8 +19,9 @@ from app.api.errors import ApiError, as_api_error
 from app.config.constants import BLOCK_SIZE, RADIOMETRIC_FORMULAS, SENSOR_S2
 from app.repository import aoi_repo, scene_repo, task_repo
 from app.service.change_service import load_scene
+from app.service.cog_source import parse_cog_path
 
-__all__ = ["match_get", "match_post"]
+__all__ = ["match_get", "match_post", "preset_aois"]
 
 
 def _clip_window(window, profile: dict) -> dict:
@@ -175,3 +176,91 @@ def match_post(aoi_id: str, scene_t1_id: str, scene_t2_id: str,
         raise
     except Exception as exc:  # noqa: BLE001
         raise as_api_error(exc, run_id=run_id) from exc
+
+
+# --------------------------------------------------------------------------- #
+# GET /scene/preset_aois：预置影像对的 AOI 与时相（REQ-02，新增只读清单）
+# --------------------------------------------------------------------------- #
+_AOI_BBOX_KEYS = ("aoi_minx", "aoi_miny", "aoi_maxx", "aoi_maxy")
+_FP_BBOX_KEYS = ("minx", "miny", "maxx", "maxy")
+
+
+def _preset_name(pair: str) -> str:
+    """``pair_<name>`` → ``name``；Landsat 组无 pair_ 前缀，保留 ``landsat_*``。
+
+    与 ``run_service._pair_name`` / 前端 ``pickPairs`` 的分组键同口径。
+    """
+    return pair[5:] if pair.startswith("pair_") else pair
+
+
+def _box(scene: dict, keys: tuple) -> Optional[Tuple[float, float, float, float]]:
+    if any(scene.get(k) is None for k in keys):
+        return None
+    return tuple(float(scene[k]) for k in keys)
+
+
+def _group_bbox(group: List[dict]) -> List[float]:
+    """组 bbox：优先 seed aoi 外接矩形；Landsat 组改用 scene.footprint 精确外包。
+
+    11 组 S2 的 seed aoi 与 footprint 完全同框（seed_scenes.py 用同一 bbox 写两张表）。
+    Landsat 组按 DB 卫生约束复用了其它组的 seed aoi 作 FK（见 data/fetch_landsat.py
+    「不新建 seed aoi」），其 aoi 几何属于别的地区，必须以该组自身 footprint 为准。
+    """
+    fp_boxes = [b for b in (_box(s, _FP_BBOX_KEYS) for s in group) if b]
+    if not fp_boxes:
+        return [0.0, 0.0, 0.0, 0.0]
+    footprint = (
+        min(b[0] for b in fp_boxes), min(b[1] for b in fp_boxes),
+        max(b[2] for b in fp_boxes), max(b[3] for b in fp_boxes),
+    )
+    aoi_boxes = {b for b in (_box(s, _AOI_BBOX_KEYS) for s in group) if b}
+    if len(aoi_boxes) == 1:
+        aoi = next(iter(aoi_boxes))
+        if all(abs(a - b) <= 1e-9 for a, b in zip(aoi, footprint)):
+            return [float(v) for v in aoi]
+    return [float(v) for v in footprint]
+
+
+def _group_phases(group: List[dict]) -> Tuple[dict, dict]:
+    """按 cog_path 的 /t1/ /t2/ 标记配双时相；标记缺失时按 acq_date 升序兜底。"""
+    by_tag: dict = {}
+    for s in group:
+        by_tag.setdefault(parse_cog_path(s["cog_path"])[3], s)
+    if "t1" in by_tag and "t2" in by_tag:
+        return by_tag["t1"], by_tag["t2"]
+    ordered = sorted(group, key=lambda s: (str(s["acq_date"]), s["cog_path"]))
+    return ordered[0], ordered[-1]
+
+
+def preset_aois() -> List[dict]:
+    """GET /scene/preset_aois：12 组预置影像对的 AOI 与时相（REQ-02）。
+
+    数据口径与 GET /scene/match 全量清单一致：``find_seed_pairs`` 不加 sensor 过滤，
+    查的是同一批 scene 行（11 组 S2 + 1 组 Landsat C2 L2）。``/scene/match`` 的
+    无参全量分支按既有契约只列 S2（不许改），故此处按 ``pair_<name>`` 分组时
+    自然把 ``landsat_poyang`` 一并纳入，不触碰既有契约。
+    """
+    try:
+        rows = scene_repo.find_seed_pairs()
+        groups: dict = {}
+        for row in rows:
+            pair = parse_cog_path(row["cog_path"])[2]
+            if pair:
+                groups.setdefault(pair, []).append(row)
+        out: List[dict] = []
+        for pair, group in groups.items():
+            if len(group) < 2:
+                continue
+            sc_t1, sc_t2 = _group_phases(group)
+            out.append({
+                "name": _preset_name(pair),
+                "bbox": _group_bbox(group),
+                "t1": {"date": str(sc_t1["acq_date"]), "source": sc_t1["cog_path"]},
+                "t2": {"date": str(sc_t2["acq_date"]), "source": sc_t2["cog_path"]},
+                "sensor": str(sc_t1["sensor"]),
+            })
+        return sorted(out, key=lambda item: item["name"])
+    except ApiError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise as_api_error(exc) from exc
