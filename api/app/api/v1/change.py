@@ -13,7 +13,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.v1.schemas import ErrorResponse, StatItem
 from app.config.constants import (
-    BLOCK_SIZE, MANUAL_THRESHOLD_RANGE, OTSU_FALLBACK_DNDVI, VALID_INDEXES,
+    BLOCK_SIZE, MANUAL_THRESHOLD_RANGE, METHOD_OTSU, OTSU_FALLBACK_DNDVI,
+    VALID_CHANGE_METHODS, VALID_INDEXES,
 )
 from app.service import change_async, change_service
 from app.service.change_async import STAGES
@@ -28,6 +29,11 @@ class ChangeRequest(BaseModel):
 
     run_id: str = Field(..., description="运行标识（REQ-14）")
     index: str = Field("NDVI", description=f"指数类型：{' | '.join(VALID_INDEXES)}（REQ-07，非法 → EX12）")
+    method: str = Field(
+        METHOD_OTSU,
+        description=(f"检测方法：{' | '.join(VALID_CHANGE_METHODS)}（REQ-11，缺省 otsu 差值法；"
+                     "regression=NDVI 回归残差法，非法 → EX12）"),
+    )
     block_size: int = Field(BLOCK_SIZE, description="分块尺寸，取常量源 BLOCK_SIZE（REQ-06）")
     threshold: Optional[float] = Field(
         None,
@@ -52,6 +58,7 @@ class ChangeResponse(BaseModel):
     stats: List[StatItem] = Field(default_factory=list, description="三类像元数 / 面积")
     params_snapshot: Dict[str, Any] = Field(default_factory=dict, description="参数快照（REQ-14）")
     index: str = Field("NDVI", description="本次使用的指数（REQ-07）")
+    method: str = Field(METHOD_OTSU, description="本次使用的检测方法：otsu / regression（REQ-11）")
     threshold_source: str = Field("otsu", description="阈值来源：otsu / manual（REQ-07/14）")
     artifacts: Dict[str, str] = Field(default_factory=dict,
                                       description="全部产物下载 URL 清单（REQ-10/12/14）")
@@ -112,12 +119,15 @@ def run_change(payload: ChangeRequest):
     """
     if payload.async_mode:
         accept = change_async.start_change(
-            payload.run_id, payload.index, payload.block_size, payload.threshold
+            payload.run_id, payload.index, payload.block_size, payload.threshold,
+            payload.method,
         )
         return ChangeAsyncAccept(**accept)
     result = change_service.run(
-        payload.run_id, payload.index, payload.block_size, payload.threshold
+        payload.run_id, payload.index, payload.block_size, payload.threshold,
+        payload.method,
     )
+    result.setdefault("method", METHOD_OTSU)
     return ChangeResponse(**result)
 
 

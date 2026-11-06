@@ -17,21 +17,35 @@ import rasterio
 from app.algorithm.writers import export_triplet, validate_export_formats
 from app.api.errors import ApiError, as_api_error
 from app.config.constants import (
-    ATTRIBUTION_S2, ATTRIBUTION_S2_MODIFIED, EXPORT_FORMATS, RESULT_BUCKET,
+    ATTRIBUTION_S2, ATTRIBUTION_S2_MODIFIED, EXPORT_FORMATS, METHOD_OTSU,
+    METHOD_REGRESSION, RESULT_BUCKET,
 )
 from app.config.storage import (
     StorageSettings, ensure_buckets, get_client, upload_file,
 )
 from app.repository import task_repo
-from app.service.common import artifact_url, git_short_commit, run_dir
+from app.service.common import (
+    artifact_url, git_short_commit, regression_artifact_names, run_dir,
+)
 from app.service.concurrency import serial
 from app.service.sample_service import accuracy_for_run
 
-# 格式 → (产物文件名, 上传 content_type)
+# 格式 → (产物文件名, 上传 content_type)；缺省 otsu 差值法主名不变
+_FORMAT_CONTENT_TYPE = {
+    "geotiff": "image/tiff",
+    "png": "image/png",
+    "pdf": "application/pdf",
+}
 _FORMAT_FILE = {
     "geotiff": ("change.tif", "image/tiff"),
     "png": ("change.png", "image/png"),
     "pdf": ("report.pdf", "application/pdf"),
+}
+# REQ-11：回归法产物名（与 change_service 的 _reg 主名同源）
+_FORMAT_FILE_REG = {
+    "geotiff": regression_artifact_names()["geotiff"],
+    "png": regression_artifact_names()["png"],
+    "pdf": regression_artifact_names()["pdf"],
 }
 
 __all__ = ["export"]
@@ -39,14 +53,21 @@ __all__ = ["export"]
 logger = logging.getLogger(__name__)
 
 
-def _upload(client, run_id: str, fmt: str, local: Path) -> str:
+def _files_for(method: str) -> Dict[str, str]:
+    """按本轮检测方法选择三件套文件名；老 run 快照无 method 时按 otsu 处理。"""
+    if str(method or METHOD_OTSU).strip().lower() == METHOD_REGRESSION:
+        return dict(_FORMAT_FILE_REG)
+    return {fmt: name for fmt, (name, _) in _FORMAT_FILE.items()}
+
+
+def _upload(client, run_id: str, fmt: str, local: Path, filename: str) -> str:
     """保留 MinIO 上传动作，但返回给前端的 ``files[].url`` 为同源相对 URL。
 
     ``storage.object_url()`` 的 ``minio://`` 口径只用于 ``scene.cog_path`` 登记
     （``cog_source.resolve_bands()`` 依赖它），此处不调用、也不改动该函数本身；
     上传失败时仅告警，产物已落盘，仍可由 /api/v1/artifacts 端点读取。
     """
-    filename, content_type = _FORMAT_FILE[fmt]
+    content_type = _FORMAT_CONTENT_TYPE[fmt]
     if client is not None:
         try:
             object_name = f"{run_id}/{filename}"
@@ -71,13 +92,21 @@ def export(run_id: str, formats: List[str]) -> dict:
 
         with serial(run_id):  # REQ-13：同步阻塞、并发上限 1
             out_dir = run_dir(run_id)
-            change_path: Path = out_dir / "change.tif"
             meta_path: Path = out_dir / "run_report.json"
-            if not change_path.exists() or not meta_path.exists():
+            if not meta_path.exists():
+                raise ApiError("SYS-01", run_id=run_id,
+                               detail="结果产物不存在，请先执行 /result/change")
+            report: Dict = json.loads(meta_path.read_text(encoding="utf-8"))
+            snapshot: Optional[dict] = report.get("params_snapshot")
+            # 回归法 run 只有 _reg 三件套：按快照的 method 选文件名，绝不误读/覆盖差值法主名
+            method = str((snapshot or {}).get("method") or report.get("method") or METHOD_OTSU)
+            file_map = _files_for(method)
+            names = {fmt: file_map[fmt] for fmt in _FORMAT_CONTENT_TYPE}
+            change_path: Path = out_dir / file_map["geotiff"]
+            if not change_path.exists():
                 raise ApiError("SYS-01", run_id=run_id,
                                detail="结果产物不存在，请先执行 /result/change")
 
-            report: Dict = json.loads(meta_path.read_text(encoding="utf-8"))
             with rasterio.open(str(change_path)) as ds:
                 change = ds.read(1)
                 profile = dict(ds.profile)
@@ -94,10 +123,10 @@ def export(run_id: str, formats: List[str]) -> dict:
                     }
 
             valid_ratio = float(report.get("valid_ratio", 0.0))
-            snapshot: Optional[dict] = report.get("params_snapshot")
             export_triplet(
                 change, profile, valid_ratio, report, out_dir,
                 formats=allowed, run_id=run_id, params_snapshot=snapshot,
+                names=names,
             )
 
             # 防御性确保 results 桶存在；不可用时仅回退本地路径
@@ -110,12 +139,12 @@ def export(run_id: str, formats: List[str]) -> dict:
 
             files: List[dict] = []
             for fmt in allowed:
-                filename, _ = _FORMAT_FILE[fmt]
+                filename = file_map[fmt]
                 local = out_dir / filename
                 size = int(local.stat().st_size) if local.exists() else 0
                 files.append({
                     "format": fmt,
-                    "url": _upload(client, run_id, fmt, local),
+                    "url": _upload(client, run_id, fmt, local, filename),
                     "size": size,
                 })
 

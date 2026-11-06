@@ -34,18 +34,24 @@ from app.algorithm.mask_pipeline import (
 )
 from app.algorithm.morphology import clean_change_map
 from app.algorithm.otsu import otsu_threshold
-from app.algorithm.radiometric import assert_same_caliber, check_baseline, to_reflectance
+from app.algorithm.radiometric import (
+    assert_same_caliber, check_baseline, to_reflectance,
+)
+from app.algorithm.regression_detector import detect_change_regression
 from app.algorithm.writers import export_triplet
 from app.api.errors import ApiError, as_api_error
 from app.config.constants import (
     ATTRIBUTION_S2, ATTRIBUTION_S2_MODIFIED, BLOCK_SIZE, EXPORT_FORMATS,
-    MANUAL_THRESHOLD_RANGE, S2_FORMULA, VALID_INDEXES,
+    MANUAL_THRESHOLD_RANGE, METHOD_OTSU, METHOD_REGRESSION,
+    REGRESSION_MAX_ROUNDS, REGRESSION_SIGMA_FACTOR, radiometric_formula,
+    VALID_CHANGE_METHODS, VALID_INDEXES,
     VALID_RATIO_MIN, VALID_RATIO_WARN,
 )
 from app.repository import aoi_repo, change_result_repo, scene_repo, task_repo
 from app.service.cog_source import resolve_bands
 from app.service.common import (
-    artifact_manifest, artifact_url, index_artifact_names, run_dir, utc_now,
+    artifact_manifest, artifact_url, index_artifact_names,
+    regression_archive_names, regression_artifact_names, run_dir, utc_now,
 )
 from app.service.concurrency import serial
 
@@ -83,6 +89,19 @@ def _validate_threshold(threshold, run_id: str) -> Optional[float]:
         raise ApiError("EX12", run_id=run_id,
                        detail=f"threshold 越界：{value!r}，需满足 {lo} < T < {hi}")
     return value
+
+
+def _validate_method(method: str, run_id: str) -> str:
+    """method 归一化为小写并校验白名单；非法 → EX12（REQ-11 提前实现）。
+
+    大小写不敏感（与 index 的 upper 规范化同风格）；缺省 ``otsu`` 时既有差值法
+    行为逐字不变。非法值在 task 状态更新之前抛出，不会把 task 误标为 FAILED。
+    """
+    key = str(method or "").strip().lower()
+    if key not in VALID_CHANGE_METHODS:
+        raise ApiError("EX12", run_id=run_id,
+                       detail=f"method 非法：{method!r}，仅支持 {list(VALID_CHANGE_METHODS)}")
+    return key
 
 
 def _build_index(key: str, rho_t: Dict, profile: dict, valid: np.ndarray,
@@ -167,32 +186,37 @@ def _resolve_bbox(task: dict) -> BBox:
 
 
 def run(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
-        threshold: Optional[float] = None) -> dict:
+        threshold: Optional[float] = None, method: str = METHOD_OTSU) -> dict:
     """变化检测主流程（REQ-05/06/07/08/14），同步阻塞入口。
 
     保持既有语义不变：``with serial`` 占用唯一处理槽（REQ-13，超限 EX7），
-    内部调用 :func:`run_pipeline` 执行完整管线。
+    内部调用 :func:`run_pipeline` 执行完整管线。``method`` 缺省 ``otsu`` 时
+    与历史版本逐字一致。
     """
     with serial(run_id):  # REQ-13：同步阻塞、并发上限 1（超限 EX7）
-        return run_pipeline(run_id, index, block_size, threshold)
+        return run_pipeline(run_id, index, block_size, threshold, method=method)
 
 
 def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
                  threshold: Optional[float] = None,
-                 on_stage: Optional[object] = None) -> dict:
-    """变化检测完整管线（REQ-05/06/07/08/14），不含并发闸门。
+                 on_stage: Optional[object] = None,
+                 method: str = METHOD_OTSU) -> dict:
+    """变化检测完整管线（REQ-05/06/07/08/11/14），不含并发闸门。
 
     供同步入口 :func:`run` 与异步入口 ``change_async`` 复用。``on_stage(name)``
     为可选进度回调（异步模式用于推进 5 阶段进度），同步模式传 None 即空操作。
 
-    参数扩展（向后兼容、缺省行为不变）：
+    参数扩展（向后兼容、缺省行为不变，且 index / threshold / method / async 正交）：
       * ``index``：NDVI（缺省，红+近红外）/ NDWI（绿+近红外），非法 → EX12；
       * ``threshold``：提供时跳过 Otsu 直接作对称阈值，须落在 (-1, 1)，越界 → EX12；
-        ``params_snapshot`` 记录 ``threshold`` 与 ``threshold_source``("manual"/"otsu")。
+        ``params_snapshot`` 记录 ``threshold`` 与 ``threshold_source``("manual"/"otsu")；
+      * ``method``：``otsu``（缺省，差值法）/ ``regression``（REQ-11 回归残差法）；
+        非法 → EX12，回归法产物带 ``_reg`` 后缀，不覆盖差值法三件套。
     """
     # 参数校验：非法参数不应把 task 误标为 FAILED
     key = _validate_index(index, run_id)
     manual = _validate_threshold(threshold, run_id)
+    method_key = _validate_method(method, run_id)
     try:
         task = task_repo.get_task(run_id)
         if not task:
@@ -269,16 +293,20 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
             write_composite_png(rgb, out_dir / f"{tag}_composite.png")
         false_color(rho["t1"]["B08"], rho["t1"]["B04"], rho["t1"]["B03"], valid_mask=valid)
 
-        # 产物清单（REQ-10/12/14）：主三件套 + 带 index 小写后缀归档 + 双时相合成图。
-        # NDVI 沿用历史主名（缺省行为不变）；NDWI 另存 change_ndwi.* 等，互不覆盖。
-        artifacts = artifact_manifest(run_id, key)
+        # 产物清单（REQ-10/12/14）：本轮主三件套 + 带 index / method 后缀归档 + 合成图。
+        # 差值法 NDVI 沿用历史主名（缺省行为不变）；回归法改用 _reg 主名，互不覆盖。
+        artifacts = artifact_manifest(run_id, key, method_key)
+        out_names = (regression_artifact_names()
+                     if method_key == METHOD_REGRESSION else None)
 
         snapshot.update({
             "block_size": int(block_size),
             "index": key,
+            "method": method_key,
             "index_bands": list(_INDEX_BANDS[key]),
             "sensor": sensor,
-            "formula": S2_FORMULA,  # 常量源口径，绝不使用 scene 表历史旧字段
+            # 常量源按 sensor 锁定公式口径，绝不使用 scene 表历史旧字段
+            "formula": str(radiometric_formula(sensor)["text"]),
             "baselines": {k: scenes[k]["baseline"] for k in ("t1", "t2")},
             "valid_ratio": float(valid_ratio),
             "valid_ratio_code": verdict.code,
@@ -296,21 +324,86 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
 
         if on_stage is not None:
             on_stage("change_detect")  # 阶段 4：变化检测
-        d = delta_ndvi(idx_t2.data, idx_t1.data)
-        if manual is None:
-            thr, otsu_fallback, otsu_reason = otsu_threshold(d, valid_mask=valid)
-            threshold_source = "otsu"
+        comparison = None
+        if method_key == METHOD_REGRESSION:
+            # REQ-11：稳健拟合 index_t2 = a·index_t1 + b → 残差 r → Otsu / 手动阈值。
+            reg = detect_change_regression(
+                idx_t1.data, idx_t2.data, valid_mask=valid, threshold=manual,
+            )
+            thr = float(reg["threshold"])
+            threshold_source = str(reg["threshold_source"])
+            otsu_fallback = bool(reg["otsu_fallback"])
+            otsu_reason = str(reg["otsu_reason"])
+            change_raw = reg["change_raw"]
+
+            # 报告对比表基线：差值法在同一 AOI / index / 手动阈值下重算，仅用于
+            # 对比展示，不写主结果、不覆盖任何差值法产物。
+            d_base = delta_ndvi(idx_t2.data, idx_t1.data)
+            if manual is None:
+                base_thr, base_fb, _ = otsu_threshold(d_base, valid_mask=valid)
+                base_source = "otsu"
+            else:
+                base_thr, base_fb, base_source = float(manual), False, "manual"
+            base_change = clean_change_map(
+                classify_change(d_base, abs(float(base_thr)), valid_mask=valid)
+            )
+            base_stats = change_stats(
+                base_change, profile=profile, valid_mask=valid,
+                run_id=run_id, params_snapshot=snapshot,
+            )["stats"]
         else:
-            thr = float(manual)
-            otsu_fallback, otsu_reason = False, "手动阈值覆盖，跳过 Otsu 自适应（REQ-07）"
-            threshold_source = "manual"
-        # 对称阈值 T 需非负；(-1,1) 内负值取 |T| 判别等价，快照/响应如实记录原值。
-        change_raw = classify_change(d, abs(thr), valid_mask=valid)
+            d = delta_ndvi(idx_t2.data, idx_t1.data)
+            if manual is None:
+                thr, otsu_fallback, otsu_reason = otsu_threshold(d, valid_mask=valid)
+                threshold_source = "otsu"
+            else:
+                thr = float(manual)
+                otsu_fallback, otsu_reason = False, "手动阈值覆盖，跳过 Otsu 自适应（REQ-07）"
+                threshold_source = "manual"
+            # 对称阈值 T 需非负；(-1,1) 内负值取 |T| 判别等价，快照/响应如实记录原值。
+            change_raw = classify_change(d, abs(thr), valid_mask=valid)
+
+        # 形态学去碎块对两种检测方法完全一致（同一函数、同一参数）
         change = clean_change_map(change_raw)
         summary = change_stats(change, profile=profile, valid_mask=valid,
                                run_id=run_id, params_snapshot=snapshot)
         ratio_change = change_pixel_ratio(change, valid_mask=valid)
         stats = summary["stats"]
+
+        if method_key == METHOD_REGRESSION:
+            comparison = {
+                "difference": {
+                    "method": METHOD_OTSU,
+                    "threshold": float(base_thr),
+                    "threshold_source": base_source,
+                    "otsu_fallback": bool(base_fb),
+                    "stats": base_stats,
+                },
+                "regression": {
+                    "method": METHOD_REGRESSION,
+                    "threshold": float(thr),
+                    "threshold_source": threshold_source,
+                    "otsu_fallback": bool(otsu_fallback),
+                    "stats": stats,
+                    "a": float(reg["a"]),
+                    "b": float(reg["b"]),
+                    "sigma": float(reg["sigma"]),
+                    "rounds": int(reg["rounds"]),
+                },
+            }
+            # REQ-14 可复现：method / a / b / sigma / 迭代轮数 / reg_threshold 全量入快照
+            snapshot.update({
+                "a": float(reg["a"]),
+                "b": float(reg["b"]),
+                "sigma": float(reg["sigma"]),
+                "rounds": int(reg["rounds"]),
+                "reg_threshold": float(thr),
+                "regression_max_rounds": REGRESSION_MAX_ROUNDS,
+                "regression_sigma_factor": REGRESSION_SIGMA_FACTOR,
+                "regression_valid_count": int(reg["n_valid"]),
+                "regression_inlier_count": int(reg["n_inliers"]),
+                "comparison": comparison,
+            })
 
         snapshot.update({
             "threshold": float(thr),
@@ -331,6 +424,8 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
             "valid_ratio": float(valid_ratio),
             "valid_ratio_code": verdict.code,
             "index": key,
+            "method": method_key,
+            "comparison": comparison,
             "threshold": float(thr),
             "threshold_source": threshold_source,
             "otsu_threshold": float(thr),
@@ -351,10 +446,14 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
         exported = export_triplet(
             change, profile, valid_ratio, report, out_dir,
             formats=EXPORT_FORMATS, run_id=run_id, params_snapshot=snapshot,
+            names=out_names,
         )
         # 归档一份带 index 小写后缀的三件套副本：NDVI / NDWI 各自留存，互不覆盖；
-        # 主名三件套仍保持历史文件名，sample / report / e2e 链路不受影响。
-        for src_name, dst_name in index_artifact_names(key).items():
+        # 回归法从 _reg 主名复制到 <index>_reg 归档名，差值法主名保持历史文件名。
+        archive_names = (regression_archive_names(key)
+                         if method_key == METHOD_REGRESSION
+                         else index_artifact_names(key))
+        for src_name, dst_name in archive_names.items():
             src = out_dir / src_name
             if src.is_file():
                 shutil.copy2(src, out_dir / dst_name)
@@ -374,8 +473,16 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
 
         # 响应改为同源相对 URL：浏览器 image source / <a download> 可直接加载，
         # 避免把本地绝对路径或 minio:// 自定义 scheme 暴露给前端（REQ-10/REQ-12）。
-        # NDVI 保持历史主名（缺省行为不变）；NDWI 指向带后缀归档，避免互相覆盖。
-        resp_names = index_artifact_names(key) if key != "NDVI" else {}
+        # NDVI 保持历史主名（缺省行为不变）；NDWI 指向带后缀归档，避免互相覆盖；
+        # 回归法一律指向 _reg 主名，与差值法三件套物理隔离。
+        if method_key == METHOD_REGRESSION:
+            reg_names = regression_artifact_names()
+            resp_names = {
+                "change.tif": reg_names["geotiff"],
+                "change.png": reg_names["png"],
+            }
+        else:
+            resp_names = index_artifact_names(key) if key != "NDVI" else {}
         return {
             "run_id": run_id,
             "change_geotiff": artifact_url(
@@ -387,6 +494,7 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
             "stats": stats,
             "params_snapshot": snapshot,
             "index": key,
+            "method": method_key,
             "threshold_source": threshold_source,
             "artifacts": artifacts,
         }

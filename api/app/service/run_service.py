@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 # 旧 run 若没有这些产物，raster 如实返回 null；_cog/ 下的是原始未裁切 COG，不作为来源。
 _RASTER_ARTIFACTS: tuple = (
     "change.tif", "change_ndvi.tif", "change_ndwi.tif",
+    "change_reg.tif", "change_ndvi_reg.tif", "change_ndwi_reg.tif",
 )
 
 __all__ = [

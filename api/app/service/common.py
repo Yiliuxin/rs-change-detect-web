@@ -7,7 +7,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional
 
-from app.config.constants import VALID_INDEXES
+from app.config.constants import (
+    METHOD_OTSU, METHOD_REGRESSION, REGRESSION_ARTIFACT_SUFFIX, VALID_INDEXES,
+)
 
 # api/app/service/common.py → parents[3] = 工程根 C:\Test\Web
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -30,6 +32,8 @@ ARTIFACT_MEDIA_TYPES: Dict[str, str] = {
     "report.pdf": "application/pdf",
     "t1_composite.png": "image/png",
     "t2_composite.png": "image/png",
+    # REQ-12：三类面积柱状图（PDF 内嵌 + 独立产物，供前端复用）
+    "area_chart.png": "image/png",
 }
 for _index in VALID_INDEXES:
     _suffix = "_" + _index.lower()
@@ -37,9 +41,23 @@ for _index in VALID_INDEXES:
     ARTIFACT_MEDIA_TYPES[f"change{_suffix}.png"] = "image/png"
     ARTIFACT_MEDIA_TYPES[f"report{_suffix}.pdf"] = "application/pdf"
 
+# REQ-11：回归法独立产物名（带 _reg 后缀，与差值法三件套互不覆盖）。
+# 同时为每个 index 生成 <index>_reg 归档名，保证 method × index 正交组合。
+ARTIFACT_MEDIA_TYPES.update({
+    f"change{REGRESSION_ARTIFACT_SUFFIX}.tif": "image/tiff",
+    f"change{REGRESSION_ARTIFACT_SUFFIX}.png": "image/png",
+    f"report{REGRESSION_ARTIFACT_SUFFIX}.pdf": "application/pdf",
+})
+for _index in VALID_INDEXES:
+    _suffix = "_" + _index.lower() + REGRESSION_ARTIFACT_SUFFIX
+    ARTIFACT_MEDIA_TYPES[f"change{_suffix}.tif"] = "image/tiff"
+    ARTIFACT_MEDIA_TYPES[f"change{_suffix}.png"] = "image/png"
+    ARTIFACT_MEDIA_TYPES[f"report{_suffix}.pdf"] = "application/pdf"
+
 __all__ = ["REPO_ROOT", "RUNS_ROOT", "DATA_ROOT", "ARTIFACT_URL_PREFIX",
            "ARTIFACT_MEDIA_TYPES", "git_short_commit", "utc_now", "run_dir",
-           "artifact_url", "index_artifact_names", "artifact_manifest"]
+           "artifact_url", "index_artifact_names", "regression_artifact_names",
+           "regression_archive_names", "artifact_manifest"]
 
 
 def git_short_commit() -> Optional[str]:
@@ -87,16 +105,50 @@ def index_artifact_names(index: str) -> Dict[str, str]:
     }
 
 
-def artifact_manifest(run_id: str, index: str) -> Dict[str, str]:
+def regression_artifact_names() -> Dict[str, str]:
+    """回归法三件套 ``{格式键: 文件名}``（``export_triplet(names=...)`` 同口径）。"""
+    s = REGRESSION_ARTIFACT_SUFFIX
+    return {
+        "geotiff": f"change{s}.tif",
+        "png": f"change{s}.png",
+        "pdf": f"report{s}.pdf",
+    }
+
+
+def regression_archive_names(index: str) -> Dict[str, str]:
+    """回归法主产物名 → 带 index 后缀的归档名（method × index 正交隔离）。"""
+    key = str(index).strip().upper()
+    if key not in VALID_INDEXES:
+        raise ValueError(f"不支持的指数：{index!r}，仅支持 {list(VALID_INDEXES)}")
+    sfx = "_" + key.lower() + REGRESSION_ARTIFACT_SUFFIX
+    reg = regression_artifact_names()
+    return {
+        reg["geotiff"]: f"change{sfx}.tif",
+        reg["png"]: f"change{sfx}.png",
+        reg["pdf"]: f"report{sfx}.pdf",
+    }
+
+
+def artifact_manifest(run_id: str, index: str,
+                      method: str = METHOD_OTSU) -> Dict[str, str]:
     """本轮全部产物清单 ``{文件名: 同源下载 URL}``（REQ-10/12/14）。
 
-    含主三件套、按指数归档的带后缀三件套、双时相真彩合成图；文件名一律
-    落在 ``ARTIFACT_MEDIA_TYPES`` 白名单内，静态端点可直接读取。
+    含本轮主三件套、按指数归档的带后缀三件套、双时相真彩合成图；回归法时
+    主三件套换成 ``_reg`` 名，不登记差值法主名（避免覆盖），文件名一律落在
+    ``ARTIFACT_MEDIA_TYPES`` 白名单内，静态端点可直接读取。
     """
-    names = [
-        "change.tif", "change.png", "report.pdf",
-        "t1_composite.png", "t2_composite.png",
-        *index_artifact_names(index).values(),
-    ]
-    return {n: artifact_url(run_id, n) for n in names
+    normalized = str(method or METHOD_OTSU).strip().lower()
+    if normalized == METHOD_REGRESSION:
+        reg = regression_artifact_names()
+        names = [
+            *reg.values(), "t1_composite.png", "t2_composite.png",
+            *regression_archive_names(index).values(),
+        ]
+    else:
+        names = [
+            "change.tif", "change.png", "report.pdf",
+            "t1_composite.png", "t2_composite.png",
+            *index_artifact_names(index).values(),
+        ]
+    return {n: artifact_url(run_id, n) for n in dict.fromkeys(names)
             if n in ARTIFACT_MEDIA_TYPES}

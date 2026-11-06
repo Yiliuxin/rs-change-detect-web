@@ -299,14 +299,24 @@ def export_triplet(
     formats: Sequence[str] = EXPORT_FORMATS,
     run_id: str = "",
     params_snapshot: Optional[dict] = None,
+    names: Optional[Dict[str, str]] = None,
 ) -> Dict[str, object]:
-    """一次性导出 GeoTIFF / PNG / PDF 三件套（文件名固定）。
+    """一次性导出 GeoTIFF / PNG / PDF 三件套。
 
-    文件名：``change.tif`` / ``change.png`` / ``report.pdf``。
+    缺省文件名 ``change.tif`` / ``change.png`` / ``report.pdf``；``names`` 可按
+    ``{geotiff, png, pdf}`` 覆盖文件名（REQ-11 回归法用 ``_reg`` 后缀隔离，
+    缺省调用行为完全不变）。
     """
     allowed = validate_export_formats(formats)
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    chosen = dict(names or {})
+    file_names = {
+        "geotiff": chosen.get("geotiff", "change.tif"),
+        "png": chosen.get("png", "change.png"),
+        "pdf": chosen.get("pdf", "report.pdf"),
+    }
 
     enriched = dict(report)
     enriched.setdefault("valid_ratio", float(valid_ratio))
@@ -324,11 +334,11 @@ def export_triplet(
     notes = result["notes"]
 
     if "geotiff" in allowed:
-        files["geotiff"] = write_geotiff(change, profile, out_dir / "change.tif")
+        files["geotiff"] = write_geotiff(change, profile, out_dir / file_names["geotiff"])
 
     if "png" in allowed:
         png_meta = write_png(
-            change, float(valid_ratio), out_dir / "change.png",
+            change, float(valid_ratio), out_dir / file_names["png"],
             run_id=run_id, params_snapshot=params_snapshot,
             otsu_threshold=enriched.get("otsu_threshold"),
             attribution_lines=enriched.get("attribution_lines"),
@@ -337,7 +347,7 @@ def export_triplet(
         notes["png"] = png_meta
 
     if "pdf" in allowed:
-        pdf_meta = write_pdf(enriched, out_dir / "report.pdf")
+        pdf_meta = write_pdf(enriched, out_dir / file_names["pdf"])
         files["pdf"] = pdf_meta["path"]
         notes["pdf"] = pdf_meta
 

@@ -22,7 +22,7 @@ import threading
 from typing import Dict, List, Optional
 
 from app.api.errors import ApiError, as_api_error
-from app.config.constants import ERROR_MESSAGES
+from app.config.constants import ERROR_MESSAGES, METHOD_OTSU
 from app.repository import task_repo
 from app.service import change_service
 from app.service.concurrency import release as _release_gate
@@ -100,19 +100,23 @@ def _stage(task_id: str, name: str) -> None:
 # 对外入口：受理（同步）+ 后台线程
 # --------------------------------------------------------------------------- #
 def start_change(run_id: str, index: str = "NDVI", block_size: int = 256,
-                 threshold: Optional[float] = None) -> dict:
+                 threshold: Optional[float] = None,
+                 method: str = METHOD_OTSU) -> dict:
     """受理异步变化检测：先过并发闸门（超限 → EX7 409），立即返回 PENDING。
 
     后台线程持有 ``concurrency`` 闸门运行 ``change_service.run_pipeline`` 完整管线，
     task_id 与 run_id 一致，便于与 task 表 / 产物目录一一对应。
+    ``method`` 非法在**受理时**即抛 EX12(400)，与同步入口一致，不会先返回
+    PENDING 再在后台失败。
     """
+    method_key = change_service._validate_method(method, run_id)
     # 受理时同步抢占并发闸门；超限 → EX7(409)
     if not _try_acquire_gate():
         raise ApiError("EX7", run_id=run_id)
     rec = _new_record(run_id)
     t = threading.Thread(
         target=_run_change,
-        args=(run_id, index, block_size, threshold),
+        args=(run_id, index, block_size, threshold, method_key),
         name=f"change-async-{str(run_id)[:8]}",
         daemon=True,
     )
@@ -122,7 +126,7 @@ def start_change(run_id: str, index: str = "NDVI", block_size: int = 256,
 
 
 def _run_change(run_id: str, index: str, block_size: int,
-                threshold: Optional[float]) -> None:
+                threshold: Optional[float], method: str = METHOD_OTSU) -> None:
     """后台主流程：RUNNING →（SUCCESS | FAILED），finally 释放并发闸门。"""
     try:
         _patch(run_id, status=STATUS_RUNNING)
@@ -130,9 +134,13 @@ def _run_change(run_id: str, index: str, block_size: int,
         def on_stage(name: str) -> None:
             _stage(run_id, name)
 
-        # 完整管线；闸门由本线程在 start_change 时持有，此处不再重复抢占
+        # 完整管线；闸门由本线程在 start_change 时持有，此处不再重复抢占。
+        # 缺省 otsu 时不额外传 method，保持既有 monkeypatch / 老调用签名兼容。
+        kwargs = {"on_stage": on_stage}
+        if method != METHOD_OTSU:
+            kwargs["method"] = method
         result = change_service.run_pipeline(
-            run_id, index, block_size, threshold, on_stage=on_stage,
+            run_id, index, block_size, threshold, **kwargs,
         )
         _stage(run_id, STAGES[-1])  # 收尾阶段标记完成
         _patch(run_id, status=STATUS_SUCCESS, result=dict(result))

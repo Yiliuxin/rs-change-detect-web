@@ -42,6 +42,22 @@ VALID_INDEXES: Final[Tuple[str, ...]] = ("NDVI", "NDWI")
 MANUAL_THRESHOLD_RANGE: Final[Tuple[float, float]] = (-1.0, 1.0)
 
 # ---------------------------------------------------------------------------
+# REQ-11（提前实现）变化检测方法：差值法 Otsu / 回归残差法
+# ---------------------------------------------------------------------------
+# 方法白名单（大小写不敏感，服务层统一 lower 规范化）；非法 → EX12。
+# "otsu"      = 既有差值法：Δ = index(t2) − index(t1)，Otsu 或手动阈值；
+# "regression"= 回归法：稳健拟合 index(t2) = a·index(t1) + b，对残差 r 做 Otsu。
+METHOD_OTSU: Final[str] = "otsu"
+METHOD_REGRESSION: Final[str] = "regression"
+VALID_CHANGE_METHODS: Final[Tuple[str, ...]] = (METHOD_OTSU, METHOD_REGRESSION)
+# 回归法迭代稳健拟合：每轮剔除 |残差| > sigma_factor·σ 的像元后重拟合，最多 max_rounds 轮。
+# 来源：任务书「回归法定义（已拍板）」；数值口径集中在常量源，算法模块不写死。
+REGRESSION_MAX_ROUNDS: Final[int] = 3
+REGRESSION_SIGMA_FACTOR: Final[float] = 2.0
+# 回归法产物文件名后缀：与差值法三件套隔离，避免同一 run_id 二次检测互相覆盖。
+REGRESSION_ARTIFACT_SUFFIX: Final[str] = "_reg"
+
+# ---------------------------------------------------------------------------
 # REQ-03 / REQ-06 分块读写
 # ---------------------------------------------------------------------------
 # 默认分块尺寸（像素），控制峰值内存 < 4GB。来源：REQ-03 / REQ-06 / NF3 / HLD 3.7
@@ -157,6 +173,41 @@ def radiometric_formula(sensor: str) -> Dict[str, object]:
 def radiometric_func(sensor: str) -> Callable:
     """按 sensor 取辐射定标函数（S2 与 Landsat 公式禁止互套）。"""
     return radiometric_formula(sensor)["func"]  # type: ignore[return-value]
+
+
+# ---------------------------------------------------------------------------
+# REQ-04 / REQ-05 Landsat Collection 2 Level-2 波段与 QA_PIXEL 位定义
+# ---------------------------------------------------------------------------
+# STAC 资产名 ↔ 内部统一波段键（S2 的 B02/B03/B04/B08/SCL 口径）。
+# 来源：earth-search v1 landsat-c2-l2 资产 blue/green/red/nir08/qa_pixel
+#       与 USGS 文件名 SR_B2/SR_B3/SR_B4/SR_B5/QA_PIXEL。
+LANDSAT_BAND_ALIASES: Final[Dict[str, Tuple[str, ...]]] = {
+    "B02": ("blue", "SR_B2"),
+    "B03": ("green", "SR_B3"),
+    "B04": ("red", "SR_B4"),
+    "B08": ("nir08", "SR_B5"),
+    "SCL": ("qa_pixel", "QA_PIXEL"),
+}
+# Landsat 传感器集合（cog_source / radiometric 按 sensor 分派用）
+LANDSAT_SENSORS: Final[Tuple[str, ...]] = (SENSOR_L8, SENSOR_L9)
+
+# USGS Collection 2 Level-2 QA_PIXEL 位定义（classification:bitfields offset）。
+# 命中任一位即判为无效像元；bit2(cirrus)/bit6(clear)/bit7(water) 等不参与判定。
+QA_PIXEL_BIT_FILL: Final[int] = 0            # Fill
+QA_PIXEL_BIT_DILATED_CLOUD: Final[int] = 1   # Dilated Cloud
+QA_PIXEL_BIT_CLOUD: Final[int] = 3           # Cloud
+QA_PIXEL_BIT_CLOUD_SHADOW: Final[int] = 4    # Cloud Shadow
+QA_PIXEL_BIT_SNOW: Final[int] = 5            # Snow
+QA_PIXEL_INVALID_BITS: Final[Tuple[int, ...]] = (
+    QA_PIXEL_BIT_FILL, QA_PIXEL_BIT_DILATED_CLOUD, QA_PIXEL_BIT_CLOUD,
+    QA_PIXEL_BIT_CLOUD_SHADOW, QA_PIXEL_BIT_SNOW,
+)
+# QA_PIXEL 位组合 → MaskSet 分类位（用于云/云影/雪分组统计）
+QA_PIXEL_CLOUD_BITS: Final[Tuple[int, ...]] = (QA_PIXEL_BIT_DILATED_CLOUD, QA_PIXEL_BIT_CLOUD)
+QA_PIXEL_SHADOW_BITS: Final[Tuple[int, ...]] = (QA_PIXEL_BIT_CLOUD_SHADOW,)
+QA_PIXEL_SNOW_BITS: Final[Tuple[int, ...]] = (QA_PIXEL_BIT_SNOW,)
+# Landsat SR 波段 DN=0 为 NODATA（USGS C2 L2 约定），先掩膜后缩放顺序不变。
+LANDSAT_NODATA_DN: Final[int] = 0
 
 
 # ---------------------------------------------------------------------------
