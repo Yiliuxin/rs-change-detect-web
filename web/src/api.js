@@ -373,6 +373,40 @@ export function getRunDetail(runId) {
 }
 
 // ==========================================================================
+// 3A（REQ-13）：C 卡「后台运行」—— 变化检测异步受理 + 任务状态轮询
+// 只新增 startAsyncChange / pollChangeTask 两个导出；既有所有导出签名、
+// 返回结构、演示降级层、5 接口行为完全不动。
+//
+// 复用上面 onlineCall 的「判别式返回」（调用方无需 try/catch，零未捕获 JS 异常）：
+//   { ok:true,  data }                             成功
+//   { ok:false, unavailable:true, status }        网络失败 / 裸 404 / 非契约错误页
+//   { ok:false, code, message, run_id, status }   后端业务错误体（如 EX7 并发超限）
+//   { ok:false, transient:true }                  仅 pollChangeTask：单次 GET 抖动可跳过
+//
+// 超时口径（关键）：onlineCall → onlineFetch 内部为「单次请求」各起一个 AbortController
+// 定时器，pollChangeTask 的 15s 只作用于这一发 GET；2s 轮询循环在 main.js 的
+// setInterval 里，绝不把整个轮询循环包进 15s，长检测不会被整体掐断。
+// ==========================================================================
+const CHANGE_ASYNC_START_TIMEOUT_MS = 15000;
+
+// POST /result/change（body 携带 async:true）→ {run_id, task_id, status:'PENDING'}
+export function startAsyncChange(payload) {
+  const body = { ...(payload || {}), async: true };
+  return onlineCall('/result/change', jsonOptions(body), CHANGE_ASYNC_START_TIMEOUT_MS, false);
+}
+
+// GET /result/change/task/{task_id} → {task_id, status, progress, error, result}
+// 15s 超时只作用于本次 GET；main.js 每 2s 独立调用一次。
+export function pollChangeTask(taskId) {
+  return onlineCall(
+    '/result/change/task/' + encodeURIComponent(taskId),
+    { method: 'GET', headers: { 'Content-Type': 'application/json' } },
+    TIMEOUT_MS,
+    true,
+  );
+}
+
+// ==========================================================================
 // 2B：样本「图上点选」—— POST /sample/from_lnglat（REQ-09）
 // 只新增本导出；既有导出签名、演示降级层与 5 接口行为完全不动。
 // 判别式返回（调用方无需 try/catch，绝不产生未捕获 JS 异常）：

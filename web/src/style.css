@@ -645,3 +645,21 @@ input[type="range"]:disabled { opacity: .45; cursor: not-allowed; }
 .pick-table-wrap table.tbl { font-size: 10.5px; }
 .pick-table-wrap table.tbl th, .pick-table-wrap table.tbl td { padding: 4px 5px; }
 .pick-table-wrap code { color: #1c5fb0; font-size: 10px; }
+
+/* ===== 3A（REQ-13）· C 卡「后台运行」开关 + 阶段进度 =====
+   进度条/状态徽标/进度头完全复用在线取数卡的 .onl-* 组件，不重复造。 */
+.run-mode-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 10px; border: 1px dashed var(--line);
+  border-radius: 9px; background: var(--card2);
+}
+.run-mode-row .chk { white-space: nowrap; }
+.run-mode-row .hint { margin-left: auto; font-size: 10.5px; color: var(--muted2); }
+.bg-stages { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+.bg-stage {
+  font-size: 10.5px; line-height: 1.5; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--line); background: #fff; color: var(--muted2);
+}
+.bg-stage.done { color: #fff; background: var(--green); border-color: var(--green); }
+.bg-stage.active { color: #fff; background: var(--accent); border-color: var(--accent); }
+#run-async-progress .onl-prog-foot .hint { font-size: 11px; font-weight: 600; color: var(--accent2); }

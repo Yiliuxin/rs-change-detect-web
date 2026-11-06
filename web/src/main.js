@@ -402,9 +402,30 @@ function syncRunAdvancedUi() {
   }
 }
 
+// 同步 / 后台运行 SUCCESS 共用同一套结果渲染函数（REQ-13）：设置 S.change、专题图叠加、
+// 结果卡 / 参数快照 / 卷帘 / 导出 / 图上点选 run 标签，保证两条路径渲染口径完全一致。
+function applyChangeResult(data) {
+  S.change = data;
+  let url = data.change_png;
+  if (!url || /^demo:/.test(url)) url = demo.makeChangePngDataUrl();
+  S.changePngUrl = url;
+  if (!isUnsafeImageUrl(url)) {
+    M.setImage(map, url, S.aoi);
+    M.setImageOpacity(map, S.opacity);
+  }
+  $('map-legend').hidden = false;
+  renderChangeResult();
+  renderSnapshot();
+  refreshSwipeFromChange(data); // 本轮合成图同步到「双时相对比」视图（缺图则置灰）
+  refreshExportState();
+  updatePickRunLabel();
+}
+
 async function runChangeDetection() {
   if (S.changeBusy) return;
   if (!(S.aoiResult && S.selectedPair)) { refreshGates(); return; }
+  // 3A（REQ-13）：「后台运行」开关默认关闭；关闭时下方同步路径与既有实现完全一致
+  if ($('chk-bg-run') && $('chk-bg-run').checked) return runChangeAsync();
   const btn = $('btn-run-change');
   S.changeBusy = true;
   btn.disabled = true;
@@ -421,20 +442,7 @@ async function runChangeDetection() {
     const res = await api.runChange(body);
     if (res.demo) markDemo();
     else setDataBadge(false, 'POST /result/change');
-    S.change = res.data;
-    let url = res.data.change_png;
-    if (!url || /^demo:/.test(url)) url = demo.makeChangePngDataUrl();
-    S.changePngUrl = url;
-    if (!isUnsafeImageUrl(url)) {
-      M.setImage(map, url, S.aoi);
-      M.setImageOpacity(map, S.opacity);
-    }
-    $('map-legend').hidden = false;
-    renderChangeResult();
-    renderSnapshot();
-    refreshSwipeFromChange(res.data); // 本轮合成图同步到「双时相对比」视图（缺图则置灰）
-    refreshExportState();
-    updatePickRunLabel();
+    applyChangeResult(res.data);
     $('run-done').hidden = false;
     $('run-done').textContent = '✓ 检测完成 · ' + index
       + (res.data.threshold_source ? ' · ' + res.data.threshold_source : '')
@@ -449,6 +457,223 @@ async function runChangeDetection() {
     $('run-progress').hidden = true;
     btn.textContent = '运行变化检测 · POST /result/change';
     refreshGates();
+  }
+}
+
+// ===== 批次 3A（REQ-13）：C 卡「后台运行」模式 =====
+// 开关默认关闭：关闭时走上面完全不变的同步路径（提交 + 既有加载态）。
+// 开启时 POST /result/change 带 async:true 受理，随后每 2s 独立 GET 轮询任务状态；
+// 进度区直接复用在线取数卡的 .onl-progress / .onl-status-badge / .onl-bar 组件，
+// 不重复造进度条；SUCCESS 复用 applyChangeResult()（与同步路径同一套渲染函数）。
+// 与在线取数卡一致：所有网络/业务错误内联在 C 卡，绝不调用 handleErr / showError，
+// 因此既不影响离线预置路径，也不产生未捕获 JS 异常。
+const BG_POLL_MS = 2000;
+const BG_STAGE_LABELS = {
+  read_clip: '读裁切',
+  mask: '掩膜',
+  index: '指数',
+  change_detect: '变化检测',
+  render_export: '渲染导出',
+};
+const BG_STAGES = Object.keys(BG_STAGE_LABELS); // 与后端 5 阶段同名同序
+const BG_TOTAL = BG_STAGES.length;              // 5
+
+const BG = {
+  active: false,
+  taskId: '',
+  timer: null,
+  pollBusy: false,
+  pollFails: 0,
+  startedAt: 0,
+};
+
+function syncBgModeUi() {
+  const on = !!($('chk-bg-run') && $('chk-bg-run').checked);
+  const hint = $('run-mode-hint');
+  if (hint) hint.textContent = on ? '开启 · 后台任务 + 2s 轮询' : '关闭 · 同步提交';
+}
+
+function stopBgPolling() {
+  if (BG.timer) { window.clearInterval(BG.timer); BG.timer = null; }
+  BG.pollBusy = false;
+}
+
+function endBgRun() {
+  stopBgPolling();
+  BG.active = false;
+  S.changeBusy = false;
+  $('btn-run-change').textContent = '运行变化检测 · POST /result/change';
+  refreshGates();
+}
+
+// 状态徽标 + 步数进度条 + 5 阶段文案（复用在线取数卡的进度组件实现）
+function renderBgProgress(status, stage, step, total) {
+  const box = $('run-async-progress');
+  const st = String(status || 'PENDING').toUpperCase();
+  const t = Number(total) || BG_TOTAL;
+  const s = Math.max(0, Math.min(t, Number(step) || 0));
+
+  const badge = $('run-async-badge');
+  badge.textContent = st;
+  badge.className = 'onl-status-badge st-' + st;
+
+  $('run-async-step').textContent = '阶段 ' + s + '/' + t;
+  $('run-async-bar-fill').style.width = Math.round(s / t * 100) + '%';
+  const bar = box.querySelector('.onl-bar');
+  bar.classList.toggle('done', st === 'SUCCESS');
+  bar.classList.toggle('failed', st === 'FAILED');
+  $('run-async-spinner').hidden = !(st === 'PENDING' || st === 'RUNNING');
+
+  // 累计实际观察到的阶段（供验收断言阶段推进序列）
+  const key = String(stage || '');
+  const seen = box.dataset.seen ? box.dataset.seen.split(',') : [];
+  if (key && BG_STAGE_LABELS[key] && !seen.includes(key)) seen.push(key);
+  box.dataset.seen = seen.join(',');
+
+  box.querySelectorAll('.bg-stage').forEach((el, i) => {
+    el.classList.toggle('done', i < s);
+    el.classList.toggle('active', st === 'RUNNING' && i === s - 1);
+  });
+
+  const zh = BG_STAGE_LABELS[key] || '';
+  // 累计已完成阶段文案：真实管线可能 < 2× 轮询间隔就跑完（2s 轮询抓不到中间帧），
+  // 用 step 推导出的累计阶段名保证 5 个阶段文案在进度态里完整可见。
+  const doneNames = BG_STAGES.slice(0, s).map((k) => BG_STAGE_LABELS[k]).join(' → ');
+  const line = $('run-async-stage');
+  if (st === 'SUCCESS') {
+    line.textContent = '全部 ' + t + ' 阶段完成 · ' + (doneNames || BG_STAGES.map((k) => BG_STAGE_LABELS[k]).join(' → ')) + ' · 结果已渲染';
+  } else if (st === 'FAILED') {
+    line.textContent = (zh ? '终止于阶段：' + zh : '后台任务已终止')
+      + (doneNames ? ' · 已完成：' + doneNames : '');
+  } else if (zh) {
+    line.textContent = '当前阶段：' + zh + '（' + s + '/' + t + '）'
+      + (doneNames ? ' · 已完成：' + doneNames : '');
+  } else {
+    line.textContent = '等待后台任务受理…';
+  }
+  return { st, s, t };
+}
+
+function bgShowFailure(detail) {
+  $('run-async-progress').hidden = false;
+  renderBgProgress('FAILED', '', 0, BG_TOTAL);
+  const el = $('run-async-failed');
+  el.hidden = false;
+  el.textContent = detail;
+  showToast(detail, 'error', 5200);
+}
+
+function bgTerminal(status, data) {
+  stopBgPolling();
+  BG.active = false;
+  const elapsed = BG.startedAt ? ((Date.now() - BG.startedAt) / 1000).toFixed(1) : '0.0';
+  const pg = (data && data.progress) || {};
+  if (status === 'SUCCESS') {
+    renderBgProgress('SUCCESS', BG_STAGES[BG_TOTAL - 1], BG_TOTAL, pg.total || BG_TOTAL);
+    const result = data && data.result;
+    if (result && result.run_id) {
+      setDataBadge(false, 'POST /result/change (async)');
+      applyChangeResult(result);
+      $('run-done').hidden = false;
+      $('run-done').textContent = '✓ 后台运行完成 · ' + (result.index || 'NDVI')
+        + ' · run_id ' + result.run_id + ' · 耗时 ' + elapsed + 's';
+      showToast('后台运行完成，结果已渲染（耗时 ' + elapsed + 's）', 'ok', 4200);
+    } else {
+      bgShowFailure('后台任务成功但未返回结果数据（result 为空）');
+    }
+  } else {
+    renderBgProgress('FAILED', pg.stage, pg.step, pg.total);
+    const err = (data && data.error) || {};
+    // 复用在线取数卡同款按 code 取中文的实现（errors.js ERROR_MESSAGES，既有映射不动）
+    const text = onlineErrText({ code: err.code, message: err.message });
+    const el = $('run-async-failed');
+    el.hidden = false;
+    el.textContent = text;
+    showToast(text, 'error', 5200);
+  }
+  endBgRun();
+}
+
+async function bgPollTick() {
+  if (!BG.active || BG.pollBusy || !BG.taskId) return;
+  BG.pollBusy = true;
+  try {
+    // 单次 GET：api.pollChangeTask 的 15s 超时只作用于本次请求；
+    // 2s 轮询循环在外层 setInterval，绝不把整个循环包进 15s。
+    const res = await api.pollChangeTask(BG.taskId);
+    if (!BG.active) return; // 已终止/切换任务，丢弃过期回调
+    if (res.ok) {
+      BG.pollFails = 0;
+      const d = res.data || {};
+      const st = String(d.status || '').toUpperCase();
+      const pg = d.progress || {};
+      renderBgProgress(st || 'PENDING', pg.stage, pg.step, pg.total);
+      $('btn-run-change').textContent = '后台运行中… 阶段 '
+        + (Number(pg.step) || 0) + '/' + (Number(pg.total) || BG_TOTAL);
+      if (st === 'SUCCESS' || st === 'FAILED') bgTerminal(st, d);
+    } else if (res.transient) {
+      // 单次 GET 抖动（网络 / 5xx / 超时）：跳过本次，2s 后继续，绝不中断长检测
+      BG.pollFails += 1;
+      if (BG.pollFails === 3) $('run-async-stage').textContent = '进度查询重试中…（后台任务仍在运行）';
+    } else {
+      const detail = res.unavailable
+        ? '后台任务状态查询不可用（网络不可达或端点未启用）'
+        : onlineErrText(res);
+      bgTerminal('FAILED', { error: { message: detail } });
+    }
+  } catch (e) {
+    BG.pollFails += 1; // 兜底：单次轮询异常按瞬态处理，继续下一轮
+  } finally {
+    BG.pollBusy = false;
+  }
+}
+
+function startBgPolling(taskId, initialStatus) {
+  stopBgPolling();
+  BG.active = true;
+  BG.taskId = taskId;
+  BG.pollFails = 0;
+  BG.pollBusy = false;
+  BG.startedAt = Date.now();
+  const box = $('run-async-progress');
+  box.hidden = false;
+  box.dataset.seen = '';
+  $('run-async-failed').hidden = true;
+  $('run-async-failed').textContent = '';
+  renderBgProgress(initialStatus || 'PENDING', '', 0, BG_TOTAL);
+  $('btn-run-change').textContent = '后台运行中… 阶段 0/' + BG_TOTAL;
+  bgPollTick();                                     // 立即拉一次，尽快进入 RUNNING
+  BG.timer = window.setInterval(bgPollTick, BG_POLL_MS); // 之后每 2s 独立轮询
+}
+
+async function runChangeAsync() {
+  const btn = $('btn-run-change');
+  S.changeBusy = true;
+  btn.disabled = true;
+  btn.textContent = '提交后台任务…';
+  $('run-done').hidden = true;
+  $('run-progress').hidden = true; // 异步分支不展示既有同步加载态（关闭开关时保持原样）
+  $('run-async-progress').dataset.seen = '';
+  $('run-async-failed').hidden = true;
+  $('run-async-failed').textContent = '';
+  const { index, threshold } = runParams();
+  const body = { run_id: currentRunId(), index, block_size: Number($('block-size').value) || 256 };
+  if (threshold !== undefined) body.threshold = threshold;
+  try {
+    const res = await api.startAsyncChange(body);
+    if (res.ok && res.data && res.data.task_id) {
+      setDataBadge(false, 'POST /result/change (async)');
+      startBgPolling(res.data.task_id, res.data.status || 'PENDING');
+      return;
+    }
+    const detail = res.unavailable
+      ? '后台运行接口不可用（需后端支持 async 提交），可关闭「后台运行」改用同步提交'
+      : onlineErrText(res);
+    endBgRun();
+    bgShowFailure(detail);
+  } catch (e) {
+    endBgRun();
+    bgShowFailure('后台运行提交失败：' + (e && e.message ? e.message : String(e)));
   }
 }
 
@@ -1425,6 +1650,10 @@ function bindEvents() {
   $('btn-export-csv').onclick = downloadAreaStatsCsv;
   $('btn-onl-auto-best').onclick = autoSelectBestOnlineCandidate;
   syncRunAdvancedUi(); // 初始化开关/滑块/实时显值，不改变任何既有门控与离线路径
+
+  // ===== 3A（REQ-13）：C 卡「后台运行」开关（默认关 = 同步提交，既有行为零变化） =====
+  $('chk-bg-run').addEventListener('change', syncBgModeUi);
+  syncBgModeUi();
 
   // ===== 2B：结果卡标签页 / 图上点选 / 历史运行（第七张常驻卡） =====
   document.querySelectorAll('#result-tabs .view-tab').forEach((b) => {

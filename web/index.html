@@ -110,10 +110,38 @@
               </div>
             </details>
 
+            <!-- 3A（REQ-13）：后台运行开关，默认关闭；关闭时同步提交与既有加载态完全一致 -->
+            <div class="run-mode-row gap-top" id="run-mode-row">
+              <label class="chk" title="开启后提交为后台任务，每 2s 轮询阶段进度；关闭则同步提交"><input type="checkbox" id="chk-bg-run" /> 后台运行<span class="req">REQ-13</span></label>
+              <span class="hint" id="run-mode-hint">关闭 · 同步提交</span>
+            </div>
+
             <button type="button" class="btn btn-primary btn-block gap-top" id="btn-run-change" disabled
               title="需先应用 AOI（A 卡片）并选择影像对（B 卡片）">运行变化检测 · POST /result/change</button>
             <div class="status-line gap-top" id="run-progress" hidden><span class="spinner"></span><span id="run-status">正在运行变化检测…</span></div>
             <div class="ok-line" id="run-done" hidden></div>
+
+            <!-- 后台运行进度态：状态徽标 + 步数进度条 + 5 阶段文案（复用在线取数卡的 .onl-* 进度组件） -->
+            <div class="onl-progress" id="run-async-progress" hidden data-seen="">
+              <div class="onl-prog-head">
+                <span class="onl-status-badge" id="run-async-badge">PENDING</span>
+                <span class="onl-band" id="run-async-step">阶段 0/5</span>
+              </div>
+              <div class="onl-bar"><i id="run-async-bar-fill" style="width:0%"></i></div>
+              <div class="bg-stages" id="run-async-stages">
+                <span class="bg-stage" data-stage="read_clip">读裁切</span>
+                <span class="bg-stage" data-stage="mask">掩膜</span>
+                <span class="bg-stage" data-stage="index">指数</span>
+                <span class="bg-stage" data-stage="change_detect">变化检测</span>
+                <span class="bg-stage" data-stage="render_export">渲染导出</span>
+              </div>
+              <div class="onl-prog-foot">
+                <span class="hint" id="run-async-stage">等待后台任务受理…</span>
+                <span class="spinner" id="run-async-spinner"></span>
+              </div>
+              <div class="err-line" id="run-async-failed" hidden></div>
+            </div>
+
             <div class="card-subtitle gap-top">专题图叠加不透明度<span class="req">REQ-10</span></div>
             <div class="slider-row">
               <input type="range" id="opacity" min="0" max="100" value="85" />
