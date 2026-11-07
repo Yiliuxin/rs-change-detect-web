@@ -203,9 +203,49 @@ function updateAoiMetrics() {
   refreshOnlineAoiEcho(); // 在线取数卡片复用 A 卡 AOI 的实时回显（展示层附加，不改离线行为）
 }
 
+// ===== 界面文案：两条路径引导与 EX2 追加说明（纯展示，不发任何请求） =====
+const EX2_PATH_GUIDE = '该 AOI 不在预置影像范围内，或时相与影像拍摄日不一致——可改用在线取数获取该地区影像。';
+
+function setEx2PathGuide(on) {
+  const aoiLine = $('aoi-ex2-guide');
+  if (aoiLine) aoiLine.remove();
+  const bannerLine = $('banner-ex2-guide');
+  if (bannerLine) bannerLine.remove();
+  if (!on) return;
+  // A 卡既有错误提示容器内追加一行引导
+  const box = $('aoi-err');
+  if (box) {
+    const line = document.createElement('div');
+    line.id = 'aoi-ex2-guide';
+    line.className = 'path-guide';
+    line.textContent = EX2_PATH_GUIDE;
+    box.appendChild(line);
+  }
+  // A 卡触发的 EX2 在全局错误横幅内追加同一行引导，原 [EX2] 错误码文案保持不变
+  const body = document.querySelector('#banner .banner-body');
+  if (body) {
+    const line = document.createElement('div');
+    line.id = 'banner-ex2-guide';
+    line.className = 'banner-guide';
+    line.textContent = EX2_PATH_GUIDE;
+    body.appendChild(line);
+  }
+}
+
+// 路径链接：平滑滚动到在线取数卡并聚焦组名输入框，不触发任何请求
+function gotoOnlinePath() {
+  const card = $('card-online');
+  if (card) card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  const name = $('onl-name');
+  if (name) window.setTimeout(() => {
+    try { name.focus({ preventScroll: true }); } catch (_) { name.focus(); }
+  }, 320);
+}
+
 async function submitAoi() {
   const st = aoiStatus();
   if (!st.ok || !phaseValid()) { updateAoiMetrics(); return; }
+  setEx2PathGuide(false);
   const body = { aoi_geom: aoiGeomString(S.aoi), t1: S.t1, t2: S.t2 };
   const btn = $('btn-aoi-apply');
   S.aoiBusy = true;
@@ -223,9 +263,10 @@ async function submitAoi() {
     scheduleAutoConfirm();
   } catch (e) {
     handleErr(e);
+    if (e instanceof ApiError && e.code === 'EX2') setEx2PathGuide(true);
   } finally {
     S.aoiBusy = false;
-    btn.textContent = '应用 AOI · POST /aoi/select';
+    btn.textContent = '应用 AOI';
     refreshGates();
   }
 }
@@ -629,7 +670,7 @@ async function runChangeDetection() {
   } finally {
     S.changeBusy = false;
     $('run-progress').hidden = true;
-    btn.textContent = '运行变化检测 · POST /result/change';
+    btn.textContent = '运行变化检测';
     refreshGates();
   }
 }
@@ -676,7 +717,7 @@ function endBgRun() {
   stopBgPolling();
   BG.active = false;
   S.changeBusy = false;
-  $('btn-run-change').textContent = '运行变化检测 · POST /result/change';
+  $('btn-run-change').textContent = '运行变化检测';
   refreshGates();
 }
 
@@ -1048,7 +1089,7 @@ async function calcAccuracy() {
     handleErr(e);
   } finally {
     S.accBusy = false;
-    btn.textContent = '计算精度 · POST /accuracy/sample';
+    btn.textContent = '计算精度';
     updateCounts();
   }
 }
@@ -1220,7 +1261,7 @@ async function doExport(formats) {
     handleErr(e);
   } finally {
     S.exportBusy = false;
-    btn.textContent = '导出所选格式 · POST /report/export';
+    btn.textContent = '导出所选格式';
     refreshGates();
   }
 }
@@ -1610,7 +1651,7 @@ async function onlineDiscover() {
     showOnlineDegraded();
   } finally {
     ON.discoverBusy = false;
-    btn.disabled = false; btn.textContent = '查询候选影像 · POST /scene/discover';
+    btn.disabled = false; btn.textContent = '查询候选影像';
     $('onl-discover-loading').hidden = true;
     updateOnlineFetchGate();
   }
@@ -1670,7 +1711,7 @@ function stopOnlinePolling() {
 function restoreOnlineFetchButton() {
   ON.fetching = false;
   const btn = $('onl-fetch');
-  btn.textContent = '下载并入库 · POST /scene/fetch';
+  btn.textContent = '下载并入库';
   updateOnlineFetchGate();
 }
 
@@ -1695,7 +1736,7 @@ function onlineFetchTerminal(status, data) {
     box.textContent = onlineErrText({ code: err.code, message: err.message });
   }
   // 终态后按钮进度态复位为可再次提交
-  $('onl-fetch').textContent = '下载并入库 · POST /scene/fetch';
+  $('onl-fetch').textContent = '下载并入库';
 }
 
 async function onlinePollTick() {
@@ -1841,6 +1882,7 @@ function bindEvents() {
   $('t1').onchange = () => { S.t1 = $('t1').value; updateAoiMetrics(); };
   $('t2').onchange = () => { S.t2 = $('t2').value; updateAoiMetrics(); };
   $('btn-aoi-apply').onclick = submitAoi;
+  $('btn-goto-online').onclick = gotoOnlinePath;
 
   $('pair-filter').addEventListener('input', () => { S.pairFilter = $('pair-filter').value; renderPairs(); });
   $('block-size').onchange = () => { if (S.selectedPair) scheduleAutoConfirm(); };

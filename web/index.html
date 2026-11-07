@@ -31,7 +31,8 @@
 
           <!-- A. AOI 设置（UI-01 / REQ-01） -->
           <section class="card" id="card-aoi">
-            <div class="card-title">AOI 设置<span class="req">REQ-01</span></div>
+            <div class="card-title"><span class="title-main">AOI 设置<span class="badge tag-path">路径① 预置影像</span></span><span class="req">REQ-01</span></div>
+            <div class="path-hint">已入库 12 组影像，选定一组即带出 AOI 与拍摄日期，可直接应用检测。<button type="button" class="path-link" id="btn-goto-online">不在预置范围？去在线取数 →</button></div>
             <div class="grid2">
               <div><label class="fld" for="aoi-w">西 West (lon)</label><input type="number" step="0.0001" id="aoi-w" /></div>
               <div><label class="fld" for="aoi-n">北 North (lat)</label><input type="number" step="0.0001" id="aoi-n" /></div>
@@ -74,13 +75,14 @@
             </div>
             <div class="err-line" id="aoi-err"></div>
             <div class="err-line" id="phase-err"></div>
-            <button type="button" class="btn btn-primary btn-block gap-top" id="btn-aoi-apply" disabled>应用 AOI · POST /aoi/select</button>
+            <button type="button" class="btn btn-primary btn-block gap-top" id="btn-aoi-apply" disabled>应用 AOI</button>
             <div class="ok-line" id="aoi-applied" hidden></div>
           </section>
 
           <!-- B. 影像对（UI-02 / REQ-02 / REQ-04） -->
           <section class="card" id="card-pairs">
             <div class="card-title">双时相影像对<span class="req">REQ-02</span><span class="hint" id="pair-count">—</span></div>
+            <div class="path-hint">这里列出全部已入库影像对；在线取数下载成功后也会出现在此。</div>
             <input type="text" id="pair-filter" class="pair-filter" placeholder="过滤：名称 / 日期 / 云量 / tile…" />
             <div class="pair-list" id="pair-list">
               <div class="status-line"><span class="spinner"></span>正在获取影像对…</div>
@@ -136,7 +138,7 @@
             </div>
 
             <button type="button" class="btn btn-primary btn-block gap-top" id="btn-run-change" disabled
-              title="需先应用 AOI（A 卡片）并选择影像对（B 卡片）">运行变化检测 · POST /result/change</button>
+              title="需先应用 AOI（A 卡片）并选择影像对（B 卡片）">运行变化检测</button>
             <div class="status-line gap-top" id="run-progress" hidden><span class="spinner"></span><span id="run-status">正在运行变化检测…</span></div>
             <div class="ok-line" id="run-done" hidden></div>
 
@@ -170,7 +172,8 @@
 
           <!-- D(第四张) · 在线取数（可选）（B 级扩展 / REQ-02 在线分支） -->
           <section class="card" id="card-online">
-            <div class="card-title">在线取数（可选）<span class="req">REQ-02 · 在线分支</span><span class="hint" id="onl-badge">可选 · 离线优先</span></div>
+            <div class="card-title">在线取数（路径②）<span class="req">REQ-02 · 在线分支</span><span class="hint" id="onl-badge">可选 · 离线优先</span></div>
+            <div class="path-hint">任意地点与时间区间：检索候选 → 下载入库 → 回到影像对列表选用。</div>
 
             <!-- 优雅降级：discover 返回 404（端点未启用）或网络失败时的置灰说明，不弹错误弹窗 -->
             <div class="onl-degraded" id="onl-degraded" hidden>
@@ -201,7 +204,7 @@
                   <input type="date" id="onl-t2-end" value="2024-01-15" />
                 </div>
               </div>
-              <button type="button" class="btn btn-block gap-top" id="onl-discover">查询候选影像 · POST /scene/discover</button>
+              <button type="button" class="btn btn-block gap-top" id="onl-discover">查询候选影像</button>
               <div class="err-line" id="onl-discover-err"></div>
               <div class="status-line gap-top" id="onl-discover-loading" hidden><span class="spinner"></span>正在检索 STAC 候选影像…</div>
 
@@ -220,7 +223,7 @@
               <input type="text" id="onl-name" maxlength="40" spellcheck="false" />
               <div class="onl-name-preview" id="onl-name-preview"></div>
               <button type="button" class="btn btn-primary btn-block gap-top" id="onl-fetch" disabled
-                title="请先在候选清单中点选一个候选影像对">下载并入库 · POST /scene/fetch</button>
+                title="请先在候选清单中点选一个候选影像对">下载并入库</button>
               <div class="err-line" id="onl-fetch-err"></div>
 
               <!-- 进度态：状态徽标 + 「波段 x/10」进度条 + 2s 轮询 -->
@@ -377,7 +380,7 @@
               <div class="inner-card" id="auto-sample-wrap">
                 <div class="card-subtitle">自动分层采样<span class="req">REQ-09</span></div>
                 <button type="button" class="btn btn-sm btn-block" id="btn-auto-sample" disabled
-                  title="请先运行检测">自动分层采样 · POST /accuracy/auto_sample</button>
+                  title="请先运行检测">自动分层采样</button>
                 <div class="preset-hint" id="auto-sample-note">按当前 run 每类抽取 32 个样本点；填入后仍可手动改类别 / 删点，再点「计算精度」。</div>
               </div>
               <div class="inner-card" id="fill-wrap">
@@ -389,7 +392,7 @@
                 <button type="button" class="btn btn-sm btn-ghost" id="btn-samples-clear" title="清空全部样本点">清空样本</button>
               </div>
               <button type="button" class="btn btn-primary btn-block gap-top" id="btn-accuracy" disabled
-                title="[EX10] 样本数量不足，每类至少 30 个样本点">计算精度 · POST /accuracy/sample</button>
+                title="[EX10] 样本数量不足，每类至少 30 个样本点">计算精度</button>
               <div id="accuracy-result" hidden>
                 <div class="card-subtitle">精度评价结果<span class="req">REQ-09</span></div>
                 <div class="metric-row">
@@ -417,7 +420,7 @@
                 <label class="chk"><input type="checkbox" id="cb-pdf" checked /> PDF</label>
               </div>
               <button type="button" class="btn btn-primary btn-block gap-top" id="btn-export"
-                title="提交 POST /report/export，越权格式触发 EX6">导出所选格式 · POST /report/export</button>
+                title="提交 POST /report/export，越权格式触发 EX6">导出所选格式</button>
               <div id="export-files"></div>
               <div class="card-subtitle gap-top">参数快照（只读）<span class="req">REQ-14</span><span class="readonly-badge">NF9 · 只读</span></div>
               <table class="tbl snapshot" id="snapshot-table"></table>
