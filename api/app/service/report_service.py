@@ -14,6 +14,7 @@ from typing import Dict, List, Optional
 
 import rasterio
 
+from app.algorithm.change_detector import CHANGE_LABELS_ZH
 from app.algorithm.writers import (
     attribution_lines, export_triplet, validate_export_formats,
 )
@@ -36,17 +37,20 @@ _FORMAT_CONTENT_TYPE = {
     "geotiff": "image/tiff",
     "png": "image/png",
     "pdf": "application/pdf",
+    "geojson": "application/geo+json",
 }
 _FORMAT_FILE = {
     "geotiff": ("change.tif", "image/tiff"),
     "png": ("change.png", "image/png"),
     "pdf": ("report.pdf", "application/pdf"),
+    "geojson": ("change.geojson", "application/geo+json"),
 }
 # REQ-11：回归法产物名（与 change_service 的 _reg 主名同源）
 _FORMAT_FILE_REG = {
     "geotiff": regression_artifact_names()["geotiff"],
     "png": regression_artifact_names()["png"],
     "pdf": regression_artifact_names()["pdf"],
+    "geojson": regression_artifact_names()["geojson"],
 }
 
 __all__ = ["export"]
@@ -121,6 +125,11 @@ def export(run_id: str, formats: List[str]) -> dict:
                         "kappa": acc["kappa"],
                         "note": acc["note"],
                         "teaching_level": acc["teaching_level"],
+                        # 逐类生产者精度（键=中文类别名），PDF / 前端同源展示
+                        "per_class_accuracy": {
+                            CHANGE_LABELS_ZH[int(k)]: round(float(v), 4)
+                            for k, v in (acc.get("per_class_accuracy") or {}).items()
+                        },
                     }
 
             valid_ratio = float(report.get("valid_ratio", 0.0))

@@ -214,6 +214,11 @@ def submit(run_id: str, samples: List[dict]) -> dict:
                 "overall_accuracy": acc["overall_accuracy"],
                 "kappa": acc["kappa"],
                 "note": acc["note"],
+                # 逐类生产者精度（键=中文类别名），前端与 PDF 同源展示
+                "per_class_accuracy": {
+                    CHANGE_LABELS_ZH[int(k)]: round(float(v), 4)
+                    for k, v in acc.get("per_class_accuracy", {}).items()
+                },
             }
     except ApiError:
         raise

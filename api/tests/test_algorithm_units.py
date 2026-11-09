@@ -252,7 +252,8 @@ def test_s2_reflectance_is_dn_over_scale():
 @pytest.mark.req("REQ-12")
 def test_validate_export_formats_ok_and_ex6():
     assert validate_export_formats(list(EXPORT_FORMATS)) == tuple(EXPORT_FORMATS)
-    assert validate_export_formats(["GeoTIFF", " PNG ", "PDF"]) == tuple(EXPORT_FORMATS)
+    # 大小写/空格归一化：三个旧格式输入原样归一返回（geojson 为后加格式，此处只验归一化）
+    assert validate_export_formats(["GeoTIFF", " PNG ", "PDF"]) == ("geotiff", "png", "pdf")
     with pytest.raises(ExportFormatError) as e:
         validate_export_formats(["svg"])
     assert e.value.code == "EX6"

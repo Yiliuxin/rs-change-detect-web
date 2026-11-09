@@ -34,8 +34,8 @@ _CJK_FONT_NAME: str = "MSYH"
 
 __all__ = [
     "ExportFormatError", "validate_export_formats", "valid_ratio_notice",
-    "render_area_chart", "attribution_lines",
-    "write_geotiff", "write_png", "write_pdf", "export_triplet",
+    "render_area_chart", "render_index_histogram", "attribution_lines",
+    "write_geotiff", "write_geojson", "write_png", "write_pdf", "export_triplet",
 ]
 
 
@@ -195,6 +195,49 @@ def render_area_chart(stats, output_path) -> str:
     return str(path.resolve())
 
 
+def render_index_histogram(hist: dict, output_path) -> str:
+    """REQ-12 扩展：指数差值 / 回归残差分布直方图 PNG，红色虚线标检测阈值。
+
+    ``hist`` 结构见 change_service._index_histogram：{name, counts, edges,
+    threshold, valid_count}；缺键或缺数据时返回空串（调用方跳过，不伪造）。
+    """
+    counts = [int(c) for c in (hist.get("counts") or [])]
+    edges = [float(e) for e in (hist.get("edges") or [])]
+    if len(counts) < 2 or len(edges) != len(counts) + 1:
+        return ""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    centers = [(edges[i] + edges[i + 1]) / 2.0 for i in range(len(counts))]
+    width = (edges[-1] - edges[0]) / max(len(counts), 1) * 0.92
+    thr = hist.get("threshold")
+    name = str(hist.get("name") or "INDEX DELTA")
+
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(6.4, 3.0), dpi=150)
+    try:
+        ax.bar(centers, counts, width=width, color="#378ADD", alpha=0.85)
+        if thr is not None:
+            t = abs(float(thr))
+            for v in (-t, t):
+                ax.axvline(v, color="#D63031", linestyle="--", linewidth=1.2)
+                ax.text(v, ax.get_ylim()[1] * 0.95, f" T={v:+.3f}",
+                        color="#D63031", fontsize=8,
+                        ha="left" if v >= 0 else "right", va="top")
+        ax.set_xlabel(f"{name} value")
+        ax.set_ylabel("Pixel count")
+        ax.set_title(f"{name} distribution vs threshold")
+        ax.grid(axis="y", linestyle=":", linewidth=0.6, alpha=0.6)
+        ax.set_axisbelow(True)
+        fig.tight_layout()
+        fig.savefig(str(path), format="png")
+    finally:
+        plt.close(fig)
+    return str(path.resolve())
+
+
 def write_pdf(report: dict, output_path, font_path: str = DEFAULT_FONT_PATH) -> Dict[str, object]:
     """生成 PDF 报告（REQ-12 / REQ-15）。
 
@@ -339,6 +382,18 @@ def write_pdf(report: dict, output_path, font_path: str = DEFAULT_FONT_PATH) -> 
         for row in acc.get("confusion_matrix", []):
             _line("    " + "  ".join(f"{int(v):6d}" for v in row), size=9, gap=14,
                   color=(70, 70, 70))
+        # 逐类生产者精度：键兼容中文类别名 / 数字编码两种来源
+        pca = acc.get("per_class_accuracy") or {}
+        if pca:
+            zh_names_acc = {1: "增强", 2: "退化", 3: "稳定"}
+            parts = []
+            for code, zh in zh_names_acc.items():
+                v = pca.get(zh, pca.get(str(code), pca.get(code)))
+                if v is not None:
+                    parts.append(f"{zh}={float(v) * 100:.1f}%")
+            if parts:
+                _line(L("逐类精度（生产者）：", "PER-CLASS ACCURACY (PRODUCER): ")
+                      + "  ".join(parts), size=9, gap=15, color=(70, 70, 70))
     else:
         _line(L("精度评价：样本不足（EX10），禁用「计算精度」",
                 "ACCURACY: SAMPLES INSUFFICIENT (EX10), ACCURACY DISABLED"),
@@ -353,6 +408,20 @@ def write_pdf(report: dict, output_path, font_path: str = DEFAULT_FONT_PATH) -> 
     chart_w, chart_h = 400.0, 187.5
     pdf.drawImage(chart_path, left, y - chart_h, width=chart_w, height=chart_h)
     y -= chart_h + 20
+
+    # —— 指数差值 / 回归残差分布直方图（REQ-12 扩展，佐证阈值合理性）——
+    hist = report.get("index_histogram")
+    hist_path = ""
+    if isinstance(hist, dict) and hist.get("counts"):
+        _ensure(215)
+        _line(L("指数分布直方图 / INDEX HISTOGRAM", "INDEX HISTOGRAM"),
+              size=10, gap=16)
+        _ascii_line(f"INDEX HISTOGRAM: {hist.get('name', 'INDEX DELTA')} "
+                    f"vs THRESHOLD (dashed red)", gap=14)
+        hist_path = render_index_histogram(hist, path.parent / "index_histogram.png")
+        if hist_path:
+            pdf.drawImage(hist_path, left, y - chart_h, width=chart_w, height=chart_h)
+            y -= chart_h + 20
 
     # —— method=regression：差值法 / 回归法 阈值与面积对比表（REQ-11）——
     comparison = report.get("comparison")
@@ -433,8 +502,48 @@ def write_pdf(report: dict, output_path, font_path: str = DEFAULT_FONT_PATH) -> 
         "reason": "" if cn_ok else "reportlab 中文字体注册失败，PDF 退化为纯英文并如实说明",
         "attribution": lines,
         "area_chart": chart_path,
+        "index_histogram": hist_path,
         "comparison_table": comparison_used,
     }
+
+
+def write_geojson(change, profile: dict, output_path) -> Dict[str, object]:
+    """变化图斑导出 GeoJSON（RFC 7946 / WGS84）。
+
+    仅导出 1 增强 / 2 退化两类图斑（稳定为背景、面积占绝对主导，导出只会
+    撑爆文件且无分析价值）。像元几何经 ``rasterio.features.shapes`` 合并成
+    多边形（transform 直接落在栅格 CRS），坐标再统一重投影 EPSG:4326。
+    返回 ``{path, feature_count}``；无变化图斑时写空 FeatureCollection。
+    """
+    from rasterio.features import shapes as feature_shapes
+    from rasterio.warp import transform as warp_transform
+
+    arr = np.asarray(change)
+    mask = np.isin(arr, (1, 2))
+    src_crs = profile.get("crs") or "EPSG:32649"
+    features: List[dict] = []
+    for geom, value in feature_shapes(arr, mask=mask,
+                                      transform=profile.get("transform")):
+        code = int(value)
+        rings: List[list] = []
+        for ring in geom["coordinates"]:
+            xs = [float(p[0]) for p in ring]
+            ys = [float(p[1]) for p in ring]
+            txs, tys = warp_transform(src_crs, "EPSG:4326", xs, ys)
+            rings.append([[float(x), float(y)] for x, y in zip(txs, tys)])
+        features.append({
+            "type": "Feature",
+            "properties": {
+                "change_class": code,
+                "class_zh": "增强" if code == 1 else "退化",
+            },
+            "geometry": {"type": "Polygon", "coordinates": rings},
+        })
+    fc = {"type": "FeatureCollection", "features": features}
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(fc, ensure_ascii=False), encoding="utf-8")
+    return {"path": str(path.resolve()), "feature_count": len(features)}
 
 
 def export_triplet(
@@ -448,11 +557,11 @@ def export_triplet(
     params_snapshot: Optional[dict] = None,
     names: Optional[Dict[str, str]] = None,
 ) -> Dict[str, object]:
-    """一次性导出 GeoTIFF / PNG / PDF 三件套。
+    """一次性导出 GeoTIFF / PNG / PDF / GeoJSON 四件套。
 
-    缺省文件名 ``change.tif`` / ``change.png`` / ``report.pdf``；``names`` 可按
-    ``{geotiff, png, pdf}`` 覆盖文件名（REQ-11 回归法用 ``_reg`` 后缀隔离，
-    缺省调用行为完全不变）。
+    缺省文件名 ``change.tif`` / ``change.png`` / ``report.pdf`` /
+    ``change.geojson``；``names`` 可按 ``{geotiff, png, pdf, geojson}`` 覆盖
+    文件名（REQ-11 回归法用 ``_reg`` 后缀隔离，缺省调用行为完全不变）。
     """
     allowed = validate_export_formats(formats)
     out_dir = Path(output_dir)
@@ -463,6 +572,7 @@ def export_triplet(
         "geotiff": chosen.get("geotiff", "change.tif"),
         "png": chosen.get("png", "change.png"),
         "pdf": chosen.get("pdf", "report.pdf"),
+        "geojson": chosen.get("geojson", "change.geojson"),
     }
 
     enriched = dict(report)
@@ -497,5 +607,10 @@ def export_triplet(
         pdf_meta = write_pdf(enriched, out_dir / file_names["pdf"])
         files["pdf"] = pdf_meta["path"]
         notes["pdf"] = pdf_meta
+
+    if "geojson" in allowed:
+        gj_meta = write_geojson(change, profile, out_dir / file_names["geojson"])
+        files["geojson"] = gj_meta["path"]
+        notes["geojson"] = gj_meta
 
     return result

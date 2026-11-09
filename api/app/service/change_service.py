@@ -105,6 +105,26 @@ def _validate_method(method: str, run_id: str) -> str:
     return key
 
 
+def _index_histogram(values, valid_mask, threshold: float, name: str) -> dict:
+    """指数差值 / 回归残差分布直方图（32 bin，仅统计有效且有限值像元）。
+
+    供 PDF 内嵌佐证阈值合理性；无有效值返回空 dict（写 PDF 时如实跳过）。
+    """
+    arr = np.asarray(values, dtype=float)
+    mask = np.asarray(valid_mask, dtype=bool)
+    vals = arr[mask & np.isfinite(arr)]
+    if vals.size == 0:
+        return {}
+    counts, edges = np.histogram(vals, bins=32)
+    return {
+        "name": str(name),
+        "counts": [int(c) for c in counts],
+        "edges": [float(e) for e in edges],
+        "threshold": float(threshold),
+        "valid_count": int(vals.size),
+    }
+
+
 def _build_index(key: str, rho_t: Dict, profile: dict, valid: np.ndarray,
                  run_id: str, snapshot: Dict) -> IndexRaster:
     """REQ-06/07：NDVI 走 ``index_calculator.ndvi``，NDWI 走 ``index_calculator.ndwi``。
@@ -380,6 +400,17 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
         ratio_change = change_pixel_ratio(change, valid_mask=valid)
         stats = summary["stats"]
 
+        # REQ-12 扩展：指数差值 / 回归残差分布直方图（PDF 内嵌，佐证阈值合理性）。
+        # 回归法残差 = index_t2 − (a·index_t1 + b)；差值法 = index_t2 − index_t1。
+        if method_key == METHOD_REGRESSION:
+            hist_name = f"regression residual ({key})"
+            hist_src = (idx_t2.data
+                        - (float(reg["a"]) * idx_t1.data + float(reg["b"])))
+        else:
+            hist_name = f"delta {key}"
+            hist_src = d
+        index_histogram = _index_histogram(hist_src, valid, thr, hist_name)
+
         if method_key == METHOD_REGRESSION:
             comparison = {
                 "difference": {
@@ -443,6 +474,7 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
             "otsu_reason": str(otsu_reason),
             "change_pixel_ratio": float(ratio_change),
             "stats": stats,
+            "index_histogram": index_histogram,
             "accuracy": None,  # 样本由 /accuracy/sample 提交，此处不伪造
             "params_snapshot": snapshot,
             # NF6 / NF7 常量逐字复用（PDF 署名页 / PNG / 导出响应同源）

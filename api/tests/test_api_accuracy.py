@@ -75,6 +75,10 @@ def test_accuracy_sample_ok_confusion_matrix_oa_kappa(client, change_ready):
     assert b["kappa"] == pytest.approx(1.0, abs=1e-6)
     assert sum(cm[i][j] for i in range(3) for j in range(3) if i != j) == 0
     assert b["note"] in (None, "", "教学级，非工程级")
+    # 逐类生产者精度：纯对角阵 → 三类均为 1.0，键为中文类别名
+    pca = b["per_class_accuracy"]
+    assert set(pca) == {"增强", "退化", "稳定"}
+    assert all(v == pytest.approx(1.0, abs=1e-6) for v in pca.values())
 
 
 @pytest.mark.req("REQ-09")

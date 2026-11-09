@@ -102,6 +102,7 @@ def index_artifact_names(index: str) -> Dict[str, str]:
         "change.tif": f"change{suffix}.tif",
         "change.png": f"change{suffix}.png",
         "report.pdf": f"report{suffix}.pdf",
+        "change.geojson": f"change{suffix}.geojson",
     }
 
 
@@ -112,6 +113,7 @@ def regression_artifact_names() -> Dict[str, str]:
         "geotiff": f"change{s}.tif",
         "png": f"change{s}.png",
         "pdf": f"report{s}.pdf",
+        "geojson": f"change{s}.geojson",
     }
 
 
@@ -126,6 +128,7 @@ def regression_archive_names(index: str) -> Dict[str, str]:
         reg["geotiff"]: f"change{sfx}.tif",
         reg["png"]: f"change{sfx}.png",
         reg["pdf"]: f"report{sfx}.pdf",
+        reg["geojson"]: f"change{sfx}.geojson",
     }
 
 

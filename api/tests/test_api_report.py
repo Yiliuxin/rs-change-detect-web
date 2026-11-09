@@ -2,6 +2,7 @@
 """接口测：POST /api/v1/report/export（HLD 2.2.3.5，REQ-12/14/15；EX6/SYS-01）。"""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,13 @@ def test_report_export_happy_path_triplet(client, change_ready):
     for name in ("change.tif", "change.png", "report.pdf"):
         f = out / name
         assert f.is_file() and f.stat().st_size > 0
+    # geojson 四件套：文件落盘 + RFC 7946 FeatureCollection + filename 字段
+    gj = next(f for f in b["files"] if f["format"] == "geojson")
+    assert gj["filename"] == "change.geojson" and gj["url"].endswith("change.geojson")
+    gj_file = out / "change.geojson"
+    assert gj_file.is_file() and gj_file.stat().st_size > 0
+    gj_data = json.loads(gj_file.read_text(encoding="utf-8"))
+    assert gj_data["type"] == "FeatureCollection" and isinstance(gj_data["features"], list)
 
 
 @pytest.mark.req("REQ-12")

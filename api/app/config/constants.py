@@ -218,7 +218,8 @@ LANDSAT_NODATA_DN: Final[int] = 0
 # REQ-12 / REQ-15 导出与合规署名
 # ---------------------------------------------------------------------------
 # 导出格式白名单，其他格式 → EX6 拒绝。来源：REQ-12 / HLD 3.7
-EXPORT_FORMATS: Final[Tuple[str, ...]] = ("geotiff", "png", "pdf")
+# geojson：变化图斑矢量导出（RFC 7946 / WGS84，仅 1 增强 / 2 退化，稳定不导出）
+EXPORT_FORMATS: Final[Tuple[str, ...]] = ("geotiff", "png", "pdf", "geojson")
 # Copernicus / USGS 合规署名。来源：REQ-15 / NF6 / NF7 / HLD 3.7
 ATTRIBUTION_S2: Final[str] = "Copernicus Sentinel data [{year}]"
 ATTRIBUTION_S2_MODIFIED: Final[str] = "Contains modified Copernicus Sentinel data [{year}]"

@@ -35,6 +35,10 @@ class AccuracySampleResponse(BaseModel):
     overall_accuracy: float = Field(0.0, description="总体精度 OA")
     kappa: float = Field(0.0, description="Kappa 系数")
     note: Optional[str] = Field(None, description="Kappa < 0.6 时为「教学级，非工程级」")
+    per_class_accuracy: Dict[str, float] = Field(
+        default_factory=dict,
+        description="逐类生产者精度（键=增强/退化/稳定，值=该类参考样本判对比例）",
+    )
 
 
 class AutoSampleRequest(BaseModel):

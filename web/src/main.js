@@ -20,7 +20,7 @@ const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
 }[c]));
 
-const ALLOW_FORMATS = ['geotiff', 'png', 'pdf']; // constants.py EXPORT_FORMATS
+const ALLOW_FORMATS = ['geotiff', 'png', 'pdf', 'geojson']; // constants.py EXPORT_FORMATS
 
 const HINTS = {
   browse: '地图浏览模式：自由缩放平移，查看 AOI 预览与专题图叠加。',
@@ -1148,6 +1148,12 @@ function renderAccuracy() {
     html += '</tr>';
   }
   html += '</tbody>';
+  // 逐类生产者精度（后端 per_class_accuracy，键=中文类别名；缺数据如实标 —）
+  const pca = a.per_class_accuracy || {};
+  const pct = (v) => (v != null && Number.isFinite(Number(v))) ? (Number(v) * 100).toFixed(1) + ' %' : '—';
+  html += `<tfoot><tr><td class="k">逐类精度</td>`
+    + [1, 2, 3].map((i) => `<td>${esc(pct(pca[demo.CLASS_INFO[i].ref]))}</td>`).join('')
+    + '</tr></tfoot>';
   $('cm-table').innerHTML = html;
 }
 
@@ -1228,7 +1234,7 @@ function triggerDownload(f) {
   a.href = f.url;
   // 文件名优先级：显式 filename → URL 末段（后端 url 形如 /api/v1/artifacts/<run>/change.png）
   // → format 缺省名；仅当三者皆缺才落 .bin 占位
-  const DEFAULT_NAME = { png: 'change.png', geotiff: 'change.tif', pdf: 'report.pdf' };
+  const DEFAULT_NAME = { png: 'change.png', geotiff: 'change.tif', pdf: 'report.pdf', geojson: 'change.geojson' };
   a.download = f.filename
     || (f.url ? String(f.url).split('/').pop() : '')
     || DEFAULT_NAME[String(f.format || '').toLowerCase()]
@@ -1487,7 +1493,7 @@ function refreshGates() {
     !S.aoiResult ? '需先应用 AOI（左栏「AOI 设置」卡片）'
       : (!S.selectedPair ? '需先选择影像对（左栏「双时相影像对」卡片）' : '检测运行中，请稍候…'));
 
-  const fmts = ['cb-geotiff', 'cb-png', 'cb-pdf'].filter((id) => $(id) && $(id).checked);
+  const fmts = ['cb-geotiff', 'cb-png', 'cb-pdf', 'cb-geojson'].filter((id) => $(id) && $(id).checked);
   gate('btn-export', !!currentRunId() && fmts.length > 0 && !S.exportBusy,
     !currentRunId() ? '需先完成一次变化检测获得 run_id' : '请至少勾选一种导出格式');
 
