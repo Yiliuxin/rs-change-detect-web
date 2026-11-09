@@ -145,6 +145,7 @@ def export(run_id: str, formats: List[str]) -> dict:
                 size = int(local.stat().st_size) if local.exists() else 0
                 files.append({
                     "format": fmt,
+                    "filename": filename,
                     "url": _upload(client, run_id, fmt, local, filename),
                     "size": size,
                 })

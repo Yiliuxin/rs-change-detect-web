@@ -62,5 +62,6 @@ class ExportFile(BaseModel):
     """报告产物下载项（REQ-12）。"""
 
     format: str = Field(..., description="geotiff / png / pdf")
+    filename: str = Field("", description="产物文件名（change.png / change_reg.tif / report.pdf 等）")
     url: str = ""
     size: Optional[int] = Field(None, description="字节数")

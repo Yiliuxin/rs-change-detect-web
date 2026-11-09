@@ -44,7 +44,7 @@ const S = {
   // 2B：图上点选（独立于既有 mapMode；关闭后恢复开启前的地图模式）
   pickMode: false, pickPrevMode: null, pickBusy: false, picks: [],
   // 任务 A：预置地点清单（GET /scene/preset_aois）与自动分层采样，独立于离线/在线状态
-  presets: [], presetBusy: false, autoSampleBusy: false,
+  presets: [], presetBusy: false, autoSampleBusy: false, fillBusy: false,
 };
 
 // 在线取数（可选）卡片独立状态，与离线 S 完全隔离，互不污染。
@@ -990,10 +990,46 @@ function removeSample(id) {
   updateCounts();
 }
 
-function fillSamplesDemo() {
+async function fillSamplesDemo() {
+  if (S.fillBusy) return;
   const b = S.aoi;
-  if (!b) { showToast('请先设置 AOI，再一键补齐演示样本', 'warn'); return; }
-  // 每类 32 个：低 valid_ratio 组首 round 触发 EX10（<30 不可计算），可多次点击直至每类 ≥ 30
+  if (!b) { showToast('请先设置 AOI，再一键补齐样本', 'warn'); return; }
+  // 优先走后端 auto_sample：在检测结果的有效像元上分层抽 32/类，绕开 nodata
+  // 损失（随机撒点每轮仅 ~75% 有效，每类常 <30 → EX10）。后端不可用再退回随机兜底。
+  const rid = currentRunId();
+  if (S.change && rid) {
+    S.fillBusy = true;
+    try {
+      const res = await api.autoSample({ run_id: rid, per_class: AUTO_SAMPLE_PER_CLASS });
+      if (res && res.ok) {
+        const d = res.data || {};
+        const pts = Array.isArray(d.samples) ? d.samples : [];
+        let added = 0;
+        pts.forEach((q) => {
+          const cls = AUTO_REF_TO_CLS[String(q && q.ref_class)];
+          const x = Number(q && q.lng), y = Number(q && q.lat);
+          if (cls && Number.isFinite(x) && Number.isFinite(y)) {
+            S.samples.push({ id: 's' + (++S.sampleSeq), x, y, cls });
+            added++;
+          }
+        });
+        M.setSamples(map, S.samples);
+        updateCounts();
+        const actual = d.per_class_actual || {};
+        const num = (c) => Number(actual[c] != null ? actual[c] : 0);
+        const short = AUTO_SAMPLE_CLASSES.filter((c) => num(c) < 30);
+        if (short.length) {
+          showToast('分层补齐 ' + added + ' 点，但 ' + short.join('/') + ' 有效像元不足 30，可再点一次补齐', 'warn', 5200);
+        } else {
+          showToast('已按检测结果分层补齐 ' + added + ' 个有效样本点（每类 32），可计算精度', 'ok');
+        }
+        return;
+      }
+    } catch (_) { /* 后端不可用，落入下方随机兜底 */ }
+    finally { S.fillBusy = false; }
+  }
+  // 兜底（离线 / 后端不可用 / 未跑检测）：AOI 内纯随机撒点。随机点可能落在
+  // 无数据像元上（后端过滤后每类常 <30 → EX10），必要时多次点击补足。
   [1, 2, 3].forEach((cls) => {
     for (let i = 0; i < 32; i++) {
       S.samples.push({
@@ -1006,7 +1042,7 @@ function fillSamplesDemo() {
   });
   M.setSamples(map, S.samples);
   updateCounts();
-  showToast('已补齐演示样本（每类 32 个，可继续点击补齐）', 'ok');
+  showToast('后端不可用，已补齐演示随机样本（每类 32 个）；随机点可能落在无数据区，必要时多次点击', 'ok');
 }
 
 // ===== 任务 A：精度区「自动分层采样」（POST /accuracy/auto_sample，REQ-09）=====
@@ -1190,7 +1226,13 @@ function triggerDownload(f) {
   if (!f || !f.url) return;
   const a = document.createElement('a');
   a.href = f.url;
-  a.download = f.filename || (f.format + '.bin');
+  // 文件名优先级：显式 filename → URL 末段（后端 url 形如 /api/v1/artifacts/<run>/change.png）
+  // → format 缺省名；仅当三者皆缺才落 .bin 占位
+  const DEFAULT_NAME = { png: 'change.png', geotiff: 'change.tif', pdf: 'report.pdf' };
+  a.download = f.filename
+    || (f.url ? String(f.url).split('/').pop() : '')
+    || DEFAULT_NAME[String(f.format || '').toLowerCase()]
+    || '.bin';
   document.body.appendChild(a);
   a.click();
   a.remove();
