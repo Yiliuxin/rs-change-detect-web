@@ -253,7 +253,7 @@ async function submitAoi() {
   try {
     const res = await api.selectAoi(body);
     if (res.demo) markDemo();
-    else setDataBadge(false, 'POST /aoi/select');
+    else setDataBadge(false, '');
     S.aoiResult = res.data;
     const applied = $('aoi-applied');
     applied.hidden = false;
@@ -439,7 +439,7 @@ async function loadPairs() {
     else setDataBadge(false, (res.via === 'GET' ? 'GET' : 'POST') + ' /scene/match');
     S.pairs = (res.data && res.data.pairs) || [];
     S.pairVia = res.via || '';
-    const viaLabel = { GET: 'GET /scene/match', POST: 'POST /scene/match', SEED: '本地演示 seed' }[S.pairVia] || S.pairVia;
+    const viaLabel = { GET: '在线检索', POST: '在线检索', SEED: '本地演示' }[S.pairVia] || S.pairVia;
     $('pair-count').textContent = '共 ' + S.pairs.length + ' 组 · ' + viaLabel;
     extendPresetDates(S.pairs);
     renderPairs();
@@ -554,7 +554,7 @@ async function autoConfirmScene() {
   try {
     const res = await api.matchScene(body);
     if (res.demo) markDemo();
-    else setDataBadge(false, 'POST /scene/match');
+    else setDataBadge(false, '');
     S.sceneMatch = res.data;
     S.sceneKey = key;
     showToast(res.demo ? '影像对口径已确认（演示数据）' : '影像对口径已确认', 'ok');
@@ -656,7 +656,7 @@ async function runChangeDetection() {
   try {
     const res = await api.runChange(body);
     if (res.demo) markDemo();
-    else setDataBadge(false, 'POST /result/change');
+    else setDataBadge(false, '');
     applyChangeResult(res.data);
     $('run-done').hidden = false;
     $('run-done').textContent = '✓ 检测完成 · ' + METHOD_LABELS[method] + ' · ' + index
@@ -787,7 +787,7 @@ function bgTerminal(status, data) {
     renderBgProgress('SUCCESS', BG_STAGES[BG_TOTAL - 1], BG_TOTAL, pg.total || BG_TOTAL);
     const result = data && data.result;
     if (result && result.run_id) {
-      setDataBadge(false, 'POST /result/change (async)');
+      setDataBadge(false, '');
       applyChangeResult(result);
       $('run-done').hidden = false;
       $('run-done').textContent = '✓ 后台运行完成 · '
@@ -881,7 +881,7 @@ async function runChangeAsync() {
   try {
     const res = await api.startAsyncChange(body);
     if (res.ok && res.data && res.data.task_id) {
-      setDataBadge(false, 'POST /result/change (async)');
+      setDataBadge(false, '');
       startBgPolling(res.data.task_id, res.data.status || 'PENDING');
       return;
     }
@@ -1117,7 +1117,7 @@ async function calcAccuracy() {
   try {
     const res = await api.submitSamples(body);
     if (res.demo) markDemo();
-    else setDataBadge(false, 'POST /accuracy/sample');
+    else setDataBadge(false, '');
     S.accuracy = res.data;
     renderAccuracy();
     showToast(res.demo ? '精度评价完成（演示数据）' : '精度评价完成', 'ok');
@@ -1299,7 +1299,7 @@ async function doExport(formats) {
   try {
     const res = await api.exportReport(body);
     if (res.demo) markDemo();
-    else setDataBadge(false, 'POST /report/export');
+    else setDataBadge(false, '');
     S.exportResult = res.data;
     renderFiles(res.data.files, res.demo);
     (res.data.files || []).forEach(triggerDownload);

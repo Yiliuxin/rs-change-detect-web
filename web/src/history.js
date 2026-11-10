@@ -171,7 +171,7 @@ function renderDetail(d) {
       <strong>运行详情 · <code>${esc(rid.slice(0, 8))}</code></strong>
       <button type="button" class="btn btn-sm btn-ghost" id="hist-detail-close">收起</button>
     </div>
-    <div class="card-subtitle">参数快照<span class="req">REQ-14</span><span class="readonly-badge">NF9 · 只读</span></div>
+    <div class="card-subtitle">参数快照<span class="readonly-badge">NF9 · 只读</span></div>
     <table class="tbl snapshot"><tbody>${rows.map(([k, v, code]) =>
       '<tr><td class="k">' + esc(k) + '</td><td>' + (code ? '<code>' + esc(v) + '</code>' : esc(v)) + '</td></tr>').join('')}</tbody></table>
     <div class="card-subtitle">产物<span class="hint">${arts.length} 个</span></div>
