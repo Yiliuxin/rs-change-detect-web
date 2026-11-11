@@ -39,6 +39,9 @@ data/**/*.jp2
 data/**/*.SAFE
 data/**/*.zip
 data/**/*.tar.gz
+# 例外：12 组预置影像对（单文件 <2MB，总量约 122MB，均低于 GitHub 100MB 单文件
+# 限制）直接入库，新成员 clone 即得完整数据，无需单独传输
+!data/pair_*/**/*.tif
 
 # ===== 编辑器 / 系统 =====
 .vscode/

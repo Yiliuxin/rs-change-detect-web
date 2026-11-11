@@ -61,7 +61,7 @@ cd rs-change-detect-web
 git checkout lyj          # 最新代码在 lyj 分支
 ```
 
-影像数据不在 Git 中（`.gitignore` 排除 `data/**/*.tif`），需从项目所有者获取数据包，解压到 `data\` 目录下（12 组预置影像对 `pair_*`）。
+影像数据已随仓库分发（12 组预置影像对 `data/pair_*`，约 122MB，单文件均低于 GitHub 限制），clone 即得，无需单独下载。后续新采集的大型影像不会入库（`.gitignore` 排除 `data/**/*.tif`，仅放行 `pair_*` 预置对）。
 
 ### 2. 后端依赖与环境配置
 
