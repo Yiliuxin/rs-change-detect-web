@@ -443,6 +443,44 @@ export function exportAreaStatsCsv(runId) {
   return apiGet('/report/area_stats/' + encodeURIComponent(runId) + '.csv', true);
 }
 
+// ==========================================================================
+// 产物图片鉴权加载（AUTH 扩展遗留问题的修复）
+// 背景：产物端点 /api/v1/artifacts/<run_id>/<file> 与其它业务接口一样受 JWT 网关保护，
+// 但 MapLibre 的 image source 与 <img> 标签发起的是浏览器内建请求，**无法携带 Authorization
+// 头**，于是必然 401 —— 表现就是「检测跑完了、统计都对、地图上却没有颜色」。
+// 方案：先用 fetch（带 Bearer）把图取成 Blob，再转成 blob: URL 交给地图/标签使用；
+// 同一 URL 复用缓存，避免重复下载，缓存超限时回收最早的 objectURL 防内存泄漏。
+// ==========================================================================
+const _artifactBlobs = new Map();   // 原始 URL → blob: URL
+const _ARTIFACT_CACHE_MAX = 60;
+
+export async function artifactObjectUrl(url) {
+  const u = String(url || '');
+  if (!u) return '';
+  if (/^(data:|blob:)/.test(u)) return u;      // 已是内存图，直接用
+  const hit = _artifactBlobs.get(u);
+  if (hit) return hit;
+  let resp;
+  try {
+    resp = await fetchWithTimeout(u, { method: 'GET' });
+  } catch (_) {
+    return '';
+  }
+  if (!resp.ok) return '';                     // 401 已由 fetchWithTimeout 统一跳登录
+  try {
+    const objUrl = URL.createObjectURL(await resp.blob());
+    if (_artifactBlobs.size >= _ARTIFACT_CACHE_MAX) {
+      const oldest = _artifactBlobs.keys().next().value;
+      URL.revokeObjectURL(_artifactBlobs.get(oldest));
+      _artifactBlobs.delete(oldest);
+    }
+    _artifactBlobs.set(u, objUrl);
+    return objUrl;
+  } catch (_) {
+    return '';
+  }
+}
+
 // GET /runs?limit=&offset= → { total, limit, offset, items:[...] }（按 created_at 倒序）
 export function listRuns(params = {}) {
   const q = new URLSearchParams();

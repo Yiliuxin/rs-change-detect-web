@@ -518,6 +518,27 @@ table.tbl td.diag { background: rgba(33, 160, 76, .1); font-weight: 800; }
 .onl-place-field select { width: 100%; }
 .onl-place-row > .btn { flex: 0 0 auto; }
 
+/* 全国地名搜索（离线地点库，输入即出建议，选中后定位并框选 AOI） */
+.onl-search-row { position: relative; margin-top: 8px; }
+.onl-search {
+  width: 100%; box-sizing: border-box; padding: 7px 9px; font-size: 12px;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--card2); color: var(--txt);
+}
+.onl-search:focus { outline: none; border-color: #7aa7d8; background: #fff; }
+.onl-suggest {
+  position: absolute; left: 0; right: 0; top: calc(100% + 2px); z-index: 40; max-height: 208px;
+  overflow-y: auto; background: #fff; border: 1px solid var(--line); border-radius: 6px;
+  box-shadow: 0 6px 18px rgba(20, 40, 70, .14);
+}
+.onl-suggest-item {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  padding: 6px 9px; font-size: 12px; cursor: pointer; color: var(--txt);
+}
+.onl-suggest-item:hover, .onl-suggest-item.on { background: #eef4fb; }
+.onl-suggest-item .sub { font-size: 10.5px; color: var(--muted2); flex: 0 0 auto; }
+.onl-search-hint { margin-top: 5px; font-size: 10.5px; color: var(--muted2); line-height: 1.5; }
+.onl-search-hint.hit { color: #1c5fb0; }
+
 /* 地名标注（离线 DOM Marker，不拦截地图交互） */
 .place-marker { display: flex; align-items: center; pointer-events: none; white-space: nowrap; }
 .place-dot {
@@ -530,6 +551,14 @@ table.tbl td.diag { background: rgba(33, 160, 76, .1); font-weight: 800; }
   border: 1px solid rgba(120, 140, 160, .35); text-shadow: 0 1px 0 rgba(255, 255, 255, .8);
 }
 .place-marker-preset .place-label { color: #0b4aa2; font-weight: 700; }
+
+/* 全国地点库标签：只显示文字，点本身由 circle 图层绘制；层级越深字号越小越淡 */
+.place-pin .place-label {
+  background: rgba(255, 255, 255, .72); border-color: rgba(140, 160, 180, .3);
+  color: #3d4c5c; font-weight: 500; font-size: 9.5px; padding: 0 4px;
+}
+.place-pin.place-t1 .place-label { color: #0b4aa2; font-weight: 700; font-size: 11px; }
+.place-pin.place-t3 .place-label { color: #6b7a8b; font-size: 9px; background: rgba(255, 255, 255, .58); }
 
 /* 两时相窗口 */
 .onl-window label.fld { margin-bottom: 4px; }

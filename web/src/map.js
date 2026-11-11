@@ -18,9 +18,14 @@ function emptyFC() {
   return { type: 'FeatureCollection', features: [] };
 }
 
-// 本地生成的经纬网（覆盖 3 组 AOI 大致范围），无任何外部服务
-function graticuleGeoJSON() {
-  const w = 115.8, s = 28.0, e = 116.8, n = 29.6, step = 0.05;
+// 视口自适应经纬网：按缩放级别挑步长，横向最多 20 条线。
+// 以前是写死南昌/鄱阳一带的固定范围，选到别的省份就没有格网作参照。
+const GRID_STEPS = [10, 5, 2, 1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01];
+function graticuleForBounds(bounds) {
+  const w = bounds.getWest(), e = bounds.getEast();
+  const s = bounds.getSouth(), n = bounds.getNorth();
+  const span = Math.max(e - w, 1e-6);
+  const step = GRID_STEPS.find((v) => span / v <= 20) || GRID_STEPS[GRID_STEPS.length - 1];
   const lines = [];
   for (let x = Math.ceil(w / step) * step; x <= e + 1e-9; x += step) {
     lines.push([[Number(x.toFixed(4)), s], [Number(x.toFixed(4)), n]]);
@@ -34,15 +39,13 @@ function graticuleGeoJSON() {
   };
 }
 
-function frameGeoJSON() {
-  const w = 115.8, s = 28.0, e = 116.8, n = 29.6;
-  return {
-    type: 'FeatureCollection',
-    features: [{
-      type: 'Feature', properties: {},
-      geometry: { type: 'LineString', coordinates: [[w, s], [e, s], [e, n], [w, n], [w, s]] },
-    }],
-  };
+// 重算经纬网（moveend / 首次 load 时调用）
+export function refreshGraticule(map) {
+  const src = map.getSource('graticule');
+  if (!src || typeof map.getBounds !== 'function') return;
+  try {
+    src.setData(graticuleForBounds(map.getBounds()));
+  } catch (_) { /* 地图尚未就绪 */ }
 }
 
 // ===== B1 图层控制：t1 / t2 / change 三层（添加顺序 t1→t2→change，专题图在最上） =====
@@ -115,16 +118,50 @@ function applyLayerImage(map, key, url, b) {
 }
 
 function initLayers(map) {
-  // 经纬网 + 范围边框
-  map.addSource('graticule', { type: 'geojson', data: graticuleGeoJSON() });
+  // 经纬网：随视口动态生成（原来固定写死在南昌/鄱阳一带，移到别的省份就没格网了）
+  map.addSource('graticule', { type: 'geojson', data: emptyFC() });
   map.addLayer({
     id: 'graticule-line', type: 'line', source: 'graticule',
     paint: { 'line-color': '#ccd7e3', 'line-width': 0.6, 'line-opacity': 0.9 },
   });
-  map.addSource('graticule-frame', { type: 'geojson', data: frameGeoJSON() });
+
+  // 中国省级边界（离线 GeoJSON，由 setProvinceBoundaries 注入；含台湾省与南海诸岛）
+  // 只有线要素，不铺填充，避免盖住背景色与专题图
+  map.addSource('cn-provinces', { type: 'geojson', data: emptyFC() });
   map.addLayer({
-    id: 'frame-line', type: 'line', source: 'graticule-frame',
-    paint: { 'line-color': '#aebfce', 'line-width': 1.2, 'line-opacity': 0.9 },
+    id: 'cn-provinces-line', type: 'line', source: 'cn-provinces',
+    paint: { 'line-color': '#9fb2c4', 'line-width': ['interpolate', ['linear'], ['zoom'], 3, 0.7, 8, 1.3], 'line-opacity': 0.9 },
+  });
+
+  // 全国地点库（省/市/县三级）：用 circle 图层画点（无需字形服务，离线可用），
+  // 中文名称标签由 DOM Marker 单独维护，仅渲染当前视口内的一小批，避免上千个 DOM 卡顿。
+  map.addSource('cn-places', { type: 'geojson', data: emptyFC() });
+  map.addLayer({
+    id: 'cn-place-t3', type: 'circle', source: 'cn-places', minzoom: 7.2,
+    filter: ['==', ['get', 't'], 3],
+    paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 7.2, 2.4, 11, 4],
+      'circle-color': '#8a9bb0', 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 1,
+      'circle-opacity': 0.95,
+    },
+  });
+  map.addLayer({
+    id: 'cn-place-t2', type: 'circle', source: 'cn-places', minzoom: 5,
+    filter: ['==', ['get', 't'], 2],
+    paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 5, 2.8, 10, 4.6],
+      'circle-color': '#3f7fd0', 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 1.2,
+      'circle-opacity': 0.95,
+    },
+  });
+  map.addLayer({
+    id: 'cn-place-t1', type: 'circle', source: 'cn-places',
+    filter: ['==', ['get', 't'], 1],
+    paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 3, 3.6, 9, 5.4],
+      'circle-color': '#0b4aa2', 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 1.4,
+      'circle-opacity': 1,
+    },
   });
 
   // AOI 矩形（框选 / 手填联动）
@@ -168,7 +205,15 @@ export function createMap(containerId, center, zoom) {
     pitchWithRotate: false,
   });
   map.addControl(new maplibregl.NavigationControl({ showCompass: false, visualizePitch: false }), 'top-right');
-  map.on('load', () => initLayers(map));
+  map.on('load', () => {
+    initLayers(map);
+    refreshGraticule(map);
+    // 视口变化统一重算：经纬网跟随、地名标签按层级与屏幕范围重取
+    map.on('moveend', () => {
+      refreshGraticule(map);
+      syncChinaLabels(map);
+    });
+  });
   return map;
 }
 
@@ -278,4 +323,103 @@ export function setSamples(map, list) {
 export function fitBounds(map, b, padding = 90) {
   if (!b) return;
   map.fitBounds([[b.w, b.s], [b.e, b.n]], { padding, duration: 600, maxZoom: 13 });
+}
+
+// ===== 全国地点库图层（省 / 地级市 / 区县）=====
+// 点位用 circle 图层绘制：不依赖字形服务，几千个点也不掉帧。
+// 中文名标签走 DOM Marker，但只渲染当前视口内的有限数量（见 drawChinaLabels），
+// 否则 3000+ 个 DOM 元素会让拖动明显卡顿。
+
+const CHINA_LAYER_IDS = ['cn-place-t1', 'cn-place-t2', 'cn-place-t3'];
+const _chinaState = new WeakMap();
+
+function chinaState(map) {
+  let s = _chinaState.get(map);
+  if (!s) {
+    s = { places: [], markers: [], timer: 0 };
+    _chinaState.set(map, s);
+  }
+  return s;
+}
+
+export function setProvinceBoundaries(map, fc) {
+  const src = map.getSource('cn-provinces');
+  if (src) src.setData(fc || emptyFC());
+}
+
+// places: [{ name, lng, lat, tier, province }]
+export function setChinaPlaces(map, places) {
+  const list = (places || []).filter((p) => p && Number.isFinite(p.lng) && Number.isFinite(p.lat));
+  chinaState(map).places = list;
+  const src = map.getSource('cn-places');
+  if (src) {
+    src.setData({
+      type: 'FeatureCollection',
+      features: list.map((p, i) => ({
+        type: 'Feature',
+        properties: { i, t: p.tier || 3 },
+        geometry: { type: 'Point', coordinates: [p.lng, p.lat] },
+      })),
+    });
+  }
+  syncChinaLabels(map);
+}
+
+// 点击点位回调：handler({ name, lng, lat, tier, province })
+export function onPlacePick(map, handler) {
+  if (typeof handler !== 'function') return;
+  CHINA_LAYER_IDS.forEach((id) => {
+    map.on('click', id, (ev) => {
+      const f = ev.features && ev.features[0];
+      if (!f) return;
+      const p = chinaState(map).places[f.properties.i];
+      if (p) handler(p);
+    });
+    map.on('mouseenter', id, () => { map.getCanvas().style.cursor = 'pointer'; });
+    map.on('mouseleave', id, () => { map.getCanvas().style.cursor = ''; });
+  });
+}
+
+// 标签层级：放大到不同级别逐级放开（省会 → 地级市 → 区县），避免一屏挤满文字
+function labelTiers(z) {
+  if (z >= 7.2) return [1, 2, 3];
+  if (z >= 5) return [1, 2];
+  return [1];
+}
+
+// moveend 会连续触发，合并成一次重绘
+export function syncChinaLabels(map) {
+  const st = chinaState(map);
+  if (!st.places.length || typeof map.getZoom !== 'function') return;
+  if (st.timer) clearTimeout(st.timer);
+  st.timer = setTimeout(() => { st.timer = 0; drawChinaLabels(map); }, 90);
+}
+
+function drawChinaLabels(map) {
+  const st = chinaState(map);
+  if (!st.places.length) return;
+  const z = map.getZoom();
+  const tiers = labelTiers(z);
+  const b = map.getBounds();
+  const limit = z >= 7.2 ? 110 : z >= 5 ? 80 : 60;
+  // places 已按层级排序，先入选省会，超限时丢掉的是县级
+  const picked = [];
+  for (const p of st.places) {
+    if (!tiers.includes(p.tier || 3)) continue;
+    if (p.lng < b.getWest() || p.lng > b.getEast()) continue;
+    if (p.lat < b.getSouth() || p.lat > b.getNorth()) continue;
+    picked.push(p);
+    if (picked.length >= limit) break;
+  }
+  st.markers.splice(0).forEach((m) => m.remove());
+  picked.forEach((p) => {
+    const el = document.createElement('div');
+    el.className = 'place-marker place-pin place-t' + (p.tier || 3);
+    const label = document.createElement('span');
+    label.className = 'place-label';
+    label.textContent = p.name; // textContent 防注入
+    el.appendChild(label);
+    st.markers.push(new maplibregl.Marker({ element: el, anchor: 'left', offset: [6, 0] })
+      .setLngLat([p.lng, p.lat]).addTo(map));
+  });
 }

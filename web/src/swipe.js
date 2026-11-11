@@ -4,6 +4,9 @@
 
 const $ = (id) => document.getElementById(id);
 
+// 产物图鉴权加载：<img> 不能自带 Bearer 头，统一走 api 的 blob 通道
+import { artifactObjectUrl } from './api.js';
+
 export const NO_COMPOSITE = '该运行未导出双时相合成图，请重新运行检测后使用';
 const NO_RUN = '请先在「历史运行」卡片选择一条运行记录，或运行一次变化检测。';
 
@@ -92,17 +95,24 @@ export function setSwipeSources(src) {
   const t2 = $('swipe-img-t2');
   const head = $('swipe-head');
   if (!t1 || !t2) return false;
-  t1.src = s.t1Url;
-  t2.src = s.t2Url;
   const l1 = $('swipe-label-t1'), l2 = $('swipe-label-t2');
   if (l1) l1.textContent = 't1 ' + (s.t1 || '—');
   if (l2) l2.textContent = 't2 ' + (s.t2 || '—');
   if (head) head.textContent = '双时相卷帘 · ' + (s.runId ? String(s.runId).slice(0, 8) : '本轮检测');
-  const note = $('swipe-unavailable');
-  const stage = $('swipe-stage');
-  if (note) note.hidden = true;
-  if (stage) stage.hidden = false;
-  apply(pos); // 切换 run 时保留上一次拖动位置
+  // 合成图同样受 JWT 保护：<img src> 无法携带 Authorization，先取成 blob URL 再赋值，
+  // 否则卷帘会显示两张 401 破图（与地图专题图无颜色是同一个根因）。
+  Promise.all([artifactObjectUrl(s.t1Url), artifactObjectUrl(s.t2Url)])
+    .then(([u1, u2]) => {
+      if (!u1 || !u2) { showUnavailable(NO_COMPOSITE); return; }
+      t1.src = u1;
+      t2.src = u2;
+      const note = $('swipe-unavailable');
+      const stage = $('swipe-stage');
+      if (note) note.hidden = true;
+      if (stage) stage.hidden = false;
+      apply(pos); // 切换 run 时保留上一次拖动位置
+    })
+    .catch(() => showUnavailable(NO_COMPOSITE));
   return true;
 }
 

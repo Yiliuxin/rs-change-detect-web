@@ -14,6 +14,7 @@ import * as M from './map.js';
 import * as C from './charts.js';
 import * as HIST from './history.js';
 import { ONLINE_PLACES } from './places.js';
+import { loadChinaPlaces, loadChinaProvinces, searchPlaces, boxAround, tierLabel } from './china-geo.js';
 import { initProbe } from './probe.js';
 
 // 认证扩展：全站必须登录——无票据直接回登录页
@@ -50,6 +51,8 @@ const S = {
   pickMode: false, pickPrevMode: null, pickBusy: false, picks: [],
   // 任务 A：预置地点清单（GET /scene/preset_aois）与自动分层采样，独立于离线/在线状态
   presets: [], presetBusy: false, autoSampleBusy: false, fillBusy: false,
+  // 全国地点库（省/市/县，离线 JSON 懒加载）：供地图点选与地名搜索
+  chinaPlaces: [],
 };
 
 // 在线取数（可选）卡片独立状态，与离线 S 完全隔离，互不污染。
@@ -654,21 +657,31 @@ function syncRunAdvancedUi() {
 // 结果卡 / 参数快照 / 卷帘 / 导出 / 图上点选 run 标签，保证两条路径渲染口径完全一致。
 function applyChangeResult(data) {
   S.change = data;
-  let url = data.change_png;
-  if (!url || /^demo:/.test(url)) url = demo.makeChangePngDataUrl();
-  S.changePngUrl = url;
-  // B1：t1/t2 真彩合成图与专题图各自成层（添加顺序由 map.js 保证）
   const arts = (data && typeof data.artifacts === 'object' && data.artifacts) || {};
-  if (S.aoi) {
-    [['t1', 't1_composite.png'], ['t2', 't2_composite.png']].forEach(([key, name]) => {
-      const u = arts[name];
-      if (u && !isUnsafeImageUrl(u)) M.setLayerImage(map, key, u, S.aoi);
-    });
-  }
-  if (!isUnsafeImageUrl(url)) {
-    M.setImage(map, url, S.aoi);
-    M.setImageOpacity(map, S.opacity);
-  }
+  // 产物图受 JWT 保护，必须走带 token 的 fetch → blob URL（否则地图 401 无颜色）
+  const loadImage = async (raw) => {
+    if (!raw || isUnsafeImageUrl(raw)) return '';
+    if (/^demo:/.test(raw)) return demo.makeChangePngDataUrl();
+    return api.artifactObjectUrl(raw);
+  };
+  const rawPng = data.change_png;
+  S.changePngUrl = rawPng && /^demo:/.test(rawPng) ? demo.makeChangePngDataUrl() : rawPng;
+  (async () => {
+    const png = await loadImage(rawPng);
+    if (!png) return;      // 取图失败（缺产物 / 会话过期）→ 不覆盖地图，静默保留上一张
+    S.changePngUrl = png;
+    if (S.aoi) {
+      M.setImage(map, png, S.aoi);
+      M.setImageOpacity(map, S.opacity);
+    }
+    // B1：t1/t2 真彩合成图与专题图各自成层（添加顺序由 map.js 保证）
+    if (S.aoi) {
+      for (const [key, name] of [['t1', 't1_composite.png'], ['t2', 't2_composite.png']]) {
+        const u = await loadImage(arts[name]);
+        if (u) M.setLayerImage(map, key, u, S.aoi);
+      }
+    }
+  })();
   $('map-legend').hidden = false;
   renderChangeResult();
   renderSnapshot();
@@ -1550,18 +1563,27 @@ function loadHistoryRun(d) {
   S.changePngUrl = png;
   const b = (Array.isArray(d.bbox) && d.bbox.length === 4) ? boundsFromArray(d.bbox) : S.aoi;
   if (b) {
-    // 地图 style 未就绪时跳过叠加即可，结果区填充不受影响，且绝不产生未捕获异常
-    try {
-      const t1Url = artUrl(['t1_composite.png']);
-      const t2Url = artUrl(['t2_composite.png']);
-      if (t1Url && !isUnsafeImageUrl(t1Url)) M.setLayerImage(map, 't1', t1Url, b);
-      if (t2Url && !isUnsafeImageUrl(t2Url)) M.setLayerImage(map, 't2', t2Url, b);
-      if (png && !isUnsafeImageUrl(png)) {
-        M.setImage(map, png, b);      // 用该 run 的 bbox 定位专题图，不覆盖用户当前 AOI 输入
-        M.setImageOpacity(map, S.opacity);
-        M.fitBounds(map, b, 90);
-      }
-    } catch (_) { /* 地图尚未 load */ }
+    // 地图 style 未就绪时跳过叠加即可，结果区填充不受影响，且绝不产生未捕获异常；
+    // 产物图受 JWT 保护，先取 blob URL 再叠加（否则历史回看同样 401 无颜色）
+    (async () => {
+      try {
+        const t1Raw = artUrl(['t1_composite.png']);
+        const t2Raw = artUrl(['t2_composite.png']);
+        const [t1Url, t2Url, pngUrl] = await Promise.all([
+          t1Raw && !isUnsafeImageUrl(t1Raw) ? api.artifactObjectUrl(t1Raw) : '',
+          t2Raw && !isUnsafeImageUrl(t2Raw) ? api.artifactObjectUrl(t2Raw) : '',
+          png && !isUnsafeImageUrl(png) ? api.artifactObjectUrl(png) : '',
+        ]);
+        if (t1Url) M.setLayerImage(map, 't1', t1Url, b);
+        if (t2Url) M.setLayerImage(map, 't2', t2Url, b);
+        if (pngUrl) {
+          S.changePngUrl = pngUrl;
+          M.setImage(map, pngUrl, b);   // 用该 run 的 bbox 定位专题图，不覆盖用户当前 AOI 输入
+          M.setImageOpacity(map, S.opacity);
+          M.fitBounds(map, b, 90);
+        }
+      } catch (_) { /* 地图尚未 load */ }
+    })();
   }
   $('map-legend').hidden = false;
   renderChangeResult();
@@ -1759,6 +1781,114 @@ function onlineWindows() {
 // 2) 预置影像区（12 组）→ 同步 A 卡下拉并走同一套「填入 + 应用 AOI」链路（t1/t2 随预置组填充）；
 // 3) 内置扩展地名库（g: 前缀）→ 仅填 AOI bbox + 地图定位，不动 t1/t2（在线窗口本卡独立控制）。
 // 时间自由度不受地点影响：t1/t2 检索窗口由本卡片日期框任意指定。
+// ===== 全国地点库：省级边界 + 省/市/县点位 + 地名搜索 =====
+// 数据是 public/geo 下的静态 JSON，运行时 fetch 一次；加载失败只降级提示，不影响原有流程。
+// 注意时序：JSON 可能比地图 load 事件先就绪，而 GeoJSON source 是 load 时才创建的，
+// 所以 setData 必须等地图就绪后再执行，否则数据会被静默丢掉（界面上就是「有点无线」）。
+function whenMapReady(fn) {
+  if (!map) return;
+  // 以 initLayers 是否已建好 GeoJSON source 为准（isStyleLoaded 在 load 后仍可能为 false）
+  if (map.getSource && map.getSource('cn-places')) { fn(); return; }
+  map.once('load', fn);
+}
+
+function initChinaGeo() {
+  loadChinaProvinces()
+    .then((fc) => whenMapReady(() => M.setProvinceBoundaries(map, fc)))
+    .catch(() => { /* 边界失败只是少一层地理参照 */ });
+  loadChinaPlaces()
+    .then((list) => {
+      S.chinaPlaces = list;
+      whenMapReady(() => {
+        M.setChinaPlaces(map, list);
+        M.onPlacePick(map, applyChinaPlace);
+      });
+      const hint = $('onl-search-hint');
+      if (hint) hint.textContent = '共 ' + list.length + ' 个点位：可搜地名，也可在地图上点选（放大后显示到区县）';
+    })
+    .catch(() => {
+      const hint = $('onl-search-hint');
+      if (hint) hint.textContent = '地点库加载失败，可继续用「选择地点」下拉或地图框选';
+    });
+}
+
+// 选定全国点位：地图定位 + 用 0.2° 方形填 AOI。
+// t1/t2 窗口仍由本卡日期框独立指定（与 places.js 精选地点同一处理口径）。
+function applyChinaPlace(p) {
+  if (!p) return;
+  const b = boxAround(p.lng, p.lat, 0.2);
+  pushAoiHistory();
+  applyAoi(b);
+  if (map) M.fitBounds(map, b, 120);
+  updateAoiMetrics();
+  $('onl-place').value = '';
+  const hint = $('onl-search-hint');
+  if (hint) {
+    hint.classList.add('hit');
+    hint.textContent = '已定位：' + p.name + '（' + tierLabel(p.tier) + '）· AOI 0.2°×0.2°';
+  }
+  showToast('已定位到 ' + p.name + '，设定时间窗口后即可检索', 'ok');
+}
+
+function initChinaSearch() {
+  const input = $('onl-search'), box = $('onl-suggest'), hint = $('onl-search-hint');
+  if (!input || !box) return;
+  let items = [], active = -1;
+
+  function paint() {
+    if (!items.length) { box.hidden = true; box.innerHTML = ''; return; }
+    box.innerHTML = items.map((p, i) =>
+      '<div class="onl-suggest-item' + (i === active ? ' on' : '') + '" data-i="' + i + '">'
+      + '<span>' + esc(p.name) + '</span>'
+      + '<span class="sub">' + esc(p.province || tierLabel(p.tier)) + '</span></div>').join('');
+    box.hidden = false;
+  }
+
+  function choose(i) {
+    const p = items[i];
+    if (!p) return;
+    items = []; active = -1;
+    box.hidden = true; box.innerHTML = '';
+    input.value = '';
+    input.blur();
+    applyChinaPlace(p);
+  }
+
+  input.addEventListener('input', () => {
+    const q = input.value.trim();
+    active = -1;
+    items = q ? searchPlaces(S.chinaPlaces, q, 8) : [];
+    if (hint && q && !S.chinaPlaces.length) {
+      hint.textContent = '地点库仍在加载，稍等再试';
+    } else if (hint) {
+      hint.classList.toggle('hit', items.length > 0);
+      hint.textContent = items.length
+        ? '找到 ' + items.length + ' 个匹配，回车或点击定位'
+        : (q ? '没有匹配的地名，换个写法试试（如「余干」「昆明」）'
+             : '全国 3200 余个点位：可搜地名，也可在地图上点选（放大后显示到区县）');
+    }
+    paint();
+  });
+
+  input.addEventListener('keydown', (ev) => {
+    if (!items.length) return;
+    if (ev.key === 'ArrowDown') { active = (active + 1) % items.length; paint(); ev.preventDefault(); }
+    else if (ev.key === 'ArrowUp') { active = (active - 1 + items.length) % items.length; paint(); ev.preventDefault(); }
+    else if (ev.key === 'Enter') { choose(active >= 0 ? active : 0); ev.preventDefault(); }
+    else if (ev.key === 'Escape') { items = []; active = -1; paint(); }
+  });
+
+  // mousedown 而非 click：避免 input 先失焦导致下拉被收起
+  box.addEventListener('mousedown', (ev) => {
+    const el = ev.target.closest('.onl-suggest-item');
+    if (!el) return;
+    ev.preventDefault();
+    choose(Number(el.dataset.i));
+  });
+
+  input.addEventListener('blur', () => { setTimeout(() => { box.hidden = true; }, 120); });
+}
+
 function onlPlaceChange() {
   const name = $('onl-place').value;
   if (!name) return;
@@ -2242,6 +2372,7 @@ function bindEvents() {
   $('onl-fetch').onclick = onlineFetch;
   $('onl-retry').onclick = retryOnline;
   $('onl-place').onchange = onlPlaceChange;
+  initChinaSearch();
   $('onl-body').querySelector('.onl-place-draw').onclick = () => {
     // 复用地图「AOI 框选」模式：拖拽画框后 AOI 回填 A 卡并同步在线卡回显
     if (S.pickMode) { S.pickMode = false; syncPickUi(); }
@@ -2353,6 +2484,7 @@ function init() {
   initAuthUi();
 
   map = M.createMap('map', demo.SEEDS[0].center, 9);
+  window.__map = map; // 调试 / 自动化验证句柄（不影响业务）
   map.on('load', () => {
     fillAoiInputs(boundsFromArray(demo.SEEDS[0].aoi));
     syncFromInputs();
@@ -2363,6 +2495,9 @@ function init() {
   bindMapEvents();
   // B2：探针只读 HUD（节流 180ms + 取消旧请求），失败显示 — 且不打断打点模式
   initProbe({ map, getRunId: currentRunId });
+
+  // 全国地点库：省级边界 + 省/市/县点位（离线 JSON，边走边加载，失败不影响主流程）
+  initChinaGeo();
 
   updateCounts();
   renderSnapshot();

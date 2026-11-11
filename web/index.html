@@ -194,6 +194,16 @@
                   title="切到地图拖拽画框，框完回到本卡直接检索">地图框选</button>
               </div>
 
+              <!-- 全国地点搜索：输入地名直接定位并框选 0.2°；数据为离线地点库，不联网 -->
+              <div class="onl-search-row">
+                <input type="text" id="onl-search" class="onl-search" autocomplete="off"
+                  placeholder="搜索全国地名：昆明 / 余干 / 敦煌…" aria-label="搜索全国地名" />
+                <div class="onl-suggest" id="onl-suggest" hidden></div>
+              </div>
+              <div class="onl-search-hint" id="onl-search-hint">
+                全国 3200 余个点位：可直接搜地名，也可在地图上点选（放大后显示到区县）
+              </div>
+
               <!-- 复用 A 卡当前 AOI（不重复输入；实时回显 bbox） -->
               <div class="onl-aoi-echo">当前 AOI（WGS84 bbox）<span class="v" id="onl-aoi-text">—</span></div>
 

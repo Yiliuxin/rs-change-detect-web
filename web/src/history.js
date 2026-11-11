@@ -29,9 +29,21 @@ function shortSource(s) {
   return str.replace(/^minio:\/\/[^/]+\//, '').replace(/\/$/, '') || str;
 }
 
+// 创建时间：后端（Postgres timestamptz）统一返回 UTC ISO8601（带 +00:00），
+// 这里必须解析成 Date 再按浏览器本地时区格式化，不能直接截字符串——
+// 直接截前 16 位会把时区偏移丢掉，UTC 会被当成当地时间显示（差 8 小时）。
 function when(s) {
   const str = String(s || '').trim();
-  return str ? str.slice(0, 16).replace('T', ' ') : '—';
+  if (!str) return '—';
+  // 纯日期（如影像拍摄日 2023-08-04）不做时区换算，原样返回
+  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) return str;
+  // 无时区标记的裸时间按 UTC 解释（库列为 timestamptz，正常一定带偏移，此处仅兜底）
+  const iso = /[Zz]$|[+-]\d{2}:?\d{2}$/.test(str) ? str : str + 'Z';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return str.slice(0, 16).replace('T', ' ');
+  const p = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate())
+    + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
 }
 
 function area(v) {
