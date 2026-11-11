@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import inspect
 import json
 import math
 import shutil
@@ -30,6 +31,7 @@ from app.algorithm.composite import (
 from app.algorithm.geotransform import BBox
 from app.algorithm.index_raster import IndexRaster
 from app.algorithm.intensity import intensity_stats
+from app.algorithm.landcover import classify_landcover, transition_matrix
 from app.algorithm.mask_builder import landsat_dn_nodata_mask
 from app.algorithm.mask_pipeline import (
     compute_valid_ratio, judge_valid_ratio, run_mask_pipeline,
@@ -41,10 +43,12 @@ from app.algorithm.radiometric import (
     assert_same_caliber, check_baseline, to_reflectance,
 )
 from app.algorithm.regression_detector import detect_change_regression
-from app.algorithm.writers import attribution_lines, export_triplet
+from app.algorithm.writers import (
+    attribution_lines, export_triplet, write_index_raster,
+)
 from app.api.errors import ApiError, as_api_error
 from app.config.constants import (
-    BLOCK_SIZE, EXPORT_FORMATS,
+    BLOCK_SIZE, EXPORT_FORMATS, INDEX_RASTER_T1, INDEX_RASTER_T2,
     LANDSAT_SENSORS, MANUAL_THRESHOLD_RANGE, METHOD_OTSU, METHOD_REGRESSION,
     REGRESSION_MAX_ROUNDS, REGRESSION_SIGMA_FACTOR, radiometric_formula,
     VALID_CHANGE_METHODS, VALID_INDEXES,
@@ -53,7 +57,7 @@ from app.config.constants import (
 from app.repository import aoi_repo, change_result_repo, scene_repo, task_repo
 from app.service.cog_source import resolve_bands
 from app.service.common import (
-    artifact_manifest, artifact_url, index_artifact_names,
+    artifact_manifest, artifact_url, index_artifact_names, index_raster_names,
     regression_archive_names, regression_artifact_names, run_dir, utc_now,
 )
 from app.service.concurrency import serial
@@ -127,6 +131,32 @@ def _index_histogram(values, valid_mask, threshold: float, name: str) -> dict:
     }
 
 
+def _stage_progress(on_stage, name: str, done=None, total=None) -> None:
+    """B3：阶段内百分比回报；对只接受 ``name`` 的旧回调自动降级，向后兼容。
+
+    ``on_stage(name, done, total)`` 为可选扩展；同步 / 历史调用传
+    ``on_stage=lambda name: ...`` 时仍按单参数调用，不抛 TypeError。
+    """
+    if on_stage is None:
+        return
+    if done is None or total is None:
+        on_stage(name)
+        return
+    try:
+        params = list(inspect.signature(on_stage).parameters.values())
+        positional = [p for p in params
+                      if p.kind in (inspect.Parameter.POSITIONAL_ONLY,
+                                    inspect.Parameter.POSITIONAL_OR_KEYWORD)]
+        supports = (any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in params)
+                    or len(positional) >= 3)
+    except (TypeError, ValueError):
+        supports = False
+    if supports:
+        on_stage(name, done, total)
+    else:
+        on_stage(name)
+
+
 def _build_index(key: str, rho_t: Dict, profile: dict, valid: np.ndarray,
                  run_id: str, snapshot: Dict) -> IndexRaster:
     """REQ-06/07：NDVI 走 ``index_calculator.ndvi``，NDWI 走 ``index_calculator.ndwi``。
@@ -145,6 +175,25 @@ def _build_index(key: str, rho_t: Dict, profile: dict, valid: np.ndarray,
     )
 
 
+def _build_pair_indexes(key: str, rho_t: Dict, profile: dict,
+                        valid: np.ndarray, run_id: str,
+                        snapshot: Dict) -> Dict:
+    """A3/B2：一次算齐 NDVI + NDWI（与现有掩膜 / 定标 / clip 同口径）。
+
+    NDWI 场景也得到 NDVI，反之亦然；主检测指数仍走 ``_build_index``，
+    保证 Δ / Otsu / 三类 / 统计口径逐字不变，额外的辅助指数只用于
+    地物联合判据与探针前置栅格。
+    """
+    ndvi = _build_index("NDVI", rho_t, profile, valid, run_id, snapshot)
+    ndwi = _build_index("NDWI", rho_t, profile, valid, run_id, snapshot)
+    primary = ndvi if key == "NDVI" else ndwi
+    aux = ndwi if key == "NDVI" else ndvi
+    return {
+        "primary": primary, "aux": aux.data,
+        "ndvi": ndvi.data, "ndwi": ndwi.data,
+    }
+
+
 def _mask_then_scale(dn: np.ndarray, sensor: str, baseline: Optional[str],
                      valid: np.ndarray) -> np.ndarray:
     """NF4：先掩膜（只取有效像元）后缩放（DN → ρ），掩膜外恒为 NaN。
@@ -157,10 +206,12 @@ def _mask_then_scale(dn: np.ndarray, sensor: str, baseline: Optional[str],
 
 
 def load_scene(cog_path: str, sensor: str, baseline: Optional[str],
-               bbox: BBox, run_id: str) -> Dict:
+               bbox: BBox, run_id: str, on_band=None) -> Dict:
     """读取单时相 COG：5 波段 → 同景网格对齐(EX4) → 掩膜流水线 → 结构化 dict。
 
     供 change_service 与 scene_service(POST 补 clip_window/valid_ratio) 复用。
+    ``on_band(i)`` 为 B3 新增的可选回调（4 波段循环内回报阶段内进度），
+    缺省 None 时既有调用签名 / 行为逐字不变。
     """
     check_baseline(sensor, baseline)  # EX9：基线缺失 / <04.00 / 非 C2 L2
     # 按 scene 的 sensor 分派资产别名（L8/L9 → SR_B2..B5 / QA_PIXEL）
@@ -168,12 +219,14 @@ def load_scene(cog_path: str, sensor: str, baseline: Optional[str],
     is_landsat = str(sensor or "").strip().upper() in LANDSAT_SENSORS
 
     dn, profiles, ref_window = {}, {}, None
-    for band in _BANDS_10M:
+    for i, band in enumerate(_BANDS_10M, start=1):
         arr, profile, window = read_aoi(str(paths[band]), bbox)  # REQ-03 AOI 裁切
         dn[band] = arr
         profiles[band] = profile
         if band == "B04":
             ref_window = window
+        if on_band is not None:
+            on_band(i)  # B3：4 波段循环逐波段回报
 
     ref_profile = profiles["B04"]
     for band in ("B02", "B03", "B08"):
@@ -237,6 +290,8 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
 
     供同步入口 :func:`run` 与异步入口 ``change_async`` 复用。``on_stage(name)``
     为可选进度回调（异步模式用于推进 5 阶段进度），同步模式传 None 即空操作。
+    B3 扩展：支持 ``on_stage(name, done, total)`` 回报阶段内百分比；只接受
+    ``name`` 的旧回调自动降级为单参数调用，行为完全向后兼容。
 
     参数扩展（向后兼容、缺省行为不变，且 index / threshold / method / async 正交）：
       * ``index``：NDVI（缺省，红+近红外）/ NDWI（绿+近红外），非法 → EX12；
@@ -267,14 +322,19 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
 
         task_repo.update_status(run_id, "RUNNING", started_at=utc_now())
 
+        # B3：读裁切阶段内进度 = 2 时相 × 4 波段 = 8 个单位
+        def _band_cb(offset: int):
+            return lambda i: _stage_progress(on_stage, "read_clip", offset + i, 8)
+
         scenes = {
             "t1": load_scene(sc_t1["cog_path"], sc_t1["sensor"],
-                             sc_t1.get("proc_baseline"), bbox, run_id),
+                             sc_t1.get("proc_baseline"), bbox, run_id,
+                             on_band=_band_cb(0)),
             "t2": load_scene(sc_t2["cog_path"], sc_t2["sensor"],
-                             sc_t2.get("proc_baseline"), bbox, run_id),
+                             sc_t2.get("proc_baseline"), bbox, run_id,
+                             on_band=_band_cb(4)),
         }
-        if on_stage is not None:
-            on_stage("read_clip")  # 阶段 1：读裁切
+        _stage_progress(on_stage, "read_clip", 8, 8)  # 阶段 1：读裁切
 
         # REQ-03 / EX4：双时相左上角/尺寸/CRS 一致
         assert_grid_aligned(scenes["t1"]["profile"], scenes["t2"]["profile"])
@@ -284,11 +344,12 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
         for phase in ("t1", "t2"):
             for band in ("B04", "B08"):
                 valid &= scenes[phase]["dn"][band] > 0
+        _stage_progress(on_stage, "mask", 1, 3)
 
         valid_ratio = compute_valid_ratio(valid)
+        _stage_progress(on_stage, "mask", 2, 3)
         verdict = judge_valid_ratio(valid_ratio, mask=valid)
-        if on_stage is not None:
-            on_stage("mask")  # 阶段 2：掩膜
+        _stage_progress(on_stage, "mask", 3, 3)  # 阶段 2：掩膜
 
         # EX3(=0) / EX11(<0.10) 终止档：不产出结果，如实报告
         if verdict.terminate:
@@ -317,13 +378,15 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
         # REQ-10：双时相真彩合成落盘 t1_composite.png / t2_composite.png
         # （批次 2 卷帘对比消费）；假彩合成仍按既有链路在 t1 验证纯函数。
         out_dir = run_dir(run_id)
-        for tag in ("t1", "t2"):
+        for i, tag in enumerate(("t1", "t2"), start=1):
             rgb = true_color(
                 rho[tag]["B04"], rho[tag]["B03"], rho[tag]["B02"],
                 valid_mask=valid,
             )
             write_composite_png(rgb, out_dir / f"{tag}_composite.png")
+            _stage_progress(on_stage, "index", i, 6)
         false_color(rho["t1"]["B08"], rho["t1"]["B04"], rho["t1"]["B03"], valid_mask=valid)
+        _stage_progress(on_stage, "index", 3, 6)
 
         # 产物清单（REQ-10/12/14）：本轮主三件套 + 带 index / method 后缀归档 + 合成图。
         # 差值法 NDVI 沿用历史主名（缺省行为不变）；回归法改用 _reg 主名，互不覆盖。
@@ -349,13 +412,23 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
 
         # REQ-06/07：NDVI 走 ndvi(R,NIR)，NDWI 走 ndwi(G,NIR)；
         # 后续 Δ / 阈值 / 三类判别 / 形态学 / 面积统计对两种指数完全一致。
-        if on_stage is not None:
-            on_stage("index")  # 阶段 3：指数
-        idx_t1 = _build_index(key, rho["t1"], profile, valid, run_id, snapshot)
-        idx_t2 = _build_index(key, rho["t2"], profile, valid, run_id, snapshot)
+        # A3/B2：一次算齐 NDVI + NDWI（NDWI 场景也得到 NDVI），主检测指数口径不变。
+        _stage_progress(on_stage, "index", 4, 6)
+        pair_t1 = _build_pair_indexes(key, rho["t1"], profile, valid, run_id, snapshot)
+        _stage_progress(on_stage, "index", 5, 6)
+        pair_t2 = _build_pair_indexes(key, rho["t2"], profile, valid, run_id, snapshot)
+        idx_t1, idx_t2 = pair_t1["primary"], pair_t2["primary"]
 
-        if on_stage is not None:
-            on_stage("change_detect")  # 阶段 4：变化检测
+        # B2 前置：探针只读 1 个像元的双时相指数栅格（回归法 _reg 隔离命名）。
+        # 必须先落盘，否则 /result/change/probe 会缺产物而卡死。
+        idx_names = index_raster_names(method_key)
+        write_index_raster(pair_t1["primary"].data, pair_t1["aux"], profile,
+                           out_dir / idx_names[INDEX_RASTER_T1])
+        write_index_raster(pair_t2["primary"].data, pair_t2["aux"], profile,
+                           out_dir / idx_names[INDEX_RASTER_T2])
+        _stage_progress(on_stage, "index", 6, 6)  # 阶段 3：指数
+
+        _stage_progress(on_stage, "change_detect", 1, 6)  # 阶段 4：变化检测
         comparison = None
         if method_key == METHOD_REGRESSION:
             # REQ-11：稳健拟合 index_t2 = a·index_t1 + b → 残差 r → Otsu / 手动阈值。
@@ -395,12 +468,15 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
             # 对称阈值 T 需非负；(-1,1) 内负值取 |T| 判别等价，快照/响应如实记录原值。
             change_raw = classify_change(d, abs(thr), valid_mask=valid)
 
+        _stage_progress(on_stage, "change_detect", 2, 6)
         # 形态学去碎块对两种检测方法完全一致（同一函数、同一参数）
         change = clean_change_map(change_raw)
+        _stage_progress(on_stage, "change_detect", 3, 6)
         summary = change_stats(change, profile=profile, valid_mask=valid,
                                run_id=run_id, params_snapshot=snapshot)
         ratio_change = change_pixel_ratio(change, valid_mask=valid)
         stats = summary["stats"]
+        _stage_progress(on_stage, "change_detect", 4, 6)
 
         # REQ-12 扩展：指数差值 / 回归残差分布直方图（PDF 内嵌，佐证阈值合理性）。
         # 回归法残差 = index_t2 − (a·index_t1 + b)；差值法 = index_t2 − index_t1。
@@ -424,6 +500,15 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
         patch_summary = patch_stats(
             change, profile, pixel_area_m2=float(summary["pixel_area_m2"]),
         )
+        _stage_progress(on_stage, "change_detect", 5, 6)
+
+        # A3 地物转移矩阵：NDVI/NDWI 联合判据（同一 valid 掩膜、同一像元面积）
+        lc_t1 = classify_landcover(pair_t1["ndvi"], pair_t1["ndwi"], valid_mask=valid)
+        lc_t2 = classify_landcover(pair_t2["ndvi"], pair_t2["ndwi"], valid_mask=valid)
+        transition_summary = transition_matrix(
+            lc_t1, lc_t2, float(summary["pixel_area_m2"]), valid_mask=valid,
+        )
+        _stage_progress(on_stage, "change_detect", 6, 6)
 
         if method_key == METHOD_REGRESSION:
             comparison = {
@@ -469,9 +554,10 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
             "change_pixel_ratio": float(ratio_change),
             "stats": stats,
             "pixel_area_m2": float(summary["pixel_area_m2"]),
-            # A1 / A2：透出点 ① 参数快照（历史回看从快照取）
+            # A1 / A2 / A3：透出点 ① 参数快照（历史回看从快照取）
             "intensity": intensity_summary,
             "patch_stats": patch_summary,
+            "transition_matrix": transition_summary,
         })
 
         year = str(snapshot.get("t1") or "")[:4] or "2023"
@@ -492,22 +578,23 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
             "change_pixel_ratio": float(ratio_change),
             "stats": stats,
             "index_histogram": index_histogram,
-            # A1 / A2：透出点 ② run_report.json（PDF 与报告导出复用）
+            # A1 / A2 / A3：透出点 ② run_report.json（PDF 与报告导出复用）
             "intensity": intensity_summary,
             "patch_stats": patch_summary,
+            "transition_matrix": transition_summary,
             "accuracy": None,  # 样本由 /accuracy/sample 提交，此处不伪造
             "params_snapshot": snapshot,
             # NF6 / NF7 常量逐字复用（PDF 署名页 / PNG / 导出响应同源）
             "attribution_lines": attribution_lines({"year": year}),
         }
 
-        if on_stage is not None:
-            on_stage("render_export")  # 阶段 5：渲染导出
+        _stage_progress(on_stage, "render_export", 1, 3)  # 阶段 5：渲染导出
         exported = export_triplet(
             change, profile, valid_ratio, report, out_dir,
             formats=EXPORT_FORMATS, run_id=run_id, params_snapshot=snapshot,
             names=out_names,
         )
+        _stage_progress(on_stage, "render_export", 2, 3)
         # 归档一份带 index 小写后缀的三件套副本：NDVI / NDWI 各自留存，互不覆盖；
         # 回归法从 _reg 主名复制到 <index>_reg 归档名，差值法主名保持历史文件名。
         archive_names = (regression_archive_names(key)
@@ -521,6 +608,7 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
         (out_dir / "run_report.json").write_text(
             json.dumps(report, ensure_ascii=False, default=str), encoding="utf-8"
         )
+        _stage_progress(on_stage, "render_export", 3, 3)
 
         change_geotiff_path = str(exported["files"]["geotiff"])
         change_png_path = str(exported["files"]["png"])
@@ -557,9 +645,10 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
             "method": method_key,
             "threshold_source": threshold_source,
             "artifacts": artifacts,
-            # A1 / A2：透出点 ③ 接口响应（新增字段带默认值，历史调用不受影响）
+            # A1 / A2 / A3：透出点 ③ 接口响应（新增字段带默认值，历史调用不受影响）
             "intensity": intensity_summary,
             "patch_stats": patch_summary,
+            "transition_matrix": transition_summary,
         }
     except ApiError:
         raise

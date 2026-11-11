@@ -66,7 +66,8 @@ def _new_record(task_id: str) -> dict:
         rec = {
             "task_id": task_id,
             "status": STATUS_PENDING,
-            "progress": {"stage": "", "step": 0, "total": len(STAGES)},
+            "progress": {"stage": "", "step": 0, "total": len(STAGES),
+                         "detail": None},
             "error": None,
             "result": None,
             "thread": None,
@@ -82,17 +83,28 @@ def _patch(task_id: str, **fields) -> None:
             rec.update(fields)
 
 
-def _stage(task_id: str, name: str) -> None:
-    """推进到指定阶段（name 不在 5 阶段内则忽略）。"""
+def _stage(task_id: str, name: str, done=None, total=None) -> None:
+    """推进到指定阶段（name 不在 5 阶段内则忽略）。
+
+    B3：可选 ``done`` / ``total`` 写入 ``progress.detail``（阶段内百分比），
+    不传时 ``detail=None``，5 阶段离散 step 语义与历史版本逐字一致。
+    """
     if name not in STAGES:
         return
+    detail = None
+    if done is not None and total is not None and int(total) > 0:
+        d = max(0, min(int(total), int(done)))
+        detail = {"stage": name, "done": d, "total": int(total)}
     with _lock:
         rec = _tasks.get(task_id)
         if rec is not None:
+            prior = dict(rec.get("progress") or {})
             rec["progress"] = {
                 "stage": name,
                 "step": STAGES.index(name) + 1,
                 "total": len(STAGES),
+                # 无细分数据时保留上一阶段 detail，避免轮询抖动下进度条回退
+                "detail": detail if detail is not None else prior.get("detail"),
             }
 
 
@@ -131,8 +143,9 @@ def _run_change(run_id: str, index: str, block_size: int,
     try:
         _patch(run_id, status=STATUS_RUNNING)
 
-        def on_stage(name: str) -> None:
-            _stage(run_id, name)
+        def on_stage(name: str, done=None, total=None) -> None:
+            """B3：接受阶段内 (done, total)；缺省时仍是旧的单参数阶段回调。"""
+            _stage(run_id, name, done, total)
 
         # 完整管线；闸门由本线程在 start_change 时持有，此处不再重复抢占。
         # 缺省 otsu 时不额外传 method，保持既有 monkeypatch / 老调用签名兼容。

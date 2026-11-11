@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from app.config.constants import (
+    INDEX_RASTER_T1, INDEX_RASTER_T2,
     METHOD_OTSU, METHOD_REGRESSION, REGRESSION_ARTIFACT_SUFFIX, VALID_INDEXES,
 )
 
@@ -59,7 +60,30 @@ for _index in VALID_INDEXES:
 __all__ = ["REPO_ROOT", "RUNS_ROOT", "DATA_ROOT", "ARTIFACT_URL_PREFIX",
            "ARTIFACT_MEDIA_TYPES", "git_short_commit", "utc_now", "run_dir",
            "artifact_url", "index_artifact_names", "regression_artifact_names",
-           "regression_archive_names", "artifact_manifest"]
+           "regression_archive_names", "index_raster_names", "artifact_manifest"]
+
+
+def index_raster_names(method: str = METHOD_OTSU) -> Dict[str, str]:
+    """B2 探针前置产物名：差值法 ``index_t1.tif`` / ``index_t2.tif``；
+    回归法按 ``REGRESSION_ARTIFACT_SUFFIX`` 隔离为 ``index_t1_reg.tif`` 等。
+
+    返回 ``{基准名: 本轮实际文件名}``；两法互不覆盖，便于历史 run 回看。
+    """
+    normalized = str(method or METHOD_OTSU).strip().lower()
+    sfx = REGRESSION_ARTIFACT_SUFFIX if normalized == METHOD_REGRESSION else ""
+    return {
+        INDEX_RASTER_T1: INDEX_RASTER_T1.replace(".tif", sfx + ".tif"),
+        INDEX_RASTER_T2: INDEX_RASTER_T2.replace(".tif", sfx + ".tif"),
+    }
+
+
+# 探针前置产物白名单：静态端点与 run_service 产物清单共用，缺失这步探针会卡死。
+# 两种方法的 4 个文件名一次登记，Media-Type 统一 image/tiff。
+ARTIFACT_MEDIA_TYPES.update({
+    name: "image/tiff"
+    for _m in (METHOD_OTSU, METHOD_REGRESSION)
+    for name in index_raster_names(_m).values()
+})
 
 
 def git_short_commit() -> Optional[str]:
@@ -143,17 +167,21 @@ def artifact_manifest(run_id: str, index: str,
     ``ARTIFACT_MEDIA_TYPES`` 白名单内，静态端点可直接读取。
     """
     normalized = str(method or METHOD_OTSU).strip().lower()
+    # B2：双时相指数栅格随 method 切换 _reg 隔离名，探针按同一映射读 1 个像元
+    idx_names = list(index_raster_names(normalized).values())
     if normalized == METHOD_REGRESSION:
         reg = regression_artifact_names()
         names = [
             *reg.values(), "t1_composite.png", "t2_composite.png",
-            "area_chart.png", *regression_archive_names(index).values(),
+            "area_chart.png", *idx_names,
+            *regression_archive_names(index).values(),
         ]
     else:
         names = [
             "change.tif", "change.png", "report.pdf",
             "t1_composite.png", "t2_composite.png",
-            "area_chart.png", *index_artifact_names(index).values(),
+            "area_chart.png", *idx_names,
+            *index_artifact_names(index).values(),
         ]
     return {n: artifact_url(run_id, n) for n in dict.fromkeys(names)
             if n in ARTIFACT_MEDIA_TYPES}

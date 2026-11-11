@@ -6,14 +6,17 @@
 """
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Query, Request
 
 from app.api.deps import ensure_run_owner
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.api.errors import ApiError
 from app.api.v1.schemas import ErrorResponse, StatItem
+from app.service import probe_service
 from app.config.constants import (
     BLOCK_SIZE, MANUAL_THRESHOLD_RANGE, METHOD_OTSU, OTSU_FALLBACK_DNDVI,
     VALID_CHANGE_METHODS, VALID_INDEXES,
@@ -69,6 +72,8 @@ class ChangeResponse(BaseModel):
         default=None, description="变化强度五档统计（A1）；无数据时为 null")
     patch_stats: Optional[Dict[str, Any]] = Field(
         default=None, description="变化图斑统计（A2）；无数据时为 null")
+    transition_matrix: Optional[Dict[str, Any]] = Field(
+        default=None, description="地物转移矩阵 4×4（A3）；无数据时为 null")
 
 
 class ChangeAsyncAccept(BaseModel):
@@ -85,6 +90,10 @@ class ChangeProgress(BaseModel):
     stage: str = Field("", description="当前阶段名（空串表示未开始）")
     step: int = Field(0, description="已完成阶段数（1–5）")
     total: int = Field(len(STAGES), description="阶段总数（5）")
+    # B3：阶段内百分比 {stage, done, total}；旧版轮询 / 回退视图为 null
+    detail: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="阶段内进度（done/total，5 阶段点不变）；无细分数据时为 null")
 
 
 class ChangeError(BaseModel):
@@ -151,3 +160,27 @@ def get_change_task(request: Request, task_id: str) -> ChangeTaskStatusResponse:
     """
     ensure_run_owner(request, task_id)
     return ChangeTaskStatusResponse(**change_async.get_status(task_id))
+
+
+@router.get(
+    "/change/probe",
+    responses={
+        200: {"description": "单像元探针；越界 / 缺产物字段为 None，仍 200"},
+        403: {"model": ErrorResponse, "description": "AUTH-03 非本人 run"},
+        404: {"model": ErrorResponse, "description": "EX2 未知 run_id"},
+    },
+    summary="鼠标拾取探针：按经纬度只读 1 个像元返回双时相指数与类别",
+)
+def probe_change(request: Request,
+                 run_id: str = Query(..., description="运行标识"),
+                 lng: float = Query(..., description="WGS84 经度"),
+                 lat: float = Query(..., description="WGS84 纬度")) -> dict:
+    """B2：经纬度 → 栅格 CRS → 行列 → ``Window(1×1)``，返回探针字段。
+
+    权限走 ``ensure_run_owner``（他人 run → AUTH-03）；越界 / 产物缺失时
+    由 service 返回字段 None 的 200，绝不 500。
+    """
+    ensure_run_owner(request, run_id)
+    if not (math.isfinite(float(lng)) and math.isfinite(float(lat))):
+        raise ApiError("EX12", run_id=run_id, detail="lng / lat 需为有限数")
+    return probe_service.probe(run_id, float(lng), float(lat))

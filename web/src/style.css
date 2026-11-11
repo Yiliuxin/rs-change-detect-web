@@ -131,7 +131,31 @@ body {
 .chart-intensity { height: 220px; }
 .empirical-note { margin-top: 6px; font-size: 10.5px; font-weight: 600; color: #a33b2a; }
 .patch-table-wrap { max-height: 250px; overflow: auto; }
-#patch-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+#patch-metrics, #transition-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+/* ===== A3 地物转移矩阵（4×4，对角格浅底） ===== */
+.tbl-matrix { font-size: 10px; }
+.tbl-matrix th, .tbl-matrix td {
+  text-align: center; font-variant-numeric: tabular-nums;
+  white-space: nowrap; padding: 4px 2px; font-size: 10px;
+}
+.tbl-matrix .cell-diag { background: #eaf5ea; font-weight: 600; }
+
+/* ===== B2 鼠标拾取探针 HUD（右下角，只读、不拦截打点） ===== */
+.probe-hud {
+  position: absolute; right: 14px; bottom: 14px; z-index: 4;
+  width: 226px; padding: 8px 10px; border-radius: 9px;
+  background: rgba(255, 255, 255, .94); backdrop-filter: blur(6px);
+  border: 1px solid var(--line-soft); box-shadow: var(--shadow);
+  font-size: 10.5px; color: var(--txt); pointer-events: none;
+}
+.probe-title { font-size: 11px; font-weight: 600; color: #1f7ae0; margin-bottom: 5px; }
+.probe-row { display: flex; justify-content: space-between; gap: 8px; margin: 2px 0; }
+.probe-row span { flex: 0 0 66px; color: var(--muted2); }
+.probe-row b {
+  font-weight: 600; text-align: right; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 
 .map-hint {
   position: absolute; left: 14px; top: 14px; z-index: 3;

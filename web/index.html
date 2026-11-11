@@ -299,6 +299,14 @@
             </div>
           </div>
           <div id="map-hint" class="map-hint"></div>
+          <!-- B2 鼠标拾取探针 HUD：右下角，只读、pointer-events:none，不打断打点模式 -->
+          <div id="probe-hud" class="probe-hud" aria-live="off">
+            <div class="probe-title">鼠标拾取探针</div>
+            <div class="probe-row"><span>坐标</span><b id="probe-coord">—</b></div>
+            <div class="probe-row"><span>t1 / t2</span><b id="probe-index">—</b></div>
+            <div class="probe-row"><span>Δ / 类别</span><b id="probe-delta">—</b></div>
+            <div class="probe-row"><span>强度 / 地物</span><b id="probe-class">—</b></div>
+          </div>
           <div id="map-mode" class="map-mode" role="group" aria-label="地图交互模式">
             <button type="button" class="mode-btn" data-mode="browse" title="自由浏览：缩放平移查看 AOI 与专题图">浏览</button>
             <button type="button" class="mode-btn" data-mode="aoi" title="AOI 框选：拖拽画矩形">AOI 框选</button>
@@ -358,6 +366,14 @@
                 <div class="metric-row" id="patch-metrics"></div>
                 <div class="card-subtitle">面积 Top10 图斑</div>
                 <div class="patch-table-wrap"><table class="tbl" id="patch-top-table"></table></div>
+              </div>
+
+              <!-- A3 地物转移矩阵：4×4 表（对角浅底）+ 未变占比；无数据整块隐藏 -->
+              <div class="inner-card" id="transition-block" hidden>
+                <div class="card-subtitle">地物转移矩阵<span class="readonly-badge">A3 · 4 类</span></div>
+                <div class="metric-row" id="transition-metrics"></div>
+                <div class="patch-table-wrap"><table class="tbl tbl-matrix" id="transition-table"></table></div>
+                <div class="empirical-note">经验阈值，非物候标定</div>
               </div>
             </div>
             </div><!-- /#view-thematic -->

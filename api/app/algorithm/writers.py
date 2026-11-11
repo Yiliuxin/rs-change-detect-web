@@ -27,11 +27,20 @@ from app.config.constants import (
     ATTRIBUTION_S2_MODIFIED,
     ERROR_MESSAGES,
     EXPORT_FORMATS,
+    INDEX_RASTER_BAND1,
+    INDEX_RASTER_BAND2,
+    INDEX_RASTER_BANDS,
+    INDEX_RASTER_COMPRESS,
+    INDEX_RASTER_DTYPE,
+    INDEX_RASTER_NODATA,
     INTENSITY_CODES,
     INTENSITY_K,
     INTENSITY_LABELS_EN,
     INTENSITY_NOTE,
     INTENSITY_NOTE_EN,
+    LANDCOVER_LABELS_EN,
+    LANDCOVER_NOTE,
+    LANDCOVER_NOTE_EN,
     PATCH_PDF_TOP_N,
     VALID_RATIO_MIN,
     VALID_RATIO_WARN,
@@ -44,7 +53,7 @@ __all__ = [
     "ExportFormatError", "validate_export_formats", "valid_ratio_notice",
     "render_area_chart", "render_index_histogram", "render_intensity_chart",
     "attribution_lines", "write_geotiff", "write_geojson", "write_png",
-    "write_pdf", "export_triplet",
+    "write_pdf", "export_triplet", "write_index_raster",
 ]
 
 
@@ -114,6 +123,41 @@ def write_geotiff(change, profile: dict, output_path,
     path.parent.mkdir(parents=True, exist_ok=True)
     with rasterio.open(str(path), "w", **out_profile) as dst:
         dst.write(arr, 1)
+    return str(path.resolve())
+
+
+def write_index_raster(primary, auxiliary, profile: dict, output_path) -> str:
+    """B2 探针前置：双波段 float32 GeoTIFF（nodata=NaN，deflate）。
+
+    band 1 = 主检测指数（NDVI 或 NDWI，与本轮 ``index`` 一致）；
+    band 2 = 辅助指数（另一指数），供 A3 地物联合判据在只读 1 个像元时
+    同时取得 NDVI 与 NDWI。无效像元恒为 NaN，与现有掩膜/定标口径一致。
+    """
+    p = np.asarray(primary, dtype=INDEX_RASTER_DTYPE)
+    a = np.asarray(auxiliary, dtype=INDEX_RASTER_DTYPE)
+    if p.ndim != 2 or a.shape != p.shape:
+        raise ValueError(f"双时相指数栅格需同形二维数组：{p.shape} / {a.shape}")
+    src = dict(profile or {})
+    out_profile = {
+        "driver": "GTiff",
+        "dtype": INDEX_RASTER_DTYPE,
+        "count": int(INDEX_RASTER_BANDS),
+        "width": int(p.shape[1]),
+        "height": int(p.shape[0]),
+        "crs": src.get("crs"),
+        "transform": src.get("transform"),
+        "nodata": INDEX_RASTER_NODATA,
+        "compress": INDEX_RASTER_COMPRESS,
+    }
+    if out_profile["transform"] is None:
+        raise ValueError("profile 缺少 transform，无法写出带地理参考的指数栅格")
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with rasterio.open(str(path), "w", **out_profile) as dst:
+        dst.write(p, 1)
+        dst.write(a, 2)
+        dst.set_band_description(1, INDEX_RASTER_BAND1)
+        dst.set_band_description(2, INDEX_RASTER_BAND2)
     return str(path.resolve())
 
 
@@ -643,6 +687,55 @@ def write_pdf(report: dict, output_path, font_path: str = DEFAULT_FONT_PATH) -> 
                 top_table.drawOn(pdf, left, y - top_h)
                 y -= top_h + 16
 
+    # —— A3 地物转移矩阵（4×4 表 + 经验阈值说明行）——
+    trans = report.get("transition_matrix")
+    transition_table_used = False
+    if isinstance(trans, dict) and trans.get("pixel_matrix"):
+        transition_table_used = True
+        _ensure(210)
+        _line(L("地物转移矩阵 / LANDCOVER TRANSITION MATRIX",
+                "LANDCOVER TRANSITION MATRIX"), size=10, gap=16)
+        labels_en = trans.get("labels_en") or LANDCOVER_LABELS_EN
+        codes = [int(c) for c in (trans.get("codes") or [1, 2, 3, 4])]
+        short = lambda c: str(labels_en.get(str(c), c)).split("/")[0][:6]
+        matrix = trans["pixel_matrix"]
+        tr_rows = [[L("t1 / t2", "t1 / t2")] + [short(c) for c in codes]]
+        for i, c in enumerate(codes):
+            row = (matrix[i] if i < len(matrix) else [0] * len(codes))
+            tr_rows.append([short(c)] + [str(int(x)) for x in row])
+        tr_table = Table(tr_rows, colWidths=[96, 82, 82, 82, 82])
+        tr_table.setStyle(TableStyle([
+            ("FONTNAME", (0, 0), (-1, -1), font_name),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#DCE6F1")),
+            ("BACKGROUND", (1, 1), (1, 1), colors.HexColor("#E9F3E9")),
+            ("BACKGROUND", (2, 2), (2, 2), colors.HexColor("#E9F3E9")),
+            ("BACKGROUND", (3, 3), (3, 3), colors.HexColor("#E9F3E9")),
+            ("BACKGROUND", (4, 4), (4, 4), colors.HexColor("#E9F3E9")),
+            ("ALIGN", (1, 0), (-1, -1), "CENTER"),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ]))
+        _, tr_h = tr_table.wrap(page_w - 2 * left, page_h)
+        tr_table.drawOn(pdf, left, y - tr_h)
+        y -= tr_h + 12
+        _ascii_line("TRANSITION MATRIX " + " ".join(
+            "ROW" + str(i + 1) + ":" + ",".join(str(int(x)) for x in
+                                                (matrix[i] if i < len(matrix)
+                                                 else [0] * len(codes)))
+            for i in range(len(codes))), gap=14)
+        _ascii_line(
+            f"UNCHANGED RATIO={float(trans.get('unchanged_ratio', 0.0)):.6f} "
+            f"VALID={int(trans.get('valid_count', 0))} "
+            f"ROW_TOTALS={','.join(str(int(x)) for x in (trans.get('row_totals') or []))} "
+            f"COL_TOTALS={','.join(str(int(x)) for x in (trans.get('col_totals') or []))}",
+            gap=14)
+        # 硬约束 4：经验阈值在 PDF 逐字标注（中文行 + 可检索 ASCII 行）
+        _line(L(LANDCOVER_NOTE, LANDCOVER_NOTE_EN), size=9, gap=14,
+              color=(150, 30, 30))
+        _ascii_line(LANDCOVER_NOTE_EN, gap=14)
+
     # —— 独立数据署名页（REQ-15 / NF6 / NF7）：逐字复用常量源文案 ——
     _new_page()
     _line(L("数据署名 / DATA ATTRIBUTION", "DATA ATTRIBUTION"), size=15, gap=26)
@@ -684,6 +777,7 @@ def write_pdf(report: dict, output_path, font_path: str = DEFAULT_FONT_PATH) -> 
         "intensity_chart": intensity_chart_path,
         "intensity_table": intensity_table_used,
         "patch_table": patch_table_used,
+        "transition_table": transition_table_used,
     }
 
 

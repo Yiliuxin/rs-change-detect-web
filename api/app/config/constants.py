@@ -271,6 +271,44 @@ PATCH_TOP_N: Final[int] = 10
 PATCH_PDF_TOP_N: Final[int] = 5
 
 # ---------------------------------------------------------------------------
+# A3 地物转移矩阵：NDVI / NDWI 联合判据（顺序判断，先命中先归类）
+# ---------------------------------------------------------------------------
+# 编码 0 无效 / 1 水体 / 2 植被 / 3 裸土·建成 / 4 其他
+LANDCOVER_NODATA: Final[int] = 0
+LANDCOVER_CODES: Final[Tuple[int, ...]] = (1, 2, 3, 4)
+LANDCOVER_LABELS_ZH: Final[Dict[int, str]] = {
+    0: "无效", 1: "水体", 2: "植被", 3: "裸土/建成", 4: "其他",
+}
+LANDCOVER_LABELS_EN: Final[Dict[int, str]] = {
+    0: "NODATA", 1: "WATER", 2: "VEGETATION", 3: "BARE/BUILT", 4: "OTHER",
+}
+# 顺序：NDWI > 0 → 水体；否则 NDVI ≥ 0.30 → 植被；
+#       否则 NDVI < 0.15 → 裸土/建成；否则其他；任一指数无效 → 0。
+NDWI_WATER_GT: Final[float] = 0.0
+NDVI_VEGETATION_GE: Final[float] = 0.30
+NDVI_BARE_LT: Final[float] = 0.15
+TRANSITION_TOP_N: Final[int] = 5
+# 硬约束 4：经验阈值在 PDF 与界面逐字标注（与 A1 同一措辞）
+LANDCOVER_NOTE: Final[str] = INTENSITY_NOTE
+LANDCOVER_NOTE_EN: Final[str] = INTENSITY_NOTE_EN
+
+# ---------------------------------------------------------------------------
+# B2 鼠标拾取探针：双时相指数栅格（探针前置产物，float32 / NaN / deflate）
+# ---------------------------------------------------------------------------
+INDEX_RASTER_T1: Final[str] = "index_t1.tif"
+INDEX_RASTER_T2: Final[str] = "index_t2.tif"
+# 2 波段：band1 = 主检测指数（NDVI 或 NDWI），band2 = 辅助指数（另一指数），
+# 供 landcover 联合判据在只读 1 个像元的前提下同时取得 NDVI 与 NDWI。
+INDEX_RASTER_BANDS: Final[int] = 2
+INDEX_RASTER_DTYPE: Final[str] = "float32"
+INDEX_RASTER_NODATA: Final[float] = float("nan")
+INDEX_RASTER_COMPRESS: Final[str] = "deflate"
+INDEX_RASTER_BAND1: Final[str] = "primary_index"
+INDEX_RASTER_BAND2: Final[str] = "auxiliary_index"
+# 探针 HUD 节流（毫秒），单独登记避免算法/界面两处写死
+PROBE_THROTTLE_MS: Final[int] = 180
+
+# ---------------------------------------------------------------------------
 # 错误码（第 5 章 EX*/SYS-*）中文提示，供路由统一封装 {code, message, run_id}
 # ---------------------------------------------------------------------------
 # 来源：HLD 第 5 章出错处理设计

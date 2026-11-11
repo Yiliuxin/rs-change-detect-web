@@ -14,6 +14,7 @@ import * as M from './map.js';
 import * as C from './charts.js';
 import * as HIST from './history.js';
 import { ONLINE_PLACES } from './places.js';
+import { initProbe } from './probe.js';
 
 // 认证扩展：全站必须登录——无票据直接回登录页
 if (!localStorage.getItem('rst_token')) location.replace('/login.html');
@@ -758,6 +759,7 @@ const BG = {
   pollBusy: false,
   pollFails: 0,
   startedAt: 0,
+  maxWidth: 0, // B3：真实进度条单调递增，轮询抖动不清零 / 不回退
 };
 
 function syncBgModeUi() {
@@ -780,7 +782,9 @@ function endBgRun() {
 }
 
 // 状态徽标 + 步数进度条 + 5 阶段文案（复用在线取数卡的进度组件实现）
-function renderBgProgress(status, stage, step, total) {
+// B3：宽度 = (step-1 + 阶段内 pct) / total；detail={done,total} 由后端阶段内
+// 回报给出，5 阶段点保持不变。轮询抖动按 maxWidth 单调递增，绝不清零。
+function renderBgProgress(status, stage, step, total, detail) {
   const box = $('run-async-progress');
   const st = String(status || 'PENDING').toUpperCase();
   const t = Number(total) || BG_TOTAL;
@@ -790,8 +794,19 @@ function renderBgProgress(status, stage, step, total) {
   badge.textContent = st;
   badge.className = 'onl-status-badge st-' + st;
 
-  $('run-async-step').textContent = '阶段 ' + s + '/' + t;
-  $('run-async-bar-fill').style.width = Math.round(s / t * 100) + '%';
+  let pct = s >= t ? 1 : (s > 0 ? 1 : 0);
+  if (detail && Number(detail.total) > 0) {
+    pct = Math.max(0, Math.min(1, Number(detail.done) / Number(detail.total)));
+  }
+  let width = Math.max(0, Math.min(100,
+    Math.round(((s - 1 + pct) / t) * 100)));
+  if (st !== 'FAILED') {
+    BG.maxWidth = Math.max(BG.maxWidth || 0, width);
+    width = BG.maxWidth;
+  }
+  $('run-async-step').textContent = '阶段 ' + s + '/' + t
+    + ' · 阶段内 ' + Math.round(pct * 100) + '%';
+  $('run-async-bar-fill').style.width = width + '%';
   const bar = box.querySelector('.onl-bar');
   bar.classList.toggle('done', st === 'SUCCESS');
   bar.classList.toggle('failed', st === 'FAILED');
@@ -819,12 +834,13 @@ function renderBgProgress(status, stage, step, total) {
     line.textContent = (zh ? '终止于阶段：' + zh : '后台任务已终止')
       + (doneNames ? ' · 已完成：' + doneNames : '');
   } else if (zh) {
-    line.textContent = '当前阶段：' + zh + '（' + s + '/' + t + '）'
+    line.textContent = '当前阶段：' + zh + '（' + s + '/' + t + ' · 阶段内 '
+      + Math.round(pct * 100) + '%）'
       + (doneNames ? ' · 已完成：' + doneNames : '');
   } else {
     line.textContent = '等待后台任务受理…';
   }
-  return { st, s, t };
+  return { st, s, t, pct, width };
 }
 
 function bgShowFailure(detail) {
@@ -842,7 +858,8 @@ function bgTerminal(status, data) {
   const elapsed = BG.startedAt ? ((Date.now() - BG.startedAt) / 1000).toFixed(1) : '0.0';
   const pg = (data && data.progress) || {};
   if (status === 'SUCCESS') {
-    renderBgProgress('SUCCESS', BG_STAGES[BG_TOTAL - 1], BG_TOTAL, pg.total || BG_TOTAL);
+    renderBgProgress('SUCCESS', BG_STAGES[BG_TOTAL - 1], BG_TOTAL,
+      pg.total || BG_TOTAL, pg.detail);
     const result = data && data.result;
     if (result && result.run_id) {
       setDataBadge(false, '');
@@ -856,7 +873,7 @@ function bgTerminal(status, data) {
       bgShowFailure('后台任务成功但未返回结果数据（result 为空）');
     }
   } else {
-    renderBgProgress('FAILED', pg.stage, pg.step, pg.total);
+    renderBgProgress('FAILED', pg.stage, pg.step, pg.total, pg.detail);
     const err = (data && data.error) || {};
     // 复用在线取数卡同款按 code 取中文的实现（errors.js ERROR_MESSAGES，既有映射不动）
     const text = onlineErrText({ code: err.code, message: err.message });
@@ -881,9 +898,9 @@ async function bgPollTick() {
       const d = res.data || {};
       const st = String(d.status || '').toUpperCase();
       const pg = d.progress || {};
-      renderBgProgress(st || 'PENDING', pg.stage, pg.step, pg.total);
+      const r = renderBgProgress(st || 'PENDING', pg.stage, pg.step, pg.total, pg.detail);
       $('btn-run-change').textContent = '后台运行中… 阶段 '
-        + (Number(pg.step) || 0) + '/' + (Number(pg.total) || BG_TOTAL);
+        + r.s + '/' + r.t + ' · ' + Math.round(r.pct * 100) + '%';
       if (st === 'SUCCESS' || st === 'FAILED') bgTerminal(st, d);
     } else if (res.transient) {
       // 单次 GET 抖动（网络 / 5xx / 超时）：跳过本次，2s 后继续，绝不中断长检测
@@ -908,6 +925,7 @@ function startBgPolling(taskId, initialStatus) {
   BG.taskId = taskId;
   BG.pollFails = 0;
   BG.pollBusy = false;
+  BG.maxWidth = 0; // B3：新任务从 0 起，单调递增
   BG.startedAt = Date.now();
   const box = $('run-async-progress');
   box.hidden = false;
@@ -983,6 +1001,7 @@ function renderChangeResult() {
   C.renderPie($('chart-pie'), stats);
   C.renderBar($('chart-bar'), stats);
   renderIntensityAndPatches();
+  renderTransition();
 }
 
 // ===== A1 五档强度表 / A2 图斑统计（无数据整块隐藏；历史 run 从 params_snapshot 取） =====
@@ -1060,6 +1079,41 @@ function renderIntensityAndPatches() {
   }
   thtml += '</tbody>';
   topTable.innerHTML = thtml;
+}
+
+// ===== A3 地物转移矩阵：4×4 表（对角浅底）+ 未变占比；无数据整块隐藏 =====
+function renderTransition() {
+  const d = S.change || {};
+  const snap = d.params_snapshot || {};
+  const tr = d.transition_matrix || snap.transition_matrix || null;
+  const block = $('transition-block');
+  if (!block) return;
+  const ok = !!(tr && Array.isArray(tr.pixel_matrix) && tr.pixel_matrix.length === 4);
+  block.hidden = !ok;
+  if (!ok) return;
+  const codes = (Array.isArray(tr.codes) ? tr.codes : [1, 2, 3, 4]).map(Number);
+  const labels = tr.labels || {};
+  // 窄卡片里用短标签（「裸土/建成」→「裸土」），完整类别名仍来自后端 labels
+  const shortLabel = (c) => String(labels[String(c)] || c).split('/')[0];
+  const metrics = [
+    ['对角未变占比', (Number(tr.unchanged_ratio || 0) * 100).toFixed(2) + '%'],
+    ['有效像元数', Number(tr.valid_count || 0).toLocaleString()],
+    ['未变像元数', Number(tr.unchanged_count || 0).toLocaleString()],
+  ];
+  $('transition-metrics').innerHTML = metrics.map(([k, v]) =>
+    `<div class="metric"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join('');
+  let html = '<thead><tr><th>t1 \\ t2</th>'
+    + codes.map((c) => `<th>${esc(shortLabel(c))}</th>`).join('')
+    + '</tr></thead><tbody>';
+  for (let i = 0; i < codes.length; i += 1) {
+    const row = Array.isArray(tr.pixel_matrix[i]) ? tr.pixel_matrix[i] : [];
+    html += `<tr><td>${esc(shortLabel(codes[i]))}</td>`
+      + codes.map((_, j) => `<td class="${i === j ? 'cell-diag' : ''}">`
+        + esc(Number(row[j] || 0).toLocaleString()) + '</td>').join('')
+      + '</tr>';
+  }
+  html += '</tbody>';
+  $('transition-table').innerHTML = html;
 }
 
 function renderValidRatio() {
@@ -1505,6 +1559,7 @@ function loadHistoryRun(d) {
     index: d.index || snap.index,
     intensity: snap.intensity || null,
     patch_stats: snap.patch_stats || null,
+    transition_matrix: snap.transition_matrix || null,
   };
   S.changePngUrl = png;
   const b = (Array.isArray(d.bbox) && d.bbox.length === 4) ? boundsFromArray(d.bbox) : S.aoi;
@@ -2320,6 +2375,8 @@ function init() {
     updatePlaceMarkers(); // 地名标注：内置地名库 + 预置影像区中心点（预置未加载时先标内置项）
   });
   bindMapEvents();
+  // B2：探针只读 HUD（节流 180ms + 取消旧请求），失败显示 — 且不打断打点模式
+  initProbe({ map, getRunId: currentRunId });
 
   updateCounts();
   renderSnapshot();
