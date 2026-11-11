@@ -133,9 +133,17 @@ py -3.12 -m pytest -q     # 全量测试
 
 ## 协作约定
 
-- 一人一条分支：`ylx`（易刘欣）/ `lyj`（搭档），各自在自己的分支上开发
-- 同步节奏：每完成一个功能，把对方分支 merge 进自己分支（`git checkout 自己的分支 && git merge 对方分支`），解决冲突后 push
-- `push` 前先 `git pull --rebase`；提交前必须通过：`cd api && py -3.12 -m pytest -q` 全绿 + `cd web && npm run build` 构建成功
+- 分支结构：`main`（主线，始终为可演示的稳定版本）/ `ylx`（易刘欣开发）/ `lyj`（搭档开发）
+- 日常在自己的分支上开发；**每完成一个功能，先合并进 `main`，再把 `main` 拉回自己分支**：
+  ```bash
+  git checkout 自己的分支
+  # ...开发、commit...
+  git checkout main && git merge 自己的分支    # 功能进主线
+  git push origin main
+  git checkout 自己的分支 && git merge main    # 同步主线最新
+  ```
+- 合并进 `main` 前必须通过：`cd api && py -3.12 -m pytest -q` 全绿 + `cd web && npm run build` 构建成功
+- `push` 前先 `git pull --rebase`
 - 阈值、档位、类别等常量一律进 `api/app/config/constants.py`，禁止在算法代码里写死数值
 - 大改动先在群里说一声再动手，避免两人改同一文件
 
