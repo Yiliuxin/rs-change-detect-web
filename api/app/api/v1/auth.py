@@ -46,7 +46,7 @@ class AuthResponse(BaseModel):
 @router.post(
     "/register",
     response_model=AuthResponse,
-    summary="注册新用户（首个注册者自动认领历史遗留 run）",
+    summary="注册新用户（纯新账号，不关联任何既有 run）",
 )
 def register_user(payload: RegisterRequest) -> AuthResponse:
     out = auth_service.register(payload.username, payload.password, payload.display_name)

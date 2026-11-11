@@ -338,7 +338,7 @@ function centerOf(b) {
   return [(Number(b[0]) + Number(b[2])) / 2, (Number(b[1]) + Number(b[3])) / 2];
 }
 
-// 认证扩展：顶栏用户芯片 + 退出；首个注册者认领历史 run 时给一次性提示
+// 认证扩展：顶栏用户芯片 + 退出
 function initAuthUi() {
   const chip = $('user-chip'), name = $('user-name'), logout = $('btn-logout');
   if (!chip || !logout) return;
@@ -353,11 +353,6 @@ function initAuthUi() {
     localStorage.removeItem('rst_username');
     location.replace('/login.html');
   };
-  const claimed = sessionStorage.getItem('rst_claimed_runs');
-  if (claimed) {
-    sessionStorage.removeItem('rst_claimed_runs');
-    showToast('你注册的是首个账号，已接管平台既有 ' + claimed + ' 条历史运行', 'ok');
-  }
 }
 
 // 地名标注层：内置地名库 + 预置影像区中心点；预置列表变化时重画。

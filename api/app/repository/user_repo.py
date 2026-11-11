@@ -11,8 +11,7 @@ from typing import Optional
 
 from app.repository.db import db_cursor
 
-__all__ = ["insert_user", "get_user", "get_user_by_username", "count_users",
-           "claim_orphan_tasks"]
+__all__ = ["insert_user", "get_user", "get_user_by_username"]
 
 
 def insert_user(user_id: str, username: str, password_hash: str,
@@ -58,23 +57,3 @@ def get_user_by_username(username: str) -> Optional[dict]:
         )
         row = cur.fetchone()
         return dict(row) if row else None
-
-
-def count_users() -> int:
-    """当前用户总数（首个注册者判定用）。"""
-    with db_cursor() as cur:
-        cur.execute("SELECT COUNT(*) AS n FROM users")
-        return int(cur.fetchone()["n"])
-
-
-def claim_orphan_tasks(user_id: str) -> int:
-    """把历史遗留（user_id IS NULL）的 task 归到首个注册用户名下，返回条数。"""
-    with db_cursor() as cur:
-        cur.execute(
-            """
-            UPDATE task SET user_id = %s
-            WHERE user_id IS NULL
-            """,
-            (user_id,),
-        )
-        return cur.rowcount

@@ -35,7 +35,7 @@ def _register(client, username, password="pw123456"):
 
 def _cleanup_user(username):
     """测试后清理：解除该用户的 run 归属（还原 NULL），删除用户本身。
-    绝不删除 task——测试用户可能临时认领过真实历史 run。"""
+    绝不删除 task——测试用户可能被临时归属过真实历史 run。"""
     from app.repository.db import db_cursor
     with db_cursor() as cur:
         cur.execute("UPDATE task SET user_id = NULL WHERE user_id IN "
@@ -57,12 +57,12 @@ def test_register_login_me(client, auth_on):
                        headers={"Authorization": f"Bearer {token}"})
         assert r.status_code == 200 and r.json()["username"] == username
 
-        # /runs 带 token → 200（首个注册者可能认领历史遗留 run，仅验证可达性）
+        # /runs 带 token → 200（新注册账号是纯新号，仅验证可达性）
         r = client.get("/api/v1/runs",
                        headers={"Authorization": f"Bearer {token}"})
         assert r.status_code == 200 and isinstance(r.json()["total"], int)
 
-        # 第二个注册者：不认领任何 run → total == 0（数据按人隔离）
+        # 第二个注册者：纯新号无任何 run → total == 0（数据按人隔离）
         username2 = "pytest_auth_" + uuid.uuid4().hex[:8]
         try:
             r2 = _register(client, username2)
@@ -119,9 +119,8 @@ def test_run_isolation_between_users(client, auth_on, change_ready):
         ra = _register(client, a)
         rb = _register(client, b)
         assert ra.status_code == 200 and rb.status_code == 200
-        # 显式把本用例的 run 归属给 a：注册时「首个用户认领历史遗留 run」依赖
-        # 全库 users 为空，而演示库可能存在常驻账号，故与全局 DB 状态解耦；
-        # teardown 仍把 user_id 还原为 NULL，隔离断言语义完全不变。
+        # 显式把本用例的 run 归属给 a：与全局 DB 状态解耦（演示库可能存在常驻
+        # 账号或历史遗留数据）；teardown 仍把 user_id 还原为 NULL，隔离断言语义不变。
         from app.repository.db import db_cursor
         with db_cursor() as cur:
             cur.execute("UPDATE task SET user_id = %s WHERE run_id::text = %s",

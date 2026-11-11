@@ -4,8 +4,7 @@
 安全口径：
   - 口令 PBKDF2-HMAC-SHA256 / 120_000 轮 / 16B 随机盐，存 ``pbkdf2_sha256$iter$salt$hash``；
   - JWT HS256，12h 过期，claims 仅 sub/username/exp（无敏感字段）；
-  - 密钥取环境变量 ``AUTH_JWT_SECRET``，缺省用开发密钥并告警（生产必须显式配置）；
-  - 首个注册用户自动认领全部历史遗留 task（user_id IS NULL）。
+  - 密钥取环境变量 ``AUTH_JWT_SECRET``，缺省用开发密钥并告警（生产必须显式配置）。
 """
 from __future__ import annotations
 
@@ -112,7 +111,7 @@ def decode_token(token: str) -> dict:
 # --------------------------------------------------------------------------- #
 def register(username: str, password: str,
              display_name: Optional[str] = None) -> dict:
-    """注册新用户；首个注册者自动认领历史遗留 run。返回用户信息 + token。"""
+    """注册新用户，得到一个纯新账号（不关联任何既有 run）。返回用户信息 + token。"""
     if not username or not _USERNAME_RE.match(username):
         raise ApiError("AUTH-05", http_status=400,
                        detail="用户名需为 3–20 位字母/数字/下划线")
@@ -122,19 +121,14 @@ def register(username: str, password: str,
     if user_repo.get_user_by_username(username):
         raise ApiError("AUTH-04", http_status=409, detail=f"用户名已存在：{username}")
 
-    # 仅首个注册用户认领历史遗留 run（后续注册者不碰既有数据归属）
-    is_first_user = user_repo.count_users() == 0
     user = user_repo.insert_user(str(uuid.uuid4()), username,
                                  hash_password(password),
                                  (display_name or "").strip()[:64] or None)
-    claimed = user_repo.claim_orphan_tasks(user["user_id"]) if is_first_user else 0
-    if claimed:
-        logger.info("首个注册用户 %s 认领历史遗留 run：%d 条", username, claimed)
     return {
         "user_id": user["user_id"],
         "username": user["username"],
         "display_name": user["display_name"],
-        "claimed_runs": claimed,
+        "claimed_runs": 0,
         "token": _make_token(user["user_id"], user["username"]),
     }
 

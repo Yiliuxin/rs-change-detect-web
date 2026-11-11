@@ -40,9 +40,6 @@ async function submitAuth(path, body, errId, btnId, btnText) {
     }
     localStorage.setItem('rst_token', j.token);
     localStorage.setItem('rst_username', j.display_name || j.username);
-    if (j.claimed_runs > 0) {
-      sessionStorage.setItem('rst_claimed_runs', String(j.claimed_runs));
-    }
     location.replace('/');
   } catch (_) {
     showErr(errId, '网络异常或后端不可达，请确认后端已启动');
