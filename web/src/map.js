@@ -45,6 +45,75 @@ function frameGeoJSON() {
   };
 }
 
+// ===== B1 图层控制：t1 / t2 / change 三层（添加顺序 t1→t2→change，专题图在最上） =====
+// 保持历史 source/layer id（change-img / change-img-layer）不变，setImage 仍是薄封装。
+const IMAGE_LAYERS = {
+  t1: { source: 't1-img', layer: 't1-img-layer', opacity: 1.0 },
+  t2: { source: 't2-img', layer: 't2-img-layer', opacity: 1.0 },
+  change: { source: 'change-img', layer: 'change-img-layer', opacity: 0.85 },
+};
+const LAYER_ORDER = ['t1', 't2', 'change'];
+const _layerState = new WeakMap();
+
+function stateFor(map) {
+  let s = _layerState.get(map);
+  if (!s) {
+    s = {
+      visible: { t1: true, t2: true, change: true },
+      opacity: { t1: 1.0, t2: 1.0, change: 0.85 },
+      bounds: null,
+      pending: { t1: null, t2: null, change: null },
+    };
+    _layerState.set(map, s);
+  }
+  return s;
+}
+
+function imageCoordinates(b) {
+  return [[b.w, b.n], [b.e, b.n], [b.e, b.s], [b.w, b.s]];
+}
+
+// 无论三层首次设置的先后，都插到「第一个已存在的更上层」之前；
+// 都不存在时压在 AOI 线 / 样本点之下 → 最终顺序恒为 t1 → t2 → change。
+function addLayerOrdered(map, key) {
+  const def = IMAGE_LAYERS[key];
+  if (!def || map.getLayer(def.layer)) return;
+  const later = LAYER_ORDER.slice(LAYER_ORDER.indexOf(key) + 1)
+    .map((k) => IMAGE_LAYERS[k].layer)
+    .find((id) => map.getLayer(id));
+  const before = later || (map.getLayer('aoi-fill') ? 'aoi-fill' : undefined);
+  const s = stateFor(map);
+  const layer = {
+    id: def.layer, type: 'raster', source: def.source,
+    layout: { visibility: s.visible[key] ? 'visible' : 'none' },
+    paint: { 'raster-opacity': s.opacity[key], 'raster-fade-duration': 0 },
+  };
+  if (before) map.addLayer(layer, before);
+  else map.addLayer(layer);
+}
+
+// 图源首次直接用真实 URL 建立：避免占位图请求被 updateImage 中止而抛 AbortError。
+// 已有图源时等上一张图加载完成再更新，同样避免中止在途请求。
+function applyLayerImage(map, key, url, b) {
+  const s = stateFor(map);
+  const def = IMAGE_LAYERS[key];
+  const src = map.getSource(def.source);
+  if (!src) {
+    map.addSource(def.source, { type: 'image', url, coordinates: imageCoordinates(b) });
+  } else {
+    const loaded = (typeof src.loaded === 'function') ? src.loaded() : true;
+    if (!loaded) return false;
+    if (src.url !== url && typeof src.updateImage === 'function') {
+      src.updateImage({ url, coordinates: imageCoordinates(b) });
+    }
+  }
+  addLayerOrdered(map, key);
+  s.pending[key] = null;
+  setLayerVisible(map, key, s.visible[key]);
+  setLayerOpacity(map, key, s.opacity[key]);
+  return true;
+}
+
 function initLayers(map) {
   // 经纬网 + 范围边框
   map.addSource('graticule', { type: 'geojson', data: graticuleGeoJSON() });
@@ -85,6 +154,7 @@ function initLayers(map) {
       'circle-opacity': 0.95,
     },
   });
+  // B1：三层图片源在首次 setLayerImage 时按序懒创建（专题图恒在最上）
 }
 
 export function createMap(containerId, center, zoom) {
@@ -113,31 +183,83 @@ export function setAoi(map, b) {
   });
 }
 
-// 专题图 image source：coordinates = [左上, 右上, 右下, 左下]
-export function setImage(map, url, b) {
-  if (!url || !b) return;
-  const coordinates = [[b.w, b.n], [b.e, b.n], [b.e, b.s], [b.w, b.s]];
-  const src = map.getSource('change-img');
-  if (src && typeof src.updateImage === 'function') {
-    src.updateImage({ url, coordinates });
-    return;
-  }
-  if (!src) {
-    map.addSource('change-img', { type: 'image', url, coordinates });
-    const layer = {
-      id: 'change-img-layer', type: 'raster', source: 'change-img',
-      paint: { 'raster-opacity': 0.85, 'raster-fade-duration': 0 },
-    };
-    const before = map.getLayer('aoi-fill') ? 'aoi-fill' : undefined;
-    if (before) map.addLayer(layer, before);
-    else map.addLayer(layer);
+// 设置某一层的图片源（t1 / t2 / change）；b = {w,s,e,n} WGS84 外接矩形
+export function setLayerImage(map, key, url, b) {
+  if (!IMAGE_LAYERS[key] || !url || !b) return;
+  const s = stateFor(map);
+  s.bounds = b;
+  s.pending[key] = { url, b };
+  const run = () => {
+    const pending = s.pending[key];
+    if (!pending) return true;
+    try {
+      return applyLayerImage(map, key, pending.url, pending.b);
+    } catch (_) {
+      return false;
+    }
+  };
+  if (run()) return;
+  // style 未就绪 / 上一张图仍在加载：有限次重试，不残留事件监听
+  let tries = 0;
+  const retry = () => {
+    if (!s.pending[key]) return;
+    if (run()) return;
+    tries += 1;
+    if (tries < 20) setTimeout(retry, 250);
+  };
+  setTimeout(retry, 150);
+}
+
+export function setLayerVisible(map, key, visible) {
+  if (!IMAGE_LAYERS[key]) return;
+  const s = stateFor(map);
+  s.visible[key] = !!visible;
+  const def = IMAGE_LAYERS[key];
+  if (map.getLayer(def.layer)) {
+    map.setLayoutProperty(def.layer, 'visibility', s.visible[key] ? 'visible' : 'none');
   }
 }
 
-export function setImageOpacity(map, o) {
-  if (map.getLayer('change-img-layer')) {
-    map.setPaintProperty('change-img-layer', 'raster-opacity', o);
+export function setLayerOpacity(map, key, o) {
+  if (!IMAGE_LAYERS[key]) return;
+  const s = stateFor(map);
+  const v = Number(o);
+  if (Number.isFinite(v)) s.opacity[key] = Math.max(0, Math.min(1, v));
+  const def = IMAGE_LAYERS[key];
+  if (map.getLayer(def.layer)) {
+    map.setPaintProperty(def.layer, 'raster-opacity', s.opacity[key]);
   }
+}
+
+// 历史回看薄封装：语义与旧版完全一致（只作用于专题图 change 层）
+export function setImage(map, url, b) {
+  setLayerImage(map, 'change', url, b);
+}
+
+export function setImageOpacity(map, o) {
+  setLayerOpacity(map, 'change', o);
+}
+
+// ===== 地名标注：纯 DOM Marker（离线空白底图无 glyphs 字体端点，symbol 文本层不可用） =====
+// 数据来自前端内置地名库与后端预置影像区中心点，零网络请求；元素 pointer-events:none，
+// 不拦截地图拖拽 / AOI 框选。kind='preset' 为预置影像区（蓝色强调），其余为通用地名。
+const _placeMarkers = [];
+export function setPlaceMarkers(map, places) {
+  _placeMarkers.splice(0).forEach((m) => m.remove());
+  (places || []).forEach((p) => {
+    if (!p || !Array.isArray(p.center) || !Number.isFinite(p.center[0]) || !Number.isFinite(p.center[1])) return;
+    if (!p.name) return;
+    const el = document.createElement('div');
+    el.className = 'place-marker' + (p.kind === 'preset' ? ' place-marker-preset' : '');
+    const dot = document.createElement('span');
+    dot.className = 'place-dot';
+    const label = document.createElement('span');
+    label.className = 'place-label';
+    label.textContent = p.name; // textContent 防注入，不用 innerHTML
+    el.appendChild(dot);
+    el.appendChild(label);
+    _placeMarkers.push(new maplibregl.Marker({ element: el, anchor: 'left' }).setLngLat(p.center).addTo(map));
+  });
 }
 
 export function setSamples(map, list) {

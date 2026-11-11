@@ -30,6 +30,8 @@ ARTIFACT_MEDIA_TYPES: Dict[str, str] = {
     "change.tif": "image/tiff",
     "change.png": "image/png",
     "report.pdf": "application/pdf",
+    # REQ-12 扩展（A+B+C）：GeoJSON 变化图斑（WGS84 矢量，仅增强/退化类）
+    "change.geojson": "application/geo+json",
     "t1_composite.png": "image/png",
     "t2_composite.png": "image/png",
     # REQ-12：三类面积柱状图（PDF 内嵌 + 独立产物，供前端复用）

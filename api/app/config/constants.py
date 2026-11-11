@@ -232,6 +232,45 @@ RESULT_BUCKET: Final[str] = "results"
 REPORT_DIR: Final[str] = "./output/{run_id}/"
 
 # ---------------------------------------------------------------------------
+# A1 变化强度分级（在三类阈值 T 之上按 |Δ| / T 的倍数细分五档）
+# ---------------------------------------------------------------------------
+# 显著/轻微分界倍数 K：|Δ| ≥ K·T 记「显著」，T < |Δ| < K·T 记「轻微」。
+# 取值 2.0 为经验常量，非物候标定；算法模块只引用、不就地写死。
+INTENSITY_K: Final[float] = 2.0
+# 档位编码：0 无效 / 1 显著退化 / 2 轻微退化 / 3 稳定 / 4 轻微改善 / 5 显著改善。
+# 4+5 对应三类「1 增强」，1+2 对应「2 退化」，3 对应「3 稳定」；三类编码仍由
+# app.algorithm.change_detector 唯一定义，本处只登记五档自身编码与文案。
+INTENSITY_NODATA: Final[int] = 0
+INTENSITY_CODES: Final[Tuple[int, ...]] = (1, 2, 3, 4, 5)
+INTENSITY_LABELS_ZH: Final[Dict[int, str]] = {
+    0: "无效", 1: "显著退化", 2: "轻微退化", 3: "稳定",
+    4: "轻微改善", 5: "显著改善",
+}
+# PDF 图内标签用 ASCII（规避 CJK 字体缺字告警与字形编码不可检索）
+INTENSITY_LABELS_EN: Final[Dict[int, str]] = {
+    0: "NODATA", 1: "STRONG_DEGRADE", 2: "MILD_DEGRADE", 3: "STABLE",
+    4: "MILD_IMPROVE", 5: "STRONG_IMPROVE",
+}
+# 硬约束 4：经验阈值在 PDF 与界面逐字标注
+INTENSITY_NOTE: Final[str] = "经验阈值，非物候标定"
+INTENSITY_NOTE_EN: Final[str] = "EMPIRICAL THRESHOLDS, NOT PHENOLOGY-CALIBRATED"
+
+# ---------------------------------------------------------------------------
+# A2 变化图斑统计（4 邻域连通域）
+# ---------------------------------------------------------------------------
+# skimage.measure.label 在 2D 下 connectivity=1 即 4 邻域，与
+# rasterio.features.shapes 的默认 4 连通一致，保证斑块数与 GeoJSON feature 数同口径。
+PATCH_CONNECTIVITY: Final[int] = 1
+# 像元素上限（约 4000 万）：超过则 skipped=True + 原因，不静默、不分配大标签数组。
+PATCH_MAX_PIXELS: Final[int] = 40_000_000
+PATCH_SKIP_REASON: Final[str] = (
+    "像元数超过 40,000,000，跳过图斑统计以避免连通域标注内存峰值"
+)
+# 面积 Top-N（仅对前 N 大斑块求质心，避免全量逐斑块重投影）
+PATCH_TOP_N: Final[int] = 10
+PATCH_PDF_TOP_N: Final[int] = 5
+
+# ---------------------------------------------------------------------------
 # 错误码（第 5 章 EX*/SYS-*）中文提示，供路由统一封装 {code, message, run_id}
 # ---------------------------------------------------------------------------
 # 来源：HLD 第 5 章出错处理设计
@@ -257,4 +296,10 @@ ERROR_MESSAGES: Final[Dict[str, str]] = {
     # HTTP 映射：errors.CODE_HTTP 中 SYS-06/SYS-07 默认 500（MVP 5 接口契约不受影响）
     "SYS-06": "在线数据源不可达或影像下载失败，请稍后重试",
     "SYS-07": "在线取数结果写入对象存储或数据库失败，请稍后重试",
+    # 认证扩展（注册/登录）：错误文案逐字对齐 ERROR_MESSAGES，不臆造
+    "AUTH-01": "未登录或登录已过期，请重新登录",
+    "AUTH-02": "用户名或密码错误",
+    "AUTH-03": "无权访问该运行记录",
+    "AUTH-04": "用户名已存在",
+    "AUTH-05": "注册信息不合法，请检查用户名与密码格式",
 }

@@ -25,8 +25,17 @@ for _p in (str(API_ROOT), str(TESTS_DIR)):
         sys.path.insert(0, _p)
 
 # —— 硬约束 1：显式加载 api/.env（override=True） ——
+import os  # noqa: E402
+
 from app.config.env import load_env  # noqa: E402
 load_env(override=True)
+
+# 认证扩展：pytest 进程内客户端关闭 JWT 网关（直通模式），既有用例语义不变；
+# 认证本身的行为由 tests/test_api_auth.py 用独立开关覆盖。
+os.environ["AUTH_DISABLED"] = "1"
+# 测试数据标记：aoi_service 写入 params_snapshot.test_data=true，
+# cleanup_test_data.py 只清理带标记的 run，绝不动真实历史。
+os.environ["RS_TEST_MODE"] = "1"
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402

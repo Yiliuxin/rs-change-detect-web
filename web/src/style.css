@@ -119,6 +119,20 @@ body {
 .legend-swatch { width: 16px; height: 12px; border-radius: 3px; border: 1px solid rgba(16, 34, 58, .15); }
 .legend-code { color: var(--muted2); font-size: 10px; width: 14px; text-align: center; }
 
+/* ===== B1 图层面板：三层显隐 + 各自透明度 + 三类色块图例 ===== */
+.layer-panel { width: 256px; }
+.layer-row { display: flex; align-items: center; gap: 6px; margin: 5px 0; font-size: 11px; }
+.layer-row .layer-chk { flex: 0 0 88px; margin: 0; white-space: nowrap; font-size: 11px; }
+.layer-row input[type="range"] { flex: 1; min-width: 0; }
+.layer-row .slider-val { width: 38px; font-size: 10.5px; }
+.layer-legend { border-top: 1px solid var(--line-soft); margin-top: 8px; padding-top: 6px; }
+
+/* ===== A1 五档强度 / A2 图斑统计 ===== */
+.chart-intensity { height: 220px; }
+.empirical-note { margin-top: 6px; font-size: 10.5px; font-weight: 600; color: #a33b2a; }
+.patch-table-wrap { max-height: 250px; overflow: auto; }
+#patch-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
 .map-hint {
   position: absolute; left: 14px; top: 14px; z-index: 3;
   background: rgba(255, 255, 255, .92); border: 1px solid var(--line-soft);
@@ -474,6 +488,25 @@ table.tbl td.diag { background: rgba(33, 160, 76, .1); font-weight: 800; }
   font-weight: 700; color: var(--accent2); word-break: break-all;
 }
 
+/* 在线取数「选择地点」行：下拉 + 地图框选按钮 */
+.onl-place-row { display: flex; align-items: flex-end; gap: 8px; }
+.onl-place-field { flex: 1 1 auto; min-width: 0; }
+.onl-place-field select { width: 100%; }
+.onl-place-row > .btn { flex: 0 0 auto; }
+
+/* 地名标注（离线 DOM Marker，不拦截地图交互） */
+.place-marker { display: flex; align-items: center; pointer-events: none; white-space: nowrap; }
+.place-dot {
+  width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto;
+  background: #1f6feb; border: 1.5px solid #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .35);
+}
+.place-label {
+  margin-left: 4px; font-size: 10px; font-weight: 600; color: #33404f;
+  background: rgba(255, 255, 255, .85); padding: 1px 5px; border-radius: 4px;
+  border: 1px solid rgba(120, 140, 160, .35); text-shadow: 0 1px 0 rgba(255, 255, 255, .8);
+}
+.place-marker-preset .place-label { color: #0b4aa2; font-weight: 700; }
+
 /* 两时相窗口 */
 .onl-window label.fld { margin-bottom: 4px; }
 .onl-range { display: flex; align-items: center; gap: 6px; }
@@ -717,3 +750,43 @@ input[type="range"]:disabled { opacity: .45; cursor: not-allowed; }
 .preset-sensor-landsat { color: #7a4a12; background: #fdf0dc; border-color: rgba(185, 126, 15, .45); }
 .preset-hint { margin-top: 5px; font-size: 10.5px; color: var(--muted2); line-height: 1.5; word-break: break-all; }
 #auto-sample-wrap .preset-hint { margin-top: 7px; }
+
+/* ===== 登录/注册页（注册/登录扩展） ===== */
+.login-body {
+  margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(160deg, #e8f1fc 0%, #eef1f5 45%, #f4f7fa 100%);
+  font-family: inherit; color: var(--txt);
+}
+.login-card {
+  width: 380px; max-width: calc(100vw - 32px);
+  background: var(--card); border: 1px solid var(--line); border-radius: 16px;
+  box-shadow: var(--shadow-hover); padding: 28px 26px 22px;
+}
+.login-brand { text-align: center; margin-bottom: 18px; }
+.login-logo { font-size: 34px; }
+.login-brand h1 { font-size: 17px; margin: 6px 0 4px; color: var(--txt); }
+.login-sub { font-size: 11px; color: var(--muted2); margin: 0; line-height: 1.5; }
+.login-tabs { display: flex; gap: 6px; margin-bottom: 16px; background: var(--card2); border-radius: 9px; padding: 4px; }
+.login-tab {
+  flex: 1; border: none; background: transparent; padding: 7px 0; font-size: 12.5px;
+  font-weight: 700; color: var(--muted); border-radius: 7px; cursor: pointer;
+}
+.login-tab.active { background: var(--card); color: var(--accent2); box-shadow: var(--shadow); }
+.login-form { display: flex; flex-direction: column; }
+.login-form .fld { margin-top: 10px; }
+.login-form input {
+  margin-top: 4px; padding: 8px 10px; font-size: 13px; color: var(--txt);
+  border: 1px solid var(--line); border-radius: 8px; background: var(--card2); outline: none;
+}
+.login-form input:focus { border-color: var(--accent); background: #fff; }
+.login-err { min-height: 16px; margin-top: 8px; font-size: 11.5px; color: var(--red); line-height: 1.4; }
+.login-hint { margin: 12px 0 0; font-size: 10.5px; color: var(--muted2); line-height: 1.6; }
+
+/* 顶栏用户芯片 + 退出 */
+.user-chip {
+  display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 700;
+  color: var(--accent2); background: var(--accent-soft); border: 1px solid rgba(31, 122, 224, .35);
+  padding: 3px 9px; border-radius: 999px; max-width: 180px;
+}
+.user-chip .u-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.btn-logout { margin-left: 4px; }

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel, Field
 
 from app.api.v1.schemas import ErrorResponse
@@ -81,12 +81,14 @@ class RunDetailResponse(RunSummary):
     summary="历史 run 列表（分页，按创建时间倒序）",
 )
 def list_runs(
+    request: Request,
     limit: int = Query(run_service.DEFAULT_PAGE_LIMIT, description="每页条数，默认 20，1..100"),
     offset: int = Query(0, description="偏移量，默认 0"),
 ) -> RunListResponse:
     """REQ-14：返回 run_id / AOI 名称与 bbox / 双时相日期与 source / created_at /
-    threshold / 三类面积合计。"""
-    return RunListResponse(**run_service.list_runs(limit, offset))
+    threshold / 三类面积合计；登录态下按人隔离（注册/登录扩展）。"""
+    user_id = getattr(request.state, "user_id", None)
+    return RunListResponse(**run_service.list_runs(limit, offset, user_id=user_id))
 
 
 @router.get(
@@ -96,6 +98,7 @@ def list_runs(
                500: {"model": ErrorResponse, "description": "SYS-04 数据库异常"}},
     summary="历史 run 详情（参数快照 + 全部产物下载 URL）",
 )
-def get_run(run_id: str) -> RunDetailResponse:
+def get_run(request: Request, run_id: str) -> RunDetailResponse:
     """REQ-14：params_snapshot 全量 + 全部产物下载 URL；run 不存在 → EX2 404。"""
-    return RunDetailResponse(**run_service.detail(run_id))
+    user_id = getattr(request.state, "user_id", None)
+    return RunDetailResponse(**run_service.detail(run_id, user_id=user_id))

@@ -72,6 +72,53 @@ for _router in (aoi.router, scene.router, change.router, accuracy.router,
 # B 级扩展：在线取数（STAC discover + 按需下载入库），与 5 个 MVP 路由并存不改
 app.include_router(online.router, prefix=API_V1_PREFIX)
 
+# 认证扩展：/auth/register、/auth/login、/auth/me（网关对其放行）
+from app.api.v1 import auth as _auth  # noqa: E402
+app.include_router(_auth.router, prefix=API_V1_PREFIX)
+
+# --------------------------------------------------------------------------- #
+# JWT 网关（注册/登录扩展）：/api/v1/* 除 /auth/* 外一律要求 Bearer token；
+# 校验通过后把 user_id/username 写入 request.state 供路由做数据归属隔离。
+# AUTH_DISABLED=1（pytest 进程内客户端）时整体直通，既有测试语义不变。
+# --------------------------------------------------------------------------- #
+import os  # noqa: E402
+
+from fastapi import Request  # noqa: E402
+from fastapi.responses import JSONResponse  # noqa: E402
+
+from app.config.constants import ERROR_MESSAGES  # noqa: E402
+from app.service import auth_service  # noqa: E402
+
+AUTH_DISABLED = os.environ.get("AUTH_DISABLED") == "1"
+_OPEN_PATHS = ("/api/v1/auth/",)  # 注册/登录本身放行
+
+
+@app.middleware("http")
+async def auth_gate(request: Request, call_next):
+    path = request.url.path
+    if (AUTH_DISABLED
+            or not path.startswith(f"{API_V1_PREFIX}/")
+            or any(path.startswith(p) for p in _OPEN_PATHS)
+            or request.method == "OPTIONS"):
+        request.state.user_id = getattr(request.state, "user_id", None)
+        request.state.username = getattr(request.state, "username", None)
+        return await call_next(request)
+    header = request.headers.get("Authorization", "")
+    if not header.startswith("Bearer "):
+        return JSONResponse(status_code=401,
+                            content={"code": "AUTH-01", "message": ERROR_MESSAGES["AUTH-01"],
+                                     "run_id": None})
+    try:
+        claims = auth_service.decode_token(header[7:].strip())
+    except Exception:
+        return JSONResponse(status_code=401,
+                            content={"code": "AUTH-01", "message": ERROR_MESSAGES["AUTH-01"],
+                                     "run_id": None})
+    request.state.user_id = claims["sub"]
+    request.state.username = claims.get("username")
+    return await call_next(request)
+
+
 # 统一异常封装：所有异常输出 {code, message, run_id}（HLD 第 5 章 / EX1–EX11、SYS-01–05）
 install_error_handlers(app)
 

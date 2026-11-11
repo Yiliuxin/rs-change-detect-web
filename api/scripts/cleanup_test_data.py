@@ -53,6 +53,7 @@ def _load_tasks() -> list:
                    t.status,
                    t.finished_at,
                    t.started_at,
+                   t.params_snapshot->>'test_data' AS test_data,
                    s.cog_path AS cog_path
             FROM task t
             LEFT JOIN scene s ON s.scene_id = t.scene_t1_id
@@ -72,21 +73,14 @@ def _load_tasks() -> list:
 
 
 def _choose_kept(tasks: list) -> set:
-    """保留规则：每个影像对保留最新一条 SUCCESS run（按 finished_at/started_at 倒序）。"""
-    best: dict = {}
+    """保留规则（2026-11-10 修订）：保留所有**非测试** run（params_snapshot.test_data
+    不为 true），删除 pytest 写入的测试 run。此前"每影像对留最新一条"会误删
+    同影像对的真实历史 run，已废弃。"""
+    kept: set = set()
     for t in tasks:
-        if t["status"] != "SUCCESS":
-            continue
-        key = t["pair"]
-        cur_best = best.get(key)
-        if cur_best is None:
-            best[key] = t
-        else:
-            fa, fb = cur_best.get("finished_at"), t.get("finished_at")
-            sa, sb = cur_best.get("started_at"), t.get("started_at")
-            if (fb, sb) > (fa, sa):  # 较晚的优先
-                best[key] = t
-    return {t["run_id"] for t in best.values()}
+        if str(t.get("test_data") or "").lower() != "true":
+            kept.add(t["run_id"])
+    return kept
 
 
 def _delete_non_kept(tasks: list, kept: set) -> dict:

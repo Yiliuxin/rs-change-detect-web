@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>登录 · 遥感影像变化检测平台</title>
+  <script type="module" src="/src/login.js"></script>
+</head>
+<body class="login-body">
+  <div class="login-card">
+    <div class="login-brand">
+      <div class="login-logo">🛰️</div>
+      <h1>遥感影像变化检测平台</h1>
+      <p class="login-sub">Sentinel-2 / Landsat 双时相地表变化检测 · Web 工作台</p>
+    </div>
+
+    <div class="login-tabs" role="tablist">
+      <button type="button" class="login-tab active" data-tab="login">登录</button>
+      <button type="button" class="login-tab" data-tab="register">注册</button>
+    </div>
+
+    <form id="login-form" class="login-form" autocomplete="off">
+      <label class="fld" for="lg-username">用户名</label>
+      <input type="text" id="lg-username" maxlength="20" spellcheck="false" placeholder="3–20 位字母/数字/下划线" />
+      <label class="fld" for="lg-password">密码</label>
+      <input type="password" id="lg-password" maxlength="64" placeholder="6–64 位" />
+      <div class="login-err" id="login-err"></div>
+      <button type="submit" class="btn btn-primary btn-block" id="login-submit">登 录</button>
+      <p class="login-hint">首次使用请切换到「注册」创建账号；首个注册用户自动接管平台已有历史运行。</p>
+    </form>
+
+    <form id="register-form" class="login-form" hidden autocomplete="off">
+      <label class="fld" for="rg-username">用户名</label>
+      <input type="text" id="rg-username" maxlength="20" spellcheck="false" placeholder="3–20 位字母/数字/下划线" />
+      <label class="fld" for="rg-password">密码</label>
+      <input type="password" id="rg-password" maxlength="64" placeholder="至少 6 位" />
+      <label class="fld" for="rg-display">显示名（可选）</label>
+      <input type="text" id="rg-display" maxlength="64" placeholder="例如：易刘欣" />
+      <div class="login-err" id="register-err"></div>
+      <button type="submit" class="btn btn-primary btn-block" id="register-submit">注 册</button>
+      <p class="login-hint">注册即登录；检测历史、样本与结果按用户隔离，互不可见。</p>
+    </form>
+  </div>
+</body>
+</html>

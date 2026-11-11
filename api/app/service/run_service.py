@@ -151,8 +151,9 @@ def _raster_meta(run_id: str) -> Optional[dict]:
     return None
 
 
-def list_runs(limit: int = DEFAULT_PAGE_LIMIT, offset: int = 0) -> dict:
-    """GET /api/v1/runs：分页列表，按 created_at 倒序（REQ-14）。"""
+def list_runs(limit: int = DEFAULT_PAGE_LIMIT, offset: int = 0,
+              user_id: Optional[str] = None) -> dict:
+    """GET /api/v1/runs：分页列表，按 created_at 倒序（REQ-14）；user_id 非空时按人隔离。"""
     try:
         try:
             lim, off = int(limit), int(offset)
@@ -163,7 +164,7 @@ def list_runs(limit: int = DEFAULT_PAGE_LIMIT, offset: int = 0) -> dict:
                 "EX12",
                 detail=f"分页参数越界：limit 需在 1..{MAX_PAGE_LIMIT}，offset 需 ≥ 0",
             )
-        total, rows = run_repo.list_runs(lim, off)
+        total, rows = run_repo.list_runs(lim, off, user_id=user_id)
         return {
             "total": int(total),
             "limit": lim,
@@ -176,13 +177,13 @@ def list_runs(limit: int = DEFAULT_PAGE_LIMIT, offset: int = 0) -> dict:
         raise as_api_error(exc) from exc
 
 
-def detail(run_id: str) -> dict:
+def detail(run_id: str, user_id: Optional[str] = None) -> dict:
     """GET /api/v1/runs/{run_id}：摘要 + params_snapshot 全量 + 全部产物 URL + raster。
 
     raster 由裁切栅格 profile 读取；产物缺失/损坏时为 null（不报错、不伪造）。
     """
     try:
-        row = run_repo.get_run(run_id)
+        row = run_repo.get_run(run_id, user_id=user_id)
         if not row:
             raise ApiError("EX2", run_id=run_id,
                            detail=f"run_id 无对应 task：{run_id}")

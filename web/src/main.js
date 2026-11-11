@@ -13,6 +13,10 @@ import * as demo from './demo.js';
 import * as M from './map.js';
 import * as C from './charts.js';
 import * as HIST from './history.js';
+import { ONLINE_PLACES } from './places.js';
+
+// 认证扩展：全站必须登录——无票据直接回登录页
+if (!localStorage.getItem('rst_token')) location.replace('/login.html');
 import * as SWIPE from './swipe.js';
 
 const $ = (id) => document.getElementById(id);
@@ -315,6 +319,52 @@ function renderPresetOptions() {
     return '<option value="' + esc(p.name) + '">' + esc(label) + '</option>';
   }).join('');
   $('preset-aoi').innerHTML = html;
+  // 在线取数卡片「选择地点」：三组来源——A 卡当前 AOI（默认）/ 预置影像区 / 内置扩展地名库
+  const onl = $('onl-place');
+  if (onl) {
+    const presetOpts = S.presets.map((p) =>
+      '<option value="' + esc(p.name) + '">' + esc(presetLabel(p) + ' · ' + presetSensor(p)) + '</option>').join('');
+    const placeOpts = ONLINE_PLACES.map((p) =>
+      '<option value="g:' + esc(p.name) + '">' + esc(p.name) + '</option>').join('');
+    onl.innerHTML = '<option value="">— 使用 A 卡当前 AOI —</option>'
+      + (presetOpts ? '<optgroup label="预置影像区（离线可用）">' + presetOpts + '</optgroup>' : '')
+      + '<optgroup label="更多地点（在线自由检索）">' + placeOpts + '</optgroup>';
+  }
+  updatePlaceMarkers(); // 预置列表到位后合并进地图标注层
+}
+
+function centerOf(b) {
+  return [(Number(b[0]) + Number(b[2])) / 2, (Number(b[1]) + Number(b[3])) / 2];
+}
+
+// 认证扩展：顶栏用户芯片 + 退出；首个注册者认领历史 run 时给一次性提示
+function initAuthUi() {
+  const chip = $('user-chip'), name = $('user-name'), logout = $('btn-logout');
+  if (!chip || !logout) return;
+  const uname = localStorage.getItem('rst_username')
+    || localStorage.getItem('rst_token') && '已登录' || '';
+  if (!uname) return;
+  name.textContent = uname;
+  chip.hidden = false;
+  logout.hidden = false;
+  logout.onclick = () => {
+    localStorage.removeItem('rst_token');
+    localStorage.removeItem('rst_username');
+    location.replace('/login.html');
+  };
+  const claimed = sessionStorage.getItem('rst_claimed_runs');
+  if (claimed) {
+    sessionStorage.removeItem('rst_claimed_runs');
+    showToast('你注册的是首个账号，已接管平台既有 ' + claimed + ' 条历史运行', 'ok');
+  }
+}
+
+// 地名标注层：内置地名库 + 预置影像区中心点；预置列表变化时重画。
+function updatePlaceMarkers() {
+  if (!map) return;
+  const list = ONLINE_PLACES.map((p) => ({ name: p.name, kind: 'place', center: centerOf(p.bbox) }))
+    .concat(S.presets.map((p) => ({ name: presetLabel(p), kind: 'preset', center: centerOf(p.bbox) })));
+  M.setPlaceMarkers(map, list);
 }
 
 function syncPresetMeta() {
@@ -620,6 +670,14 @@ function applyChangeResult(data) {
   let url = data.change_png;
   if (!url || /^demo:/.test(url)) url = demo.makeChangePngDataUrl();
   S.changePngUrl = url;
+  // B1：t1/t2 真彩合成图与专题图各自成层（添加顺序由 map.js 保证）
+  const arts = (data && typeof data.artifacts === 'object' && data.artifacts) || {};
+  if (S.aoi) {
+    [['t1', 't1_composite.png'], ['t2', 't2_composite.png']].forEach(([key, name]) => {
+      const u = arts[name];
+      if (u && !isUnsafeImageUrl(u)) M.setLayerImage(map, key, u, S.aoi);
+    });
+  }
   if (!isUnsafeImageUrl(url)) {
     M.setImage(map, url, S.aoi);
     M.setImageOpacity(map, S.opacity);
@@ -924,6 +982,84 @@ function renderChangeResult() {
   $('stats-table').innerHTML = html;
   C.renderPie($('chart-pie'), stats);
   C.renderBar($('chart-bar'), stats);
+  renderIntensityAndPatches();
+}
+
+// ===== A1 五档强度表 / A2 图斑统计（无数据整块隐藏；历史 run 从 params_snapshot 取） =====
+const INTENSITY_ROW_ZH = { 1: '显著退化', 2: '轻微退化', 3: '稳定', 4: '轻微改善', 5: '显著改善' };
+const INTENSITY_ROW_COLOR = {
+  1: '#8e2c25', 2: '#e4a23c', 3: '#788ca0', 4: '#67b86b', 5: '#1e8a45',
+};
+
+function num(v, digits = 1) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n.toFixed(digits) : '—';
+}
+
+function renderIntensityAndPatches() {
+  const d = S.change || {};
+  const snap = d.params_snapshot || {};
+  const intensity = d.intensity || snap.intensity || null;
+  const patches = d.patch_stats || snap.patch_stats || null;
+  const ib = $('intensity-block');
+  const pb = $('patch-block');
+  if (!ib || !pb) return;
+
+  const hasIntensity = !!(intensity && Array.isArray(intensity.levels) && intensity.levels.length);
+  ib.hidden = !hasIntensity;
+  if (hasIntensity) {
+    let html = '<thead><tr><th>档位</th><th>像元数</th><th>面积 (ha)</th><th>占比</th></tr></thead><tbody>';
+    for (const lv of intensity.levels) {
+      const code = Number(lv.code);
+      const ratio = Number(lv.ratio || 0) * 100;
+      html += `<tr><td><span class="sw-sm" style="background:${INTENSITY_ROW_COLOR[code] || '#999'}"></span>`
+        + `${esc(INTENSITY_ROW_ZH[code] || lv.label || '—')}</td>`
+        + `<td>${esc(Number(lv.pixel_count || 0).toLocaleString())}</td>`
+        + `<td>${lv.area_ha != null ? num(lv.area_ha, 2) : '—'}</td>`
+        + `<td>${num(ratio, 2)}%</td></tr>`;
+    }
+    html += '</tbody>';
+    $('intensity-table').innerHTML = html;
+    C.renderIntensityBar($('chart-intensity'), intensity);
+  }
+
+  const hasPatches = !!(patches && typeof patches === 'object');
+  pb.hidden = !hasPatches;
+  if (!hasPatches) return;
+  const metrics = $('patch-metrics');
+  const topTable = $('patch-top-table');
+  if (patches.skipped) {
+    metrics.innerHTML = '<div class="metric"><div class="k">图斑统计</div>'
+      + '<div class="v v-sm">已跳过</div></div>';
+    topTable.innerHTML = '<tbody><tr><td class="hint">' + esc(patches.reason || '像元数超限') + '</td></tr></tbody>';
+    return;
+  }
+  const metricItems = [
+    ['斑块数', String(patches.total_patches != null ? patches.total_patches : '—')],
+    ['总面积 (ha)', num(patches.total_area_ha, 2)],
+    ['平均 (ha)', num(patches.mean_area_ha, 2)],
+    ['中位 (ha)', num(patches.median_area_ha, 2)],
+    ['最大 (ha)', num(patches.max_area_ha, 2)],
+    ['密度 (个/km²)', num(patches.patch_density_per_km2, 2)],
+  ];
+  metrics.innerHTML = metricItems.map(([k, v]) =>
+    `<div class="metric"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join('');
+  const top = Array.isArray(patches.top) ? patches.top : [];
+  let thtml = '<thead><tr><th>#</th><th>类别</th><th>像元数</th><th>面积 (ha)</th><th>质心 (lng, lat)</th></tr></thead><tbody>';
+  if (!top.length) {
+    thtml += '<tr><td colspan="5" class="hint">无变化图斑</td></tr>';
+  } else {
+    for (const t of top) {
+      const lng = t.centroid_lng, lat = t.centroid_lat;
+      const centroid = (lng == null || lat == null) ? '—'
+        : num(lng, 5) + ', ' + num(lat, 5);
+      thtml += `<tr><td>${esc(t.rank)}</td><td>${esc(t.class_zh || t.change_class)}</td>`
+        + `<td>${esc(Number(t.pixel_count || 0).toLocaleString())}</td>`
+        + `<td>${num(t.area_ha, 2)}</td><td>${esc(centroid)}</td></tr>`;
+    }
+  }
+  thtml += '</tbody>';
+  topTable.innerHTML = thtml;
 }
 
 function renderValidRatio() {
@@ -1357,6 +1493,7 @@ function loadHistoryRun(d) {
     return '';
   };
   const png = artUrl(['change.png', 'change_ndvi.png', 'change_ndwi.png']);
+  // A1/A2：历史回看从 params_snapshot 取（后端三处透出的同源数据）
   S.change = {
     run_id: d.run_id,
     change_png: png,
@@ -1366,15 +1503,23 @@ function loadHistoryRun(d) {
     threshold_source: d.threshold_source || snap.threshold_source,
     params_snapshot: snap,
     index: d.index || snap.index,
+    intensity: snap.intensity || null,
+    patch_stats: snap.patch_stats || null,
   };
   S.changePngUrl = png;
   const b = (Array.isArray(d.bbox) && d.bbox.length === 4) ? boundsFromArray(d.bbox) : S.aoi;
-  if (png && !isUnsafeImageUrl(png) && b) {
+  if (b) {
     // 地图 style 未就绪时跳过叠加即可，结果区填充不受影响，且绝不产生未捕获异常
     try {
-      M.setImage(map, png, b);        // 用该 run 的 bbox 定位专题图，不覆盖用户当前 AOI 输入
-      M.setImageOpacity(map, S.opacity);
-      M.fitBounds(map, b, 90);
+      const t1Url = artUrl(['t1_composite.png']);
+      const t2Url = artUrl(['t2_composite.png']);
+      if (t1Url && !isUnsafeImageUrl(t1Url)) M.setLayerImage(map, 't1', t1Url, b);
+      if (t2Url && !isUnsafeImageUrl(t2Url)) M.setLayerImage(map, 't2', t2Url, b);
+      if (png && !isUnsafeImageUrl(png)) {
+        M.setImage(map, png, b);      // 用该 run 的 bbox 定位专题图，不覆盖用户当前 AOI 输入
+        M.setImageOpacity(map, S.opacity);
+        M.fitBounds(map, b, 90);
+      }
     } catch (_) { /* 地图尚未 load */ }
   }
   $('map-legend').hidden = false;
@@ -1568,6 +1713,35 @@ function onlineWindows() {
 }
 
 // 本地前置校验（减少无效请求）：AOI 存在/合法/跨度≤0.25°(EX1) + 两窗口齐全、end>start、t2>t1
+// 「选择地点」三路：
+// 1) 默认空值 → 使用 A 卡当前 AOI，不改动任何状态；
+// 2) 预置影像区（12 组）→ 同步 A 卡下拉并走同一套「填入 + 应用 AOI」链路（t1/t2 随预置组填充）；
+// 3) 内置扩展地名库（g: 前缀）→ 仅填 AOI bbox + 地图定位，不动 t1/t2（在线窗口本卡独立控制）。
+// 时间自由度不受地点影响：t1/t2 检索窗口由本卡片日期框任意指定。
+function onlPlaceChange() {
+  const name = $('onl-place').value;
+  if (!name) return;
+  if (name.startsWith('g:')) {
+    const place = ONLINE_PLACES.find((p) => 'g:' + p.name === name);
+    if (!place) { showToast('内置地点数据异常，请刷新页面', 'warn'); return; }
+    const b = boundsFromArray(place.bbox);
+    if (![b.w, b.s, b.e, b.n].every(Number.isFinite)) { showToast('内置地点坐标非法', 'warn'); return; }
+    if (b.e - b.w > 0.25 + 1e-9 || b.n - b.s > 0.25 + 1e-9) {
+      showToast('该内置地点 bbox 超出 AOI 跨度上限（0.25°）', 'warn'); return;
+    }
+    pushAoiHistory();
+    applyAoi(b);
+    if (map) M.fitBounds(map, b, 90);
+    updateAoiMetrics(); // 内部会刷新在线卡 bbox 回显
+    showToast('已填入 ' + place.name + '，请在下方设定时间窗口后检索', 'ok');
+    return;
+  }
+  if (!S.presets.some((p) => p.name === name)) { showToast('该预置地点不可用，请刷新预置列表', 'warn'); return; }
+  $('preset-aoi').value = name;
+  syncPresetMeta();
+  applyPresetAoi();
+}
+
 function onlinePrecheck() {
   const b = onlineAoiBbox();
   if (!b) return { err: '请先在 A 卡「AOI 设置」填写 AOI（本卡片复用其当前 AOI）。' };
@@ -1892,6 +2066,36 @@ function retryOnline() {
   onlineDiscover();
 }
 
+// ===== B1 图层面板：三层显隐 + 各自透明度（change 与原滑块双向同步） =====
+function bindLayerPanel() {
+  const defs = [
+    ['t1', 'layer-t1', 'layer-t1-opacity', 'layer-t1-val'],
+    ['t2', 'layer-t2', 'layer-t2-opacity', 'layer-t2-val'],
+    ['change', 'layer-change', 'layer-change-opacity', 'layer-change-val'],
+  ];
+  for (const [key, chkId, rangeId, valId] of defs) {
+    const chk = $(chkId), range = $(rangeId), label = $(valId);
+    if (chk) {
+      chk.addEventListener('change', () => M.setLayerVisible(map, key, chk.checked));
+    }
+    if (range) {
+      range.addEventListener('input', () => {
+        const v = Number(range.value);
+        if (label) label.textContent = v + '%';
+        M.setLayerOpacity(map, key, v / 100);
+        if (key === 'change') {
+          // 原「专题图叠加不透明度」滑块语义不变：反向同步，避免两处口径漂移
+          S.opacity = v / 100;
+          const old = $('opacity');
+          if (old) old.value = String(v);
+          const oldLabel = $('opacity-val');
+          if (oldLabel) oldLabel.textContent = v + '%';
+        }
+      });
+    }
+  }
+}
+
 // ===== 事件绑定 =====
 function bindEvents() {
   ['aoi-w', 'aoi-s', 'aoi-e', 'aoi-n'].forEach((id) => {
@@ -1942,7 +2146,13 @@ function bindEvents() {
     S.opacity = v / 100;
     $('opacity-val').textContent = v + '%';
     M.setImageOpacity(map, S.opacity);
+    // B1：原滑块语义不变，且与图层面板的 change 层滑块双向同步
+    const range = $('layer-change-opacity');
+    if (range) range.value = String(v);
+    const label = $('layer-change-val');
+    if (label) label.textContent = v + '%';
   });
+  bindLayerPanel();
 
   document.querySelectorAll('.mode-btn').forEach((b) => {
     b.onclick = () => {
@@ -1990,6 +2200,13 @@ function bindEvents() {
   $('onl-discover').onclick = onlineDiscover;
   $('onl-fetch').onclick = onlineFetch;
   $('onl-retry').onclick = retryOnline;
+  $('onl-place').onchange = onlPlaceChange;
+  $('onl-body').querySelector('.onl-place-draw').onclick = () => {
+    // 复用地图「AOI 框选」模式：拖拽画框后 AOI 回填 A 卡并同步在线卡回显
+    if (S.pickMode) { S.pickMode = false; syncPickUi(); }
+    setMapMode('aoi');
+    showToast('请在地图上拖拽画框，框选区域即为在线检索范围', 'ok');
+  };
   $('onl-name').addEventListener('input', renderOnlineNamePreview);
   $('onl-name').addEventListener('blur', () => {
     const n = onlineNormalizeName($('onl-name').value);
@@ -2089,14 +2306,10 @@ function init() {
   renderOnlineNamePreview();
   refreshOnlineAoiEcho();
 
-  // 地图图例（三类色带 · REQ-10）
-  $('map-legend').innerHTML = `
-    <h4>变化专题图色带 · 编码</h4>
-    <div class="legend-row"><span class="legend-code">1</span><span class="legend-swatch" style="background:#21a04c"></span>增强</div>
-    <div class="legend-row"><span class="legend-code">2</span><span class="legend-swatch" style="background:#d94c3d"></span>退化</div>
-    <div class="legend-row"><span class="legend-code">3</span><span class="legend-swatch" style="background:#5b7a99"></span>稳定</div>`;
-
+  // B1：图层面板（三层控制 + 三类色带图例）已在 index.html 静态声明，
+  // 此处不再用 innerHTML 覆盖，避免抹掉显隐 checkbox 与透明度滑块。
   bindEvents();
+  initAuthUi();
 
   map = M.createMap('map', demo.SEEDS[0].center, 9);
   map.on('load', () => {
@@ -2104,6 +2317,7 @@ function init() {
     syncFromInputs();
     M.fitBounds(map, S.aoi, 90);
     setMapMode('aoi');
+    updatePlaceMarkers(); // 地名标注：内置地名库 + 预置影像区中心点（预置未加载时先标内置项）
   });
   bindMapEvents();
 

@@ -16,9 +16,10 @@ MIGRATIONS = Path(r"C:\Test\Web\api\migrations")
 
 
 @pytest.mark.req("REQ-14")
-def test_migrations_are_idempotent_and_five_tables_exist():
+def test_migrations_are_idempotent_and_tables_exist():
     ups = sorted(MIGRATIONS.glob("*.up.sql"), key=lambda p: p.name)
-    assert len(ups) == 5
+    # 006：注册/登录扩展新增 users 表（task.user_id 归属列）
+    assert len(ups) == 6
     for _ in range(2):     # 连续重跑两次：IF NOT EXISTS 保证不报错
         with db_cursor() as cur:
             for f in ups:
@@ -27,10 +28,10 @@ def test_migrations_are_idempotent_and_five_tables_exist():
         cur.execute(
             "SELECT table_name FROM information_schema.tables "
             "WHERE table_schema='public' AND table_name IN "
-            "('aoi','scene','task','sample','change_result')"
+            "('aoi','scene','task','sample','change_result','users')"
         )
         names = {r["table_name"] for r in cur.fetchall()}
-    assert names == {"aoi", "scene", "task", "sample", "change_result"}
+    assert names == {"aoi", "scene", "task", "sample", "change_result", "users"}
 
 
 @pytest.mark.req("REQ-14")

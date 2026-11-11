@@ -29,12 +29,14 @@ from app.algorithm.composite import (
 )
 from app.algorithm.geotransform import BBox
 from app.algorithm.index_raster import IndexRaster
+from app.algorithm.intensity import intensity_stats
 from app.algorithm.mask_builder import landsat_dn_nodata_mask
 from app.algorithm.mask_pipeline import (
     compute_valid_ratio, judge_valid_ratio, run_mask_pipeline,
 )
 from app.algorithm.morphology import clean_change_map
 from app.algorithm.otsu import otsu_threshold
+from app.algorithm.patches import patch_stats
 from app.algorithm.radiometric import (
     assert_same_caliber, check_baseline, to_reflectance,
 )
@@ -411,6 +413,18 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
             hist_src = d
         index_histogram = _index_histogram(hist_src, valid, thr, hist_name)
 
+        # A1 变化强度分级：与三类严格同一阈值 T、同一差分源 hist_src
+        # （回归法即残差）。传入形态学后的最终三类图作粗类权威，保证
+        # 4+5 档 == 增强、1+2 档 == 退化、3 == 稳定，三类数字逐项自洽。
+        intensity_summary = intensity_stats(
+            hist_src, thr, change=change, valid_mask=valid,
+            pixel_area_m2=float(summary["pixel_area_m2"]),
+        )
+        # A2 变化图斑统计：4 邻域连通域（与 GeoJSON shapes 默认连通性一致）
+        patch_summary = patch_stats(
+            change, profile, pixel_area_m2=float(summary["pixel_area_m2"]),
+        )
+
         if method_key == METHOD_REGRESSION:
             comparison = {
                 "difference": {
@@ -455,6 +469,9 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
             "change_pixel_ratio": float(ratio_change),
             "stats": stats,
             "pixel_area_m2": float(summary["pixel_area_m2"]),
+            # A1 / A2：透出点 ① 参数快照（历史回看从快照取）
+            "intensity": intensity_summary,
+            "patch_stats": patch_summary,
         })
 
         year = str(snapshot.get("t1") or "")[:4] or "2023"
@@ -475,6 +492,9 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
             "change_pixel_ratio": float(ratio_change),
             "stats": stats,
             "index_histogram": index_histogram,
+            # A1 / A2：透出点 ② run_report.json（PDF 与报告导出复用）
+            "intensity": intensity_summary,
+            "patch_stats": patch_summary,
             "accuracy": None,  # 样本由 /accuracy/sample 提交，此处不伪造
             "params_snapshot": snapshot,
             # NF6 / NF7 常量逐字复用（PDF 署名页 / PNG / 导出响应同源）
@@ -537,6 +557,9 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
             "method": method_key,
             "threshold_source": threshold_source,
             "artifacts": artifacts,
+            # A1 / A2：透出点 ③ 接口响应（新增字段带默认值，历史调用不受影响）
+            "intensity": intensity_summary,
+            "patch_stats": patch_summary,
         }
     except ApiError:
         raise

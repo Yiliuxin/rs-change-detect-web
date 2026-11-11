@@ -17,7 +17,8 @@ from app.config.storage import object_url
 from app.service.common import ARTIFACT_URL_PREFIX, run_dir
 
 URL = "/api/v1/artifacts"
-_FILE_BY_FORMAT = {"geotiff": "change.tif", "png": "change.png", "pdf": "report.pdf"}
+_FILE_BY_FORMAT = {"geotiff": "change.tif", "png": "change.png", "pdf": "report.pdf",
+                   "geojson": "change.geojson"}
 
 
 @pytest.mark.req("REQ-10")

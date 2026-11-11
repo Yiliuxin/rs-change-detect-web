@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import date
 from typing import List
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
 from app.api.v1.schemas import ErrorResponse, SceneVO
@@ -43,11 +43,12 @@ class AoiSelectResponse(BaseModel):
                404: {"model": ErrorResponse, "description": "EX2 无匹配影像对"}},
     summary="AOI 提交与预置影像对匹配",
 )
-def select_aoi(payload: AoiSelectRequest) -> AoiSelectResponse:
+def select_aoi(request: Request, payload: AoiSelectRequest) -> AoiSelectResponse:
     """AOI 提交与预置影像对匹配（REQ-01/02/14）。
 
     service 完成：闭合/合法校验、跨度 ≤ {AOI_MAX_SPAN_DEG}°（EX1）、PostGIS
     ST_Intersects 检索（EX2）、生成 run_id/参数快照并写 aoi/task。
     """
-    result = aoi_service.select(payload.aoi_geom, payload.t1, payload.t2)
+    user_id = getattr(request.state, "user_id", None)
+    result = aoi_service.select(payload.aoi_geom, payload.t1, payload.t2, user_id=user_id)
     return AoiSelectResponse(**result)

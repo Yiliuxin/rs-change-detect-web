@@ -8,7 +8,9 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
+
+from app.api.deps import ensure_run_owner
 from pydantic import BaseModel, Field
 
 from app.api.v1.schemas import ErrorResponse, SampleItem
@@ -81,12 +83,13 @@ class AutoSampleResponse(BaseModel):
     responses={400: {"model": ErrorResponse, "description": "EX10 任一类样本 < 30 点"}},
     summary="样本提交与精度评价",
 )
-def submit_samples(payload: AccuracySampleRequest) -> AccuracySampleResponse:
+def submit_samples(request: Request, payload: AccuracySampleRequest) -> AccuracySampleResponse:
     """样本提交与精度评价（REQ-09）。
 
     累计每类样本数 ≥ MIN_SAMPLES_PER_CLASS，否则 EX10；Kappa < KAPPA_TEACHING_MIN
-    时标注「教学级，非工程级」。
+    时标注「教学级，非工程级」。归属校验：非本人 run → AUTH-03。
     """
+    ensure_run_owner(request, payload.run_id)
     samples = [s.model_dump() for s in payload.samples]
     result = sample_service.submit(payload.run_id, samples)
     return AccuracySampleResponse(**result)
@@ -100,13 +103,15 @@ def submit_samples(payload: AccuracySampleRequest) -> AccuracySampleResponse:
                500: {"model": ErrorResponse, "description": "SYS-01 结果栅格缺失/不可读"}},
     summary="样本分层随机采样（REQ-09 自动化，半自动流程不写库）",
 )
-def auto_sample(payload: AutoSampleRequest) -> AutoSampleResponse:
+def auto_sample(request: Request, payload: AutoSampleRequest) -> AutoSampleResponse:
     """POST /accuracy/auto_sample（REQ-09 自动化）。
 
     按 run 的 ``params_snapshot.method`` 选 change.tif / change_reg.tif，对三类
     编码分层用 ``RandomState(seed)`` 抽样并反算经纬度；**不写 sample 表**，
     前端把样本点填入本地列表、用户修正 ref_class 后再走既有 /accuracy/sample。
+    归属校验：非本人 run → AUTH-03。
     """
+    ensure_run_owner(request, payload.run_id)
     result = sample_service.auto_sample(
         payload.run_id, payload.per_class, payload.seed
     )

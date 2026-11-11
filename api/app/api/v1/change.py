@@ -8,7 +8,9 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
+
+from app.api.deps import ensure_run_owner
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.v1.schemas import ErrorResponse, StatItem
@@ -62,6 +64,11 @@ class ChangeResponse(BaseModel):
     threshold_source: str = Field("otsu", description="阈值来源：otsu / manual（REQ-07/14）")
     artifacts: Dict[str, str] = Field(default_factory=dict,
                                       description="全部产物下载 URL 清单（REQ-10/12/14）")
+    # A1 / A2 扩展：新增字段一律带默认值，旧版调用 / 演示降级层无需改动
+    intensity: Optional[Dict[str, Any]] = Field(
+        default=None, description="变化强度五档统计（A1）；无数据时为 null")
+    patch_stats: Optional[Dict[str, Any]] = Field(
+        default=None, description="变化图斑统计（A2）；无数据时为 null")
 
 
 class ChangeAsyncAccept(BaseModel):
@@ -137,9 +144,10 @@ def run_change(payload: ChangeRequest):
     responses={404: {"model": ErrorResponse, "description": "EX2 未知 task_id"}},
     summary="查询异步变化检测任务状态与阶段进度",
 )
-def get_change_task(task_id: str) -> ChangeTaskStatusResponse:
+def get_change_task(request: Request, task_id: str) -> ChangeTaskStatusResponse:
     """轮询异步任务（REQ-13）：status + 5 阶段进度 + 失败 error + 成功 result。
 
-    未知 task_id → EX2(404)。
+    未知 task_id → EX2(404)；非本人 run → AUTH-03（认证扩展）。
     """
+    ensure_run_owner(request, task_id)
     return ChangeTaskStatusResponse(**change_async.get_status(task_id))

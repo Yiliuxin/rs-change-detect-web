@@ -40,23 +40,34 @@ _RUN_SELECT = """
 """
 
 
-def list_runs(limit: int, offset: int) -> Tuple[int, List[dict]]:
-    """按 ``aoi.created_at`` 倒序分页，返回 ``(total, rows)``。"""
+def list_runs(limit: int, offset: int,
+              user_id: Optional[str] = None) -> Tuple[int, List[dict]]:
+    """按 ``aoi.created_at`` 倒序分页，返回 ``(total, rows)``。
+
+    ``user_id`` 非空时仅返回该用户的 run（注册/登录扩展：数据按人隔离）。
+    """
+    where = "WHERE t.user_id::text = %s" if user_id else ""
+    params: tuple = (user_id,) if user_id else ()
     with db_cursor() as cur:
-        cur.execute("SELECT COUNT(*) AS n FROM task")
+        cur.execute(f"SELECT COUNT(*) AS n FROM task t {where}", params)
         total = int(cur.fetchone()["n"])
         cur.execute(
-            _RUN_SELECT
-            + " ORDER BY a.created_at DESC, t.run_id DESC LIMIT %s OFFSET %s",
-            (int(limit), int(offset)),
+            _RUN_SELECT + f" {where} "
+            " ORDER BY a.created_at DESC, t.run_id DESC LIMIT %s OFFSET %s",
+            params + (int(limit), int(offset)),
         )
         return total, [dict(r) for r in cur.fetchall()]
 
 
-def get_run(run_id: str) -> Optional[dict]:
-    """取单条 run 的联表详情；不存在返回 None（上层 → EX2 404）。"""
+def get_run(run_id: str, user_id: Optional[str] = None) -> Optional[dict]:
+    """取单条 run 的联表详情；不存在或非本人（user_id 给定时）返回 None（上层 → EX2 404）。"""
+    sql = _RUN_SELECT + " WHERE t.run_id::text = %s"
+    params: tuple = (run_id,)
+    if user_id:
+        sql += " AND t.user_id::text = %s"
+        params = (run_id, user_id)
     with db_cursor() as cur:
-        cur.execute(_RUN_SELECT + " WHERE t.run_id::text = %s", (run_id,))
+        cur.execute(sql, params)
         row = cur.fetchone()
         return dict(row) if row else None
 

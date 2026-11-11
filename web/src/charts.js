@@ -9,6 +9,13 @@ const NAMES = { 1: '增强', 2: '退化', 3: '稳定' };
 
 let pie = null;
 let bar = null;
+let intensityBar = null;
+
+// A1 五档（与后端 constants.py INTENSITY_CODES / 文案一一对应，仅用于展示）
+const INTENSITY_ZH = { 1: '显著退化', 2: '轻微退化', 3: '稳定', 4: '轻微改善', 5: '显著改善' };
+const INTENSITY_COLORS = {
+  1: '#8e2c25', 2: '#e4a23c', 3: '#788ca0', 4: '#67b86b', 5: '#1e8a45',
+};
 
 function normalizeStats(stats) {
   const acc = { 1: 0, 2: 0, 3: 0 };
@@ -91,7 +98,66 @@ export function renderBar(el, stats) {
   bar.resize();
 }
 
+// A1：五档变化强度横向条形图（数据来自 /result/change 的 intensity.levels）
+export function renderIntensityBar(el, intensity) {
+  if (!el) return;
+  const levels = (intensity && Array.isArray(intensity.levels)) ? intensity.levels : [];
+  if (!levels.length) return;
+  const byCode = {};
+  levels.forEach((lv) => { byCode[Number(lv.code)] = lv; });
+  const codes = [1, 2, 3, 4, 5];
+  if (!intensityBar || intensityBar.isDisposed()) {
+    intensityBar = echarts.init(el, null, { renderer: 'canvas' });
+  }
+  intensityBar.setOption({
+    backgroundColor: 'transparent',
+    textStyle: { fontFamily: 'Segoe UI, Microsoft YaHei, sans-serif' },
+    title: { text: '变化强度五档（像元数）', left: 'center', top: 2,
+      textStyle: { color: '#5b6b82', fontSize: 12, fontWeight: 600 } },
+    tooltip: {
+      trigger: 'axis', axisPointer: { type: 'shadow' },
+      backgroundColor: 'rgba(255,255,255,0.97)', borderColor: '#d8e2ee',
+      textStyle: { color: '#24344d', fontSize: 12 },
+      formatter: (p) => {
+        const it = p && p[0];
+        if (!it) return '';
+        const lv = byCode[codes[it.dataIndex]] || {};
+        return it.name + '<br/>像元数：' + Number(it.value).toLocaleString()
+          + '<br/>占比：' + (Number(lv.ratio || 0) * 100).toFixed(2) + '%';
+      },
+    },
+    grid: { left: 92, right: 62, top: 38, bottom: 26 },
+    xAxis: {
+      type: 'value', name: '像元',
+      nameTextStyle: { color: '#8494a9' },
+      splitLine: { lineStyle: { color: '#e6edf4' } },
+      axisLabel: {
+        color: '#5b6b82', fontSize: 10,
+        formatter: (v) => (Number(v) >= 10000
+          ? (Number(v) / 10000).toFixed(Number(v) % 10000 === 0 ? 0 : 1) + '万'
+          : String(Number(v))),
+      },
+    },
+    yAxis: {
+      type: 'category', inverse: true, data: codes.map((c) => INTENSITY_ZH[c]),
+      axisLine: { lineStyle: { color: '#c3cfdd' } },
+      axisLabel: { color: '#3c4d66', fontSize: 11 },
+    },
+    series: [{
+      type: 'bar', barWidth: '58%',
+      data: codes.map((c) => ({
+        value: Number((byCode[c] && byCode[c].pixel_count) || 0),
+        itemStyle: { color: INTENSITY_COLORS[c], borderRadius: [0, 4, 4, 0] },
+      })),
+      label: { show: true, position: 'right', color: '#3c4d66', fontSize: 11,
+        formatter: (p) => Number(p.value).toLocaleString() },
+    }],
+  }, true);
+  intensityBar.resize();
+}
+
 export function resizeCharts() {
   if (pie && !pie.isDisposed()) pie.resize();
   if (bar && !bar.isDisposed()) bar.resize();
+  if (intensityBar && !intensityBar.isDisposed()) intensityBar.resize();
 }

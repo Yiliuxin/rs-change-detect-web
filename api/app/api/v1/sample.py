@@ -9,8 +9,10 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
+
+from app.api.deps import ensure_run_owner
 
 from app.api.v1.schemas import ErrorResponse
 from app.service import sample_service
@@ -45,8 +47,9 @@ class SampleFromLngLatResponse(BaseModel):
                500: {"model": ErrorResponse, "description": "SYS-01 裁切栅格读取失败"}},
     summary="样本图上点选（WGS84 经纬度 → 像元坐标 → 入库）",
 )
-def create_sample_from_lnglat(payload: SampleFromLngLatRequest) -> SampleFromLngLatResponse:
-    """REQ-09：由该 run 裁切栅格 geotransform 反算 (px_x, px_y)，AOI 外 → 400 EX12。"""
+def create_sample_from_lnglat(request: Request, payload: SampleFromLngLatRequest) -> SampleFromLngLatResponse:
+    """REQ-09：由该 run 裁切栅格 geotransform 反算 (px_x, px_y)，AOI 外 → 400 EX12；非本人 → AUTH-03。"""
+    ensure_run_owner(request, payload.run_id)
     result = sample_service.from_lnglat(
         payload.run_id, payload.lng, payload.lat,
         payload.ref_class, payload.label,

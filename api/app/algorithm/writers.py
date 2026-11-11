@@ -16,7 +16,9 @@ from typing import Dict, List, Optional, Sequence
 import numpy as np
 import rasterio
 
-from app.algorithm.change_detector import CHANGE_CODES, CHANGE_NODATA
+from app.algorithm.change_detector import (
+    CHANGE_CODES, CHANGE_LABELS_EN, CHANGE_NODATA,
+)
 from app.algorithm.mask_pipeline import judge_valid_ratio
 from app.algorithm.renderer import render_change_png
 from app.config.constants import (
@@ -25,6 +27,12 @@ from app.config.constants import (
     ATTRIBUTION_S2_MODIFIED,
     ERROR_MESSAGES,
     EXPORT_FORMATS,
+    INTENSITY_CODES,
+    INTENSITY_K,
+    INTENSITY_LABELS_EN,
+    INTENSITY_NOTE,
+    INTENSITY_NOTE_EN,
+    PATCH_PDF_TOP_N,
     VALID_RATIO_MIN,
     VALID_RATIO_WARN,
 )
@@ -34,8 +42,9 @@ _CJK_FONT_NAME: str = "MSYH"
 
 __all__ = [
     "ExportFormatError", "validate_export_formats", "valid_ratio_notice",
-    "render_area_chart", "render_index_histogram", "attribution_lines",
-    "write_geotiff", "write_geojson", "write_png", "write_pdf", "export_triplet",
+    "render_area_chart", "render_index_histogram", "render_intensity_chart",
+    "attribution_lines", "write_geotiff", "write_geojson", "write_png",
+    "write_pdf", "export_triplet",
 ]
 
 
@@ -231,6 +240,47 @@ def render_index_histogram(hist: dict, output_path) -> str:
         ax.set_title(f"{name} distribution vs threshold")
         ax.grid(axis="y", linestyle=":", linewidth=0.6, alpha=0.6)
         ax.set_axisbelow(True)
+        fig.tight_layout()
+        fig.savefig(str(path), format="png")
+    finally:
+        plt.close(fig)
+    return str(path.resolve())
+
+
+def render_intensity_chart(intensity: dict, output_path) -> str:
+    """A1：五档变化强度横向条形图 PNG（图内标签一律 ASCII）。
+
+    ``intensity`` 结构见 ``algorithm.intensity.intensity_stats``；全 0 / 缺键
+    时返回空串（调用方跳过，不伪造）。
+    """
+    counts = [int((intensity.get("counts") or {}).get(str(code), 0))
+              for code in INTENSITY_CODES]
+    if not any(counts):
+        return ""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    labels = [INTENSITY_LABELS_EN[int(code)] for code in INTENSITY_CODES]
+    colors = ["#8E2C25", "#E4A23C", "#788CA0", "#67B86B", "#1E8A45"]
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(6.4, 3.0), dpi=150)
+    try:
+        pos = np.arange(len(labels))
+        bars = ax.barh(pos, counts, color=colors, height=0.62)
+        ax.set_yticks(pos)
+        ax.set_yticklabels(labels, fontsize=7.5)
+        ax.invert_yaxis()
+        ax.set_xlabel("Pixel count")
+        ax.set_title("Change intensity grades (K*T boundary)")
+        ax.grid(axis="x", linestyle=":", linewidth=0.6, alpha=0.6)
+        ax.set_axisbelow(True)
+        top = max(counts) if counts else 0
+        ax.set_xlim(0.0, top * 1.18 if top > 0 else 1.0)
+        for bar, value in zip(bars, counts):
+            ax.text(bar.get_width(), bar.get_y() + bar.get_height() / 2.0,
+                    f" {value}", ha="left", va="center", fontsize=7.5)
         fig.tight_layout()
         fig.savefig(str(path), format="png")
     finally:
@@ -466,6 +516,133 @@ def write_pdf(report: dict, output_path, font_path: str = DEFAULT_FONT_PATH) -> 
             f"DIFF_TOTAL_AREA_HA={diff_area:.4f} REG_TOTAL_AREA_HA={reg_area:.4f}"
         )
 
+    # —— A1 变化强度分级（表 + 横向条形图，图内标签 ASCII；经验阈值标注）——
+    intensity = report.get("intensity")
+    intensity_chart_path = ""
+    intensity_table_used = False
+    if isinstance(intensity, dict) and intensity.get("levels"):
+        intensity_table_used = True
+        _ensure(200)
+        _line(L("变化强度分级 / CHANGE INTENSITY GRADES", "CHANGE INTENSITY GRADES"),
+              size=10, gap=16)
+        _ascii_line(
+            f"INTENSITY K={float(intensity.get('k', INTENSITY_K)):.2f} "
+            f"T={float(intensity.get('threshold', 0.0)):.4f} "
+            f"BOUNDARY_K_T={float(intensity.get('boundary', 0.0)):.4f}", gap=14)
+        int_rows = [[L("档位", "GRADE"), L("编码", "CODE"),
+                     L("像元数", "PIXEL COUNT"), L("占比", "RATIO")]]
+        for lv in intensity["levels"]:
+            int_rows.append([
+                L(str(lv.get("label", "")), str(lv.get("label_en", ""))),
+                str(int(lv.get("code", 0))),
+                str(int(lv.get("pixel_count", 0))),
+                f"{float(lv.get('ratio', 0.0)):.4f}",
+            ])
+        int_table = Table(int_rows, colWidths=[150, 60, 140, 110])
+        int_table.setStyle(TableStyle([
+            ("FONTNAME", (0, 0), (-1, -1), font_name),
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#DCE6F1")),
+            ("ALIGN", (1, 0), (-1, -1), "CENTER"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ]))
+        _, int_h = int_table.wrap(page_w - 2 * left, page_h)
+        int_table.drawOn(pdf, left, y - int_h)
+        y -= int_h + 14
+        counts_map = intensity.get("counts") or {}
+        _ascii_line("INTENSITY " + " ".join(
+            f"G{code}:PIXELS={int(counts_map.get(str(code), 0))}"
+            for code in INTENSITY_CODES), gap=14)
+        # 硬约束 4：经验阈值在 PDF 逐字标注（中文行 + 可检索 ASCII 行）
+        _line(L(INTENSITY_NOTE, INTENSITY_NOTE_EN), size=9, gap=14,
+              color=(150, 30, 30))
+        _ascii_line(INTENSITY_NOTE_EN, gap=14)
+        intensity_chart_path = render_intensity_chart(
+            intensity, path.parent / "intensity_chart.png")
+        if intensity_chart_path:
+            _ensure(215)
+            _ascii_line("INTENSITY BAR CHART: STRONG_DEGRADE / MILD_DEGRADE / "
+                        "STABLE / MILD_IMPROVE / STRONG_IMPROVE", gap=14)
+            pdf.drawImage(intensity_chart_path, left, y - chart_h,
+                          width=chart_w, height=chart_h)
+            y -= chart_h + 20
+
+    # —— A2 变化图斑统计（指标表 + 面积 Top5 表）——
+    patch = report.get("patch_stats")
+    patch_table_used = False
+    if isinstance(patch, dict):
+        patch_table_used = True
+        _ensure(200)
+        _line(L("变化图斑统计 / CHANGE PATCH STATISTICS", "CHANGE PATCH STATISTICS"),
+              size=10, gap=16)
+        if bool(patch.get("skipped")):
+            _line(L("已跳过：", "SKIPPED: ") + str(patch.get("reason", "")),
+                  size=9, gap=16, color=(150, 30, 30))
+            _ascii_line("PATCH STATS SKIPPED: " + str(patch.get("reason", "")), gap=14)
+        else:
+            metric_rows = [
+                [L("指标", "METRIC"), L("数值", "VALUE")],
+                [L("斑块数", "TOTAL PATCHES"), str(int(patch.get("total_patches", 0)))],
+                [L("总面积 (ha)", "TOTAL AREA (ha)"),
+                 f"{float(patch.get('total_area_ha', 0.0)):.4f}"],
+                [L("平均斑块面积 (ha)", "MEAN AREA (ha)"),
+                 f"{float(patch.get('mean_area_ha', 0.0)):.4f}"],
+                [L("中位斑块面积 (ha)", "MEDIAN AREA (ha)"),
+                 f"{float(patch.get('median_area_ha', 0.0)):.4f}"],
+                [L("最大斑块面积 (ha)", "MAX AREA (ha)"),
+                 f"{float(patch.get('max_area_ha', 0.0)):.4f}"],
+                [L("斑块密度 (个/km²)", "PATCH DENSITY (/km2)"),
+                 f"{float(patch.get('patch_density_per_km2', 0.0)):.4f}"],
+            ]
+            metric_table = Table(metric_rows, colWidths=[220, 160])
+            metric_table.setStyle(TableStyle([
+                ("FONTNAME", (0, 0), (-1, -1), font_name),
+                ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#DCE6F1")),
+                ("ALIGN", (1, 0), (-1, -1), "CENTER"),
+                ("TOPPADDING", (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ]))
+            _, metric_h = metric_table.wrap(page_w - 2 * left, page_h)
+            metric_table.drawOn(pdf, left, y - metric_h)
+            y -= metric_h + 12
+            _ascii_line(
+                f"PATCH STATS TOTAL={int(patch.get('total_patches', 0))} "
+                f"AREA_HA={float(patch.get('total_area_ha', 0.0)):.4f} "
+                f"MAX_HA={float(patch.get('max_area_ha', 0.0)):.4f}", gap=14)
+            top_rows = [["#", "CLASS", "AREA (ha)", "CENTROID LNG", "CENTROID LAT"]]
+            for item in (patch.get("top") or [])[:int(PATCH_PDF_TOP_N)]:
+                lng, lat = item.get("centroid_lng"), item.get("centroid_lat")
+                top_rows.append([
+                    str(int(item.get("rank", 0))),
+                    CHANGE_LABELS_EN.get(int(item.get("change_class", 0)), "NODATA"),
+                    f"{float(item.get('area_ha', 0.0)):.4f}",
+                    "—" if lng is None else f"{float(lng):.6f}",
+                    "—" if lat is None else f"{float(lat):.6f}",
+                ])
+            if len(top_rows) > 1:
+                _ensure(120)
+                _line(L(f"面积 Top{int(PATCH_PDF_TOP_N)} 图斑（含质心经纬度）",
+                        f"TOP {int(PATCH_PDF_TOP_N)} PATCHES BY AREA"),
+                      size=9, gap=14)
+                top_table = Table(top_rows, colWidths=[35, 95, 95, 115, 115])
+                top_table.setStyle(TableStyle([
+                    ("FONTNAME", (0, 0), (-1, -1), font_name),
+                    ("FONTSIZE", (0, 0), (-1, -1), 8),
+                    ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#DCE6F1")),
+                    ("ALIGN", (1, 0), (-1, -1), "CENTER"),
+                    ("TOPPADDING", (0, 0), (-1, -1), 3),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ]))
+                _, top_h = top_table.wrap(page_w - 2 * left, page_h)
+                top_table.drawOn(pdf, left, y - top_h)
+                y -= top_h + 16
+
     # —— 独立数据署名页（REQ-15 / NF6 / NF7）：逐字复用常量源文案 ——
     _new_page()
     _line(L("数据署名 / DATA ATTRIBUTION", "DATA ATTRIBUTION"), size=15, gap=26)
@@ -504,6 +681,9 @@ def write_pdf(report: dict, output_path, font_path: str = DEFAULT_FONT_PATH) -> 
         "area_chart": chart_path,
         "index_histogram": hist_path,
         "comparison_table": comparison_used,
+        "intensity_chart": intensity_chart_path,
+        "intensity_table": intensity_table_used,
+        "patch_table": patch_table_used,
     }
 
 

@@ -19,6 +19,8 @@
           </div>
         </div>
         <div class="topbar-right">
+          <span class="user-chip" id="user-chip" hidden title="当前登录用户"><span class="u-name" id="user-name">—</span></span>
+          <button type="button" class="btn btn-sm btn-ghost btn-logout" id="btn-logout" hidden>退出</button>
           <span id="conn-badge" class="badge badge-source">● 数据源检测中…</span>
           <span class="badge badge-env">MVP 离线</span>
         </div>
@@ -183,8 +185,19 @@
             </div>
 
             <div id="onl-body">
+              <!-- 地点选择：A 卡预置影像区（12 组）+ 内置扩展地名库（places.js，任意检索）；
+                   选中即套用 A 卡 AOI，回显实时更新；时相窗口独立自由填写 -->
+              <div class="onl-place-row">
+                <div class="onl-place-field">
+                  <label class="fld" for="onl-place">选择地点</label>
+                  <select id="onl-place" aria-label="在线取数地点"><option value="">— 使用 A 卡当前 AOI —</option></select>
+                </div>
+                <button type="button" class="btn btn-sm btn-ghost onl-place-draw"
+                  title="切到地图拖拽画框，框完回到本卡直接检索">地图框选</button>
+              </div>
+
               <!-- 复用 A 卡当前 AOI（不重复输入；实时回显 bbox） -->
-              <div class="onl-aoi-echo">复用 A 卡当前 AOI（WGS84 bbox）<span class="v" id="onl-aoi-text">—</span></div>
+              <div class="onl-aoi-echo">当前 AOI（WGS84 bbox）<span class="v" id="onl-aoi-text">—</span></div>
 
               <!-- 两时相窗口 + 检索按钮 -->
               <div class="onl-window">
@@ -261,7 +274,30 @@
         <!-- ============ 中央 · 地图（始终可交互） ============ -->
         <section class="map-area" aria-label="地图">
           <div id="map"></div>
-          <div id="map-legend" class="map-legend" hidden></div>
+          <!-- B1 图层面板：三层显隐 + 各自透明度 + 三类色块图例（REQ-10） -->
+          <div id="map-legend" class="map-legend layer-panel">
+            <h4>图层控制 · 三类色带</h4>
+            <div class="layer-row">
+              <label class="chk layer-chk"><input type="checkbox" id="layer-t1" checked /> t1 真彩</label>
+              <input type="range" id="layer-t1-opacity" min="0" max="100" value="100" aria-label="t1 真彩不透明度" />
+              <span class="slider-val" id="layer-t1-val">100%</span>
+            </div>
+            <div class="layer-row">
+              <label class="chk layer-chk"><input type="checkbox" id="layer-t2" checked /> t2 真彩</label>
+              <input type="range" id="layer-t2-opacity" min="0" max="100" value="100" aria-label="t2 真彩不透明度" />
+              <span class="slider-val" id="layer-t2-val">100%</span>
+            </div>
+            <div class="layer-row">
+              <label class="chk layer-chk"><input type="checkbox" id="layer-change" checked /> 变化专题</label>
+              <input type="range" id="layer-change-opacity" min="0" max="100" value="85" aria-label="变化专题图不透明度" />
+              <span class="slider-val" id="layer-change-val">85%</span>
+            </div>
+            <div class="layer-legend">
+              <div class="legend-row"><span class="legend-code">1</span><span class="legend-swatch" style="background:#21a04c"></span>增强</div>
+              <div class="legend-row"><span class="legend-code">2</span><span class="legend-swatch" style="background:#d94c3d"></span>退化</div>
+              <div class="legend-row"><span class="legend-code">3</span><span class="legend-swatch" style="background:#5b7a99"></span>稳定</div>
+            </div>
+          </div>
           <div id="map-hint" class="map-hint"></div>
           <div id="map-mode" class="map-mode" role="group" aria-label="地图交互模式">
             <button type="button" class="mode-btn" data-mode="browse" title="自由浏览：缩放平移查看 AOI 与专题图">浏览</button>
@@ -307,6 +343,22 @@
               </div>
               <div class="chart" id="chart-pie"></div>
               <div class="chart" id="chart-bar"></div>
+
+              <!-- A1 变化强度分级：五档表 + ECharts 横向条形图；无数据整块隐藏 -->
+              <div class="inner-card" id="intensity-block" hidden>
+                <div class="card-subtitle">变化强度分级<span class="readonly-badge">A1 · 五档</span></div>
+                <table class="tbl" id="intensity-table"></table>
+                <div class="chart chart-intensity" id="chart-intensity"></div>
+                <div class="empirical-note">经验阈值，非物候标定</div>
+              </div>
+
+              <!-- A2 变化图斑统计：指标行 + 面积 Top10 表；无数据整块隐藏 -->
+              <div class="inner-card" id="patch-block" hidden>
+                <div class="card-subtitle">变化图斑统计<span class="readonly-badge">A2 · 4 邻域</span></div>
+                <div class="metric-row" id="patch-metrics"></div>
+                <div class="card-subtitle">面积 Top10 图斑</div>
+                <div class="patch-table-wrap"><table class="tbl" id="patch-top-table"></table></div>
+              </div>
             </div>
             </div><!-- /#view-thematic -->
 

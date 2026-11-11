@@ -9,10 +9,35 @@ import * as demo from './demo.js';
 const BASE = '/api/v1';
 const TIMEOUT_MS = 15000; // 重计算接口（POST /scene/match 真实读取 COG 算掩膜）放宽到 15s；constants.py API_TIMEOUT_SEC = 3 仅适用于轻接口，避免 2.5s 误超时降级
 
+// 认证扩展（注册/登录）：统一注入 Bearer token；401 → 清票据回登录页
+export const AUTH = {
+  get token() { return localStorage.getItem('rst_token') || ''; },
+  get username() { return localStorage.getItem('rst_username') || ''; },
+  save(token, username) {
+    localStorage.setItem('rst_token', token);
+    localStorage.setItem('rst_username', username || '');
+  },
+  clear() {
+    localStorage.removeItem('rst_token');
+    localStorage.removeItem('rst_username');
+  },
+  toLogin() { location.replace('/login.html'); },
+};
+
 function fetchWithTimeout(url, options) {
   const ctrl = new AbortController();
   const timer = window.setTimeout(() => ctrl.abort(), TIMEOUT_MS);
-  return fetch(url, { ...options, signal: ctrl.signal }).finally(() => window.clearTimeout(timer));
+  const headers = { ...(options && options.headers) };
+  if (AUTH.token) headers['Authorization'] = 'Bearer ' + AUTH.token;
+  return fetch(url, { ...options, headers, signal: ctrl.signal })
+    .then((resp) => {
+      if (resp.status === 401 && !url.includes('/auth/login') && !url.includes('/auth/register')) {
+        AUTH.clear();
+        AUTH.toLogin();
+      }
+      return resp;
+    })
+    .finally(() => window.clearTimeout(timer));
 }
 
 // 读取后端统一错误体；不是错误体则返回 null

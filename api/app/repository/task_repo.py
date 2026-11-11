@@ -17,19 +17,20 @@ __all__ = [
 
 
 def insert_task(run_id: str, aoi_id: str, scene_t1_id: str, scene_t2_id: str,
-                params_snapshot: dict, commit_hash: Optional[str] = None) -> str:
-    """新建 task（status=PENDING），返回 run_id。"""
+                params_snapshot: dict, commit_hash: Optional[str] = None,
+                user_id: Optional[str] = None) -> str:
+    """新建 task（status=PENDING），返回 run_id；user_id 为归属用户（认证扩展）。"""
     with db_cursor() as cur:
         cur.execute(
             """
             INSERT INTO task
                 (run_id, aoi_id, scene_t1_id, scene_t2_id,
-                 params_snapshot, commit_hash, status)
-            VALUES (%s, %s, %s, %s, %s, %s, 'PENDING')
+                 params_snapshot, commit_hash, status, user_id)
+            VALUES (%s, %s, %s, %s, %s, %s, 'PENDING', %s)
             RETURNING run_id
             """,
             (run_id, aoi_id, scene_t1_id, scene_t2_id,
-             Json(params_snapshot), commit_hash),
+             Json(params_snapshot), commit_hash, user_id),
         )
         return str(cur.fetchone()["run_id"])
 
@@ -43,7 +44,8 @@ def get_task(run_id: str) -> Optional[dict]:
                    scene_t1_id::text AS scene_t1_id,
                    scene_t2_id::text AS scene_t2_id,
                    params_snapshot, commit_hash, status, error_code,
-                   started_at, finished_at
+                   started_at, finished_at,
+                   user_id::text AS user_id
             FROM task WHERE run_id::text = %s
             """,
             (run_id,),

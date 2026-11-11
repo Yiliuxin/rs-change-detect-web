@@ -8,6 +8,7 @@ PostGIS ``ST_Intersects`` 空间相交检索（**不按 scene.aoi_id 过滤**）
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from datetime import date
 from typing import Dict, List, Optional, Tuple
@@ -105,8 +106,12 @@ def _scene_vo(scene: dict) -> dict:
     }
 
 
-def select(aoi_geom: str, t1: date, t2: date) -> dict:
-    """AOI 提交与预置影像对匹配（REQ-01/02/14）。"""
+def select(aoi_geom: str, t1: date, t2: date,
+           user_id: str | None = None) -> dict:
+    """AOI 提交与预置影像对匹配（REQ-01/02/14）。
+
+    ``user_id``：登录用户归属（注册/登录扩展）；认证关闭时为 None（测试直通）。
+    """
     # run_id 先生成，保证所有错误响应都能带上 run_id（REQ-14）
     run_id = str(uuid.uuid4())
     aoi_id = str(uuid.uuid4())
@@ -152,13 +157,16 @@ def select(aoi_geom: str, t1: date, t2: date) -> dict:
             "scene_t2_id": sc_t2["scene_id"],
             "scene_cog_paths": {"t1": sc_t1["cog_path"], "t2": sc_t2["cog_path"]},
             "commit": git_short_commit(),
+            # 测试数据标记：pytest 环境置真，cleanup_test_data.py 据此只删测试 run（保护真实历史）
+            "test_data": os.environ.get("RS_TEST_MODE") == "1",
         }
 
-        # 写 aoi + task（status=PENDING）
+        # 写 aoi + task（status=PENDING）；task 记录归属用户（注册/登录扩展）
         aoi_repo.insert_aoi(aoi_id, geom_json, area_deg2)
         task_repo.insert_task(
             run_id, aoi_id, sc_t1["scene_id"], sc_t2["scene_id"],
             params_snapshot, commit_hash=params_snapshot["commit"],
+            user_id=user_id,
         )
 
         return {
