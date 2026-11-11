@@ -621,6 +621,35 @@ input[type="range"]:disabled { opacity: .45; cursor: not-allowed; }
 .adv-note { margin-top: 6px; font-size: 10.5px; color: var(--muted2); line-height: 1.5; }
 .subtitle-btn { margin-left: auto; padding: 3px 8px; font-size: 10.5px; font-weight: 700; }
 
+/* ===== 名词解释 · 专业缩写可读性（abbr 虚线 + 折叠术语表） ===== */
+/* 行内缩写：虚线下划线提示「可悬停看解释」，样式克制不抢焦点 */
+.term {
+  text-decoration: underline dotted var(--muted2);
+  text-underline-offset: 3px;
+  cursor: help;
+  font-style: normal;
+}
+/* 折叠术语表卡：复用 details/summary 折叠模式，排版为紧凑词典 */
+.glossary { background: var(--card2); }
+.glossary > summary {
+  cursor: pointer; user-select: none; list-style: none;
+  display: flex; align-items: baseline; gap: 8px;
+  font-size: 12.5px; font-weight: 700; color: var(--muted);
+}
+.glossary > summary::-webkit-details-marker { display: none; }
+.glossary > summary::before { content: '▸'; display: inline-block; color: var(--accent); }
+.glossary[open] > summary::before { content: '▾'; }
+.glossary-body { margin-top: 10px; }
+.glossary-body dl { margin: 0; }
+.glossary-body dt {
+  margin-top: 9px; font-size: 12px; font-weight: 700; color: var(--txt);
+}
+.glossary-body dt:first-child { margin-top: 0; }
+.glossary-body dd {
+  margin: 3px 0 0; padding: 0;
+  font-size: 11.5px; line-height: 1.65; color: var(--muted2);
+}
+
 /* ===== 2B · 历史运行卡（第七张常驻卡 / REQ-13/14） ===== */
 .hist-list {
   max-height: 300px; overflow-y: auto; margin-top: 10px; padding-right: 2px;

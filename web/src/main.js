@@ -94,18 +94,9 @@ function currentRunId() {
     || (S.aoiResult && S.aoiResult.run_id) || '';
 }
 
-// 数据源状态徽标：真实后端 / 演示数据（沿用 is-demo 机制）
-function setDataBadge(isDemo, viaLabel) {
-  const b = $('conn-badge');
+// 数据源状态：仅切换 body 的 is-demo 类（顶栏徽标已移除，界面上不再显示数据源标签）
+function setDataBadge(isDemo) {
   document.body.classList.toggle('is-demo', !!isDemo);
-  if (!b) return;
-  if (isDemo) {
-    b.textContent = '● 演示数据';
-    b.className = 'badge badge-source badge-source-demo';
-  } else {
-    b.textContent = '● 真实后端' + (viaLabel ? ' · ' + viaLabel : '');
-    b.className = 'badge badge-source badge-source-live';
-  }
 }
 
 let demoMarked = false;
@@ -115,7 +106,7 @@ function markDemo() {
   const fw = $('fill-wrap'); if (fw) fw.hidden = false;
   if (first && !demoMarked) {
     demoMarked = true;
-    showToast('后端接口不可用或返回空占位，已启用本地演示数据（页面已标注）', 'warn', 5200);
+    showToast('后端接口暂不可用，当前使用本地演示数据', 'warn', 5200);
   }
 }
 

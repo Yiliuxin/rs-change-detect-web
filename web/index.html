@@ -21,8 +21,6 @@
         <div class="topbar-right">
           <span class="user-chip" id="user-chip" hidden title="当前登录用户"><span class="u-name" id="user-name">—</span></span>
           <button type="button" class="btn btn-sm btn-ghost btn-logout" id="btn-logout" hidden>退出</button>
-          <span id="conn-badge" class="badge badge-source">● 数据源检测中…</span>
-          <span class="badge badge-env">MVP 离线</span>
         </div>
       </header>
 
@@ -32,7 +30,7 @@
 
           <!-- A. AOI 设置（UI-01 / REQ-01） -->
           <section class="card" id="card-aoi">
-            <div class="card-title"><span class="title-main">AOI 设置<span class="badge tag-path">路径① 预置影像</span></span></div>
+            <div class="card-title"><span class="title-main"><abbr class="term" title="Area of Interest，研究区——一次变化检测的空间范围，用经纬度矩形框定">AOI</abbr> 设置<span class="badge tag-path">路径① 预置影像</span></span></div>
             <div class="path-hint">已入库 12 组影像，选定一组即带出 AOI 与拍摄日期，可直接应用检测。<button type="button" class="path-link" id="btn-goto-online">不在预置范围？去在线取数 →</button></div>
             <div class="grid2">
               <div><label class="fld" for="aoi-w">西 West (lon)</label><input type="number" step="0.0001" id="aoi-w" /></div>
@@ -106,13 +104,13 @@
               <div>
                 <label class="fld">指数类型 index</label>
                 <div class="index-radios" id="index-radios" role="group" aria-label="变化检测指数">
-                  <label class="chk" title="NDVI =(NIR−R)/(NIR+R)，默认"><input type="radio" name="index-type" value="NDVI" checked /> NDVI</label>
-                  <label class="chk" title="NDWI =(G−NIR)/(G+NIR)，水体变化"><input type="radio" name="index-type" value="NDWI" /> NDWI</label>
+                  <label class="chk" title="归一化植被指数 =(NIR−R)/(NIR+R)，值越高植被越茂密，适合监测植被退化/恢复"><input type="radio" name="index-type" value="NDVI" checked /> <abbr class="term" title="Normalized Difference Vegetation Index，归一化植被指数：用近红外与红光波段计算，值越高植被越茂密">NDVI</abbr></label>
+                  <label class="chk" title="归一化水体指数 =(G−NIR)/(G+NIR)，大于 0 大概率为水体，适合监测湖泊/水面变化"><input type="radio" name="index-type" value="NDWI" /> <abbr class="term" title="Normalized Difference Water Index，归一化水体指数：用绿光与近红外波段计算，大于 0 大概率为水体">NDWI</abbr></label>
                 </div>
                 <!-- 4A（REQ-11）：检测方法与 index / 手动阈值 / 后台运行各自独立，默认差值法 -->
                 <label class="fld method-label" for="change-method">检测方法 method</label>
-                <select id="change-method" title="差值法=既有 Otsu 自适应；回归法=对 NDVI 稳健回归残差做 Otsu">
-                  <option value="otsu" selected>差值法（Otsu）</option>
+                <select id="change-method" title="差值法：两期指数直接相减后用 Otsu 自动找阈值，简单直接；回归法：先拟合两期关系剔除整体偏移（如薄云/光照差异），只看残差，抗干扰更强">
+                  <option value="otsu" selected>差值法（<abbr class="term" title="Otsu：一种自动寻找最佳分割阈值的经典算法，无需手动设定阈值">Otsu</abbr>）</option>
                   <option value="regression">回归法（回归残差）</option>
                 </select>
               </div>
@@ -122,7 +120,7 @@
             <details class="advanced" id="run-advanced">
               <summary>高级选项 · 变化阈值</summary>
               <div class="adv-body">
-                <label class="chk"><input type="checkbox" id="manual-threshold" /> 手动覆盖 Otsu 阈值</label>
+                <label class="chk"><input type="checkbox" id="manual-threshold" /> 手动覆盖 <abbr class="term" title="Otsu：自动阈值算法，勾选后改为手动指定阈值 T">Otsu</abbr> 阈值</label>
                 <div class="adv-row">
                   <span class="adv-label">阈值 T</span>
                   <input type="range" id="threshold-slider" min="-0.5" max="0.5" step="0.01" value="0.10" disabled />
@@ -269,6 +267,49 @@
             <button type="button" class="btn btn-sm btn-block gap-top" id="hist-more" disabled>已加载全部</button>
             <div class="hist-detail" id="hist-detail" hidden></div>
           </section>
+
+          <!-- 名词解释：折叠卡，帮助不熟悉遥感术语的用户理解界面上的专业缩写 -->
+          <details class="card glossary" id="card-glossary">
+            <summary class="card-title">名词解释<span class="hint">悬停虚线词也有提示</span></summary>
+            <div class="glossary-body">
+              <dl>
+                <dt>AOI（Area of Interest）</dt>
+                <dd>研究区。一次变化检测的空间范围，用经纬度矩形框定，界面上可以手动填、地图框选或选预置地点。</dd>
+                <dt>NDVI（归一化植被指数）</dt>
+                <dd>用近红外与红光波段按 (NIR−R)/(NIR+R) 计算，值 0.3–0.8 表示植被茂密。植被被砍伐、农田变化时 NDVI 明显下降，本平台默认用它监测植被类变化。</dd>
+                <dt>NDWI（归一化水体指数）</dt>
+                <dd>用绿光与近红外波段按 (G−NIR)/(G+NIR) 计算，大于 0 大概率是水体。适合监测湖泊退水、水面萎缩（如鄱阳湖枯水期）。</dd>
+                <dt>NIR / R / G</dt>
+                <dd>卫星传感器的三个波段：近红外（Sentinel-2 的 B08）、红光（B04）、绿光（B03）。不同地物在各波段的反射特性不同，是计算指数的原料。</dd>
+                <dt>双时相影像（t1 / t2）</dt>
+                <dd>同一地点、前后两个时间的卫星影像。t1 是「变化前」，t2 是「变化后」，变化检测就是对比这两期。</dd>
+                <dt>Δ（差值）</dt>
+                <dd>t2 的指数值减去 t1 的指数值。Δ &gt; 0 指数上升（如植被恢复），Δ &lt; 0 指数下降（如植被退化）。</dd>
+                <dt>Otsu（大津法）</dt>
+                <dd>一种自动寻找最佳分割阈值的经典算法：对差值 Δ 的直方图自动算出阈值 T，无需人工设定。平台默认用它，也可在「高级选项」手动覆盖。</dd>
+                <dt>差值法 / 回归法</dt>
+                <dd>两种检测策略。差值法直接用 Δ 找阈值，简单直接；回归法先拟合两期指数的整体关系、剔除光照或薄云造成的整体偏移，只把「偏离正常规律的残差」当变化，抗干扰更强。</dd>
+                <dt>增强 / 退化 / 稳定（编码 1 / 2 / 3）</dt>
+                <dd>像元级的三类判定结果：指数显著上升、显著下降、变化在阈值以内基本不变。0 表示 nodata（无效像元，如云、范围外），不参与统计。</dd>
+                <dt>变化强度五档</dt>
+                <dd>在三类判定基础上按 |Δ| 超过阈值 T 的倍数细分：显著退化、轻微退化、稳定、轻微改善、显著改善，回答「变得多剧烈」。</dd>
+                <dt>图斑（斑块）</dt>
+                <dd>空间上连通成片的变化像元区域。用于统计斑块数量、平均/最大面积、斑块密度等形态指标，Top10 表列出面积最大的变化地块。</dd>
+                <dt>地物转移矩阵</dt>
+                <dd>4×4 表格，回答「什么东西变成了什么」：行是 t1 的地物类别（水体/植被/裸土建成/其他），列是 t2 的类别，对角线是未变化的部分。</dd>
+                <dt>总体精度 OA（Overall Accuracy）</dt>
+                <dd>精度评价样本中判断正确的比例，越接近 1（100%）越准。</dd>
+                <dt>Kappa 系数</dt>
+                <dd>扣除随机巧合后的一致性度量：同样正确率下，类别分布越均衡 Kappa 越高。经验上 0.6 以上算可靠，越接近 1 越好。</dd>
+                <dt>ha（公顷）</dt>
+                <dd>面积单位，1 ha = 10,000 m² = 0.01 km²，界面上的变化面积均以公顷计。</dd>
+                <dt>GeoTIFF / GeoJSON</dt>
+                <dd>两种带地理坐标的成果格式：GeoTIFF 是栅格影像（QGIS/ArcGIS 可打开），GeoJSON 是矢量多边形（每个变化图斑一个面，含面积属性）。</dd>
+                <dt>真彩合成</dt>
+                <dd>用红绿蓝三个波段合成的「人眼视角」影像，图层面板里的 t1 / t2 图层即为真彩合成，用于目视对照变化专题图。</dd>
+              </dl>
+            </div>
+          </details>
         </aside>
 
         <!-- ============ 中央 · 地图（始终可交互） ============ -->
@@ -463,8 +504,8 @@
               <div id="accuracy-result" hidden>
                 <div class="card-subtitle">精度评价结果</div>
                 <div class="metric-row">
-                  <div class="metric"><div class="k">总体精度 OA</div><div class="v" id="oa">—</div></div>
-                  <div class="metric"><div class="k">Kappa 系数</div><div class="v" id="kappa">—</div></div>
+                  <div class="metric"><div class="k"><abbr class="term" title="Overall Accuracy，总体精度：所有样本中判断正确的比例，越接近 1 越准">总体精度 OA</abbr></div><div class="v" id="oa">—</div></div>
+                  <div class="metric"><div class="k"><abbr class="term" title="Kappa 系数：扣除随机巧合后的一致性度量，0.6 以上算可靠，越接近 1 越好">Kappa 系数</abbr></div><div class="v" id="kappa">—</div></div>
                 </div>
                 <div class="ok-line" id="acc-note"></div>
                 <div class="gap-top"><table class="tbl" id="cm-table"></table></div>
@@ -482,10 +523,10 @@
             </div>
             <div id="export-body" hidden>
               <div class="fmt-row">
-                <label class="chk"><input type="checkbox" id="cb-geotiff" checked /> GeoTIFF</label>
+                <label class="chk" title="带地理坐标的栅格影像文件，可用 QGIS / ArcGIS 打开做进一步分析"><input type="checkbox" id="cb-geotiff" checked /> <abbr class="term" title="GeoTIFF：带地理坐标信息的栅格影像格式，可用 QGIS/ArcGIS 等专业软件打开">GeoTIFF</abbr></label>
                 <label class="chk"><input type="checkbox" id="cb-png" checked /> PNG</label>
                 <label class="chk"><input type="checkbox" id="cb-pdf" checked /> PDF</label>
-                <label class="chk"><input type="checkbox" id="cb-geojson" /> GeoJSON</label>
+                <label class="chk" title="带地理坐标的矢量面文件，每个变化图斑是一个多边形，属性含面积"><input type="checkbox" id="cb-geojson" /> <abbr class="term" title="GeoJSON：以 JSON 文本存储的矢量格式，这里导出的是变化图斑多边形（含面积属性），可用 QGIS 或地图软件打开">GeoJSON</abbr></label>
               </div>
               <button type="button" class="btn btn-primary btn-block gap-top" id="btn-export"
                 title="按所选格式导出成果文件">导出所选格式</button>
