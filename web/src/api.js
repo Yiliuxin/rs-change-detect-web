@@ -353,7 +353,18 @@ const ONLINE_FETCH_START_TIMEOUT_MS = 30000;
 function onlineFetch(path, options, timeoutMs) {
   const ctrl = new AbortController();
   const timer = window.setTimeout(() => ctrl.abort(), timeoutMs);
-  return fetch(BASE + path, { ...options, signal: ctrl.signal })
+  // 在线取数端点同样受 JWT 网关保护：必须带 Bearer，401 清票据回登录页
+  // （口径与 fetchWithTimeout 一致；此前漏带 token，登录后仍恒 401/AUTH-01）
+  const headers = { ...(options && options.headers) };
+  if (AUTH.token) headers['Authorization'] = 'Bearer ' + AUTH.token;
+  return fetch(BASE + path, { ...options, headers, signal: ctrl.signal })
+    .then((resp) => {
+      if (resp.status === 401 && !path.includes('/auth/login') && !path.includes('/auth/register')) {
+        AUTH.clear();
+        AUTH.toLogin();
+      }
+      return resp;
+    })
     .finally(() => window.clearTimeout(timer));
 }
 
