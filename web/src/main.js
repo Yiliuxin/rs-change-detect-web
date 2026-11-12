@@ -445,14 +445,14 @@ async function applyPresetAoi() {
 }
 
 // ===== UI-02：影像对（REQ-02 / REQ-04） =====
-// 4A：只把 landsat_<地名> 组的两期日期补进 A 卡时相下拉，保证新入库影像对
-// 可被 /aoi/select 精确匹配；既有 3 组 seed 的 PRESET_DATES 与 11 组 S2 选项、
-// 已选时相完全不变，演示降级路径不下发任何补充日期。
+// 4A：把清单里所有影像对（含在线取数新入库的 S2 / Landsat 组）的两期日期补进
+// A 卡时相下拉，保证新入库影像对可被 /aoi/select 精确匹配（按 acq_date 配对，
+// 下拉里没有实际拍摄日就无法提交成功）。既有 PRESET_DATES 与已选时相完全不变，
+// 演示降级路径不下发任何补充日期。
 function extendPresetDates(pairs) {
   const extra = [];
   (pairs || []).forEach((p) => {
-    if (!/^landsat_/.test(String((p && p.key) || ''))) return;
-    const t1 = p.scenes && p.scenes.t1, t2 = p.scenes && p.scenes.t2;
+    const t1 = p && p.scenes && p.scenes.t1, t2 = p && p.scenes && p.scenes.t2;
     if (t1 && t1.date) extra.push(String(t1.date));
     if (t2 && t2.date) extra.push(String(t2.date));
   });
