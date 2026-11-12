@@ -68,6 +68,8 @@ const ON = {
   pollBusy: false,       // 避免单次 GET 未返回时重叠发请求
   pollFails: 0,
   terminal: '',          // '' | 'SUCCESS' | 'FAILED'
+  fetchBbox: null,       // 取数受理时的 AOI 快照（全精度 [w,s,e,n]），成功后据此自动应用
+  fetchDates: null,      // 所选候选的实际拍摄日 { t1, t2 }，成功后回填 A 卡时相下拉
 };
 
 let map = null;
@@ -2108,7 +2110,34 @@ function restoreOnlineFetchButton() {
   updateOnlineFetchGate();
 }
 
-function onlineFetchTerminal(status, data) {
+// 取数成功后一键收尾：用受理时快照的全精度 AOI + 实际拍摄日回填 A 卡并自动提交。
+// 解决原流程两个断点：①用户中途动了地图/刷新，AOI 丢失或漂移；②新拍摄日不在
+// A 卡时相下拉里、手填坐标四舍五入越界——本函数保证口径与已下载范围严格一致。
+async function onlineApplyFetchResult() {
+  const b = ON.fetchBbox;
+  if (!Array.isArray(b) || b.length !== 4) return;
+  const box = { w: Number(b[0]), s: Number(b[1]), e: Number(b[2]), n: Number(b[3]) };
+  if (![box.w, box.s, box.e, box.n].every(Number.isFinite)) return;
+  pushAoiHistory();
+  S.aoi = { ...box };
+  // 全精度回填四至（fillAoiInputs 的 toFixed(4) 会让东/北边界超出已下载范围半个像元）
+  $('aoi-w').value = String(box.w);
+  $('aoi-s').value = String(box.s);
+  $('aoi-e').value = String(box.e);
+  $('aoi-n').value = String(box.n);
+  if (map) { M.setAoi(map, S.aoi); M.fitBounds(map, boundsFromArray(b), 90); }
+  const d1 = ON.fetchDates && ON.fetchDates.t1, d2 = ON.fetchDates && ON.fetchDates.t2;
+  if (d1 && d2) {
+    ensureDateOptions([d1, d2]);
+    $('t1').value = d1;
+    $('t2').value = d2;
+    S.t1 = d1; S.t2 = d2;
+  }
+  updateAoiMetrics();
+  await submitAoi();   // 成功后 loadPairs → autoSelectPair 按日期命中本组 → 口径自动确认
+}
+
+async function onlineFetchTerminal(status, data) {
   stopOnlinePolling();
   ON.terminal = status;
   const pg = (data && data.progress) || {};
@@ -2118,18 +2147,20 @@ function onlineFetchTerminal(status, data) {
     const ids = (data && data.scene_ids) || {};
     const ok = $('onl-success');
     ok.hidden = false;
-    ok.textContent = '✓ 入库完成 · scene t1 ' + (ids.t1 || '—') + ' / t2 ' + (ids.t2 || '—') + '，影像对列表已刷新';
-    showToast('在线取数完成，影像对列表已刷新', 'ok', 4200);
-    // 自动刷新 B 卡影像对列表（loadPairs → api.listScenePairs()）
+    ok.textContent = '✓ 入库完成 · scene t1 ' + (ids.t1 || '—') + ' / t2 ' + (ids.t2 || '—')
+      + '；正在按取数范围自动应用 AOI 并确认口径…';
+    showToast('在线取数完成，正在自动应用 AOI 与时相', 'ok', 4200);
+    // 自动收尾后再刷新 B 卡清单：autoSelectPair 按 t1/t2 命中刚入库的组，口径随即自动确认
+    try { await onlineApplyFetchResult(); } catch (_) { /* 失败不阻断列表刷新 */ }
     loadPairs();
   } else {
     const box = $('onl-failed');
     box.hidden = false;
     const err = (data && data.error) || {};
     box.textContent = onlineErrText({ code: err.code, message: err.message });
+    // 终态后按钮进度态复位为可再次提交
+    $('onl-fetch').textContent = '下载并入库';
   }
-  // 终态后按钮进度态复位为可再次提交
-  $('onl-fetch').textContent = '下载并入库';
 }
 
 async function onlinePollTick() {
@@ -2213,6 +2244,10 @@ async function onlineFetch() {
   };
   const btn = $('onl-fetch');
   btn.disabled = true; btn.textContent = '提交中…';
+  // 快照取数口径：AOI 用全精度 bbox（提交/检测都以它为准，四舍五入会读出越界 nodata），
+  // 日期用候选的实际拍摄日（非检索窗口），成功后据此自动应用 AOI 并确认口径
+  ON.fetchBbox = pre.bbox.slice();
+  ON.fetchDates = { t1: String(c.t1.date), t2: String(c.t2.date) };
   try {
     const res = await api.startFetch(body);
     if (res.ok && res.data && res.data.fetch_id) {
