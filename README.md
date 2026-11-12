@@ -5,7 +5,7 @@
 ## 功能特性
 
 **检测与分析**
-- AOI 框选 / 预置影像对 / 在线取数（25 个内置地名 + 地图框选，拉取真实 Sentinel-2 L2A 数据）
+- AOI 框选 / 预置影像对 / 在线取数（全国 3200+ 地名搜索或地图点选定位，拉取真实 Sentinel-2 L2A 数据）
 - 变化检测：NDVI / NDWI，阈值法（Otsu 逐景自适应）或回归法（迭代剔除离群）
 - 三类像元统计（增强 / 退化 / 稳定）+ 指数分布直方图
 - 变化强度五档分级（|Δ| 相对阈值 T 的倍数口径，跨景可比）
@@ -58,7 +58,7 @@ data/                 影像数据（tif 不入 Git，单独传输）
 ```bash
 git clone https://github.com/Yiliuxin/rs-change-detect-web.git
 cd rs-change-detect-web
-git checkout lyj          # 最新代码在 lyj 分支
+# main 即最新稳定版；如需在自己分支开发，再 git checkout lyj（或 ylx）
 ```
 
 影像数据已随仓库分发（12 组预置影像对 `data/pair_*`，约 122MB，单文件均低于 GitHub 限制），clone 即得，无需单独下载。后续新采集的大型影像不会入库（`.gitignore` 排除 `data/**/*.tif`，仅放行 `pair_*` 预置对）。
@@ -142,6 +142,15 @@ py -3.12 -m pytest -q     # 全量测试
   git push origin main
   git checkout 自己的分支 && git merge main    # 同步主线最新
   ```
+- **每次开工前先同步**：把自己的分支与远端对齐，再把 `main` 最新合并进来，避免越攒越远、最后一次性爆冲突：
+  ```bash
+  git checkout 自己的分支
+  git pull origin 自己的分支        # 拉远端自己分支的更新
+  git fetch origin
+  git merge origin/main             # 把主线最新合进自己分支（有冲突现在就解决，趁改动还热）
+  git push origin 自己的分支
+  ```
+  判断是否落后：`git rev-list --count 自己的分支..origin/main`，输出 > 0 就该同步了。
 - 合并进 `main` 前必须通过：`cd api && py -3.12 -m pytest -q` 全绿 + `cd web && npm run build` 构建成功
 - `push` 前先 `git pull --rebase`
 - 阈值、档位、类别等常量一律进 `api/app/config/constants.py`，禁止在算法代码里写死数值
