@@ -1419,20 +1419,34 @@ function renderFiles(files, isDemo) {
   }).join('');
 }
 
-function triggerDownload(f) {
+// 产物/报告下载：受 JWT 保护的端点不能用 <a href> 直接触发（浏览器下载请求带不上
+// Authorization，会 401 → 「无法下载 - 需要授权」），统一走 api.downloadArtifact 的
+// 带 token fetch → Blob → objectURL 通道；data:/blob: 演示占位图仍走原生 <a download>。
+async function triggerDownload(f) {
   if (!f || !f.url) return;
-  const a = document.createElement('a');
-  a.href = f.url;
   // 文件名优先级：显式 filename → URL 末段（后端 url 形如 /api/v1/artifacts/<run>/change.png）
   // → format 缺省名；仅当三者皆缺才落 .bin 占位
   const DEFAULT_NAME = { png: 'change.png', geotiff: 'change.tif', pdf: 'report.pdf', geojson: 'change.geojson' };
-  a.download = f.filename
+  const name = f.filename
     || (f.url ? String(f.url).split('/').pop() : '')
     || DEFAULT_NAME[String(f.format || '').toLowerCase()]
     || '.bin';
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
+  const u = String(f.url);
+  if (/^(data:|blob:)/.test(u)) {
+    const a = document.createElement('a');
+    a.href = u;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    return;
+  }
+  try {
+    await api.downloadArtifact(u, name);
+  } catch (e) {
+    if (e instanceof ApiError) showError({ code: e.code, message: e.message, run_id: e.run_id });
+    else showToast(f.format + ' 下载失败：' + (e && e.message ? e.message : '未知原因'), 'warn');
+  }
 }
 
 // ===== 批次 1（REQ-08/11/14）：面积统计 CSV → Blob 同源下载 =====
@@ -1493,7 +1507,11 @@ async function doExport(formats) {
     else setDataBadge(false, '');
     S.exportResult = res.data;
     renderFiles(res.data.files, res.demo);
-    (res.data.files || []).forEach(triggerDownload);
+    // 逐个触发下载：每个文件都要先带 token 取 Blob，串行可避免浏览器把并发下载判为
+    // 恶意批量下载而拦截；单个失败只提示，不阻断其余格式
+    for (const f of (res.data.files || [])) {
+      if (f && f.url) await triggerDownload(f);
+    }
     renderSnapshot();
     showToast(res.demo ? '导出完成（演示数据，文件已标注）' : '导出完成', 'ok');
   } catch (e) {

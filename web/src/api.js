@@ -492,6 +492,38 @@ export async function artifactObjectUrl(url) {
   }
 }
 
+// ==========================================================================
+// 产物/报告下载：与产物图同源的鉴权问题。
+// /api/v1/artifacts/<run_id>/<file> 受 JWT 网关保护，而 <a href=... download> 触发的是
+// 浏览器内建下载请求，**无法携带 Authorization 头** → 后端 401，浏览器把下载标记为
+// 「无法下载 - 需要授权」。方案：先 fetch（带 Bearer）取成 Blob，再用 blob: URL 触发下载，
+// 与 artifactObjectUrl 同一口径；下载完即回收 objectURL，不进复用缓存。
+// ==========================================================================
+export async function downloadArtifact(url, filename) {
+  const u = String(url || '');
+  if (!u) return false;
+  let resp;
+  try {
+    resp = await fetchWithTimeout(u, { method: 'GET' });
+  } catch (_) {
+    throw new Error('下载中断：网络不可达或超时');
+  }
+  if (!resp.ok) {
+    const err = await safeError(resp);
+    if (err) throw err;
+    throw new Error('下载失败（HTTP ' + resp.status + '）');
+  }
+  const objUrl = URL.createObjectURL(await resp.blob());
+  const a = document.createElement('a');
+  a.href = objUrl;
+  a.download = filename || 'download';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.setTimeout(() => URL.revokeObjectURL(objUrl), 4000);
+  return true;
+}
+
 // GET /runs?limit=&offset= → { total, limit, offset, items:[...] }（按 created_at 倒序）
 export function listRuns(params = {}) {
   const q = new URLSearchParams();
