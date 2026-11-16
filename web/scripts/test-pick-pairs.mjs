@@ -57,4 +57,4 @@ assert(pickPairs(null) === null, 'null 应返回 null');
 assert(pickPairs({}) === null, '空对象应返回 null');
 
 if (failed) { console.error(`\n${failed} 项断言失败`); process.exit(1); }
-console.log('PASS: 22 景 / 11 组全部配对成功，11 个 label 与要求逐字一致，未知键兜底与非法输入正常');
+process.stdout.write('PASS: 22 景 / 11 组全部配对成功，11 个 label 与要求逐字一致，未知键兜底与非法输入正常\n');

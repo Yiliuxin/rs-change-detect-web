@@ -17,9 +17,9 @@ import pytest
 from app.algorithm.index_calculator import ndvi, ndwi
 from app.api.errors import CODE_HTTP
 from app.config.constants import ERROR_MESSAGES, EXPORT_FORMATS, S2_FORMULA
-from app.service.common import ARTIFACT_MEDIA_TYPES, run_dir
+from app.service.common import ARTIFACT_MEDIA_TYPES, artifact_media_type, run_dir
 from _helpers import (
-    POYANG_T1, POYANG_T2, assert_error_body, poyang_geojson,
+    POYANG_T1, POYANG_T2, assert_error_body, export_products, poyang_geojson,
 )
 
 CHANGE_URL = "/api/v1/result/change"
@@ -186,8 +186,8 @@ def test_ndwi_run_report_export_still_works(client, ndwi_ready):
     })
     assert r.status_code == 200, r.text
     files = r.json()["files"]
-    assert len(files) == len(EXPORT_FORMATS)
-    for f in files:
+    assert len(export_products(files)) == len(EXPORT_FORMATS)
+    for f in files:  # zip 打包项也须同源可达
         assert f["size"] > 0
         assert client.get(f["url"]).status_code == 200
 
@@ -279,7 +279,8 @@ def test_runs_detail_full_snapshot_and_all_artifact_urls(client, ndwi_ready):
     for name, item in names.items():
         assert item["url"] == f"/api/v1/artifacts/{rid}/{name}"
         assert item["size"] > 0
-        assert name in ARTIFACT_MEDIA_TYPES
+        # 打包 zip 按「规范化 run_id + 固定名」动态放行，其余仍走静态白名单
+        assert (name in ARTIFACT_MEDIA_TYPES) or artifact_media_type(name, rid) is not None
         assert client.get(item["url"]).status_code == 200
 
 

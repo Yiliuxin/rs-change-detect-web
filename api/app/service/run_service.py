@@ -20,7 +20,7 @@ from app.algorithm.geotransform import raster_meta
 from app.api.errors import ApiError, as_api_error
 from app.repository import run_repo, task_repo
 from app.service.cog_source import parse_cog_path
-from app.service.common import ARTIFACT_MEDIA_TYPES, RUNS_ROOT, artifact_url
+from app.service.common import RUNS_ROOT, artifact_media_type, artifact_url
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +121,7 @@ def _artifacts(run_id: str) -> List[dict]:
             "size": int(p.stat().st_size),
         }
         for p in sorted(out.iterdir())
-        if p.is_file() and p.name in ARTIFACT_MEDIA_TYPES
+        if p.is_file() and artifact_media_type(p.name, canonical) is not None
     ]
 
 

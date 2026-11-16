@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import zipfile
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -27,7 +28,8 @@ from app.config.storage import (
 )
 from app.repository import task_repo
 from app.service.common import (
-    artifact_url, git_short_commit, regression_artifact_names, run_dir,
+    artifact_url, export_zip_name, git_short_commit,
+    regression_artifact_names, run_dir,
 )
 from app.service.concurrency import serial
 from app.service.sample_service import accuracy_for_run
@@ -157,6 +159,25 @@ def export(run_id: str, formats: List[str]) -> dict:
                     "filename": filename,
                     "url": _upload(client, run_id, fmt, local, filename),
                     "size": size,
+                })
+
+            # 批次 A：所选格式 ≥ 2 时，把本轮已落盘的白名单产物复用打成一个 zip
+            # （标准库 zipfile，不重新生成文件）；files[] 追加一条 format='zip'。
+            # 归属校验仍由路由 ensure_run_owner 完成；URL 走同一产物白名单口径。
+            if len(allowed) >= 2:
+                zip_name = export_zip_name(run_id)
+                zip_path = out_dir / zip_name
+                with zipfile.ZipFile(zip_path, "w",
+                                    compression=zipfile.ZIP_DEFLATED) as zf:
+                    for item in files:
+                        local = out_dir / item["filename"]
+                        if local.is_file():
+                            zf.write(local, arcname=item["filename"])
+                files.append({
+                    "format": "zip",
+                    "filename": zip_name,
+                    "url": artifact_url(run_id, zip_name),
+                    "size": int(zip_path.stat().st_size),
                 })
 
         # REQ-15 / NF6 / NF7：与 PDF 署名页共用同一常量源，逐字复用不重写

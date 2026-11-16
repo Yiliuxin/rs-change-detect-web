@@ -269,8 +269,10 @@
             <div class="btn-row">
               <button type="button" class="btn btn-sm btn-ghost" id="hist-refresh" title="从头重新加载历史运行列表">刷新列表</button>
               <button type="button" class="btn btn-sm btn-ghost" id="hist-retry" hidden title="加载失败后重试">重试</button>
+              <button type="button" class="btn btn-sm btn-ghost" id="hist-compare-btn" title="选两个 run 对比面积与参数快照">对比</button>
             </div>
             <div class="err-line" id="hist-err"></div>
+            <div class="hist-compare" id="hist-compare" hidden></div>
             <div class="hist-list" id="hist-list">
               <div class="status-line"><span class="spinner"></span>正在加载历史运行…</div>
             </div>
@@ -363,6 +365,15 @@
             <button type="button" class="mode-btn" data-mode="aoi" title="AOI 框选：拖拽画矩形">AOI 框选</button>
             <button type="button" class="mode-btn" data-mode="sample" title="样本打点：点击地图按类别打点">样本打点</button>
           </div>
+          <!-- 批次 A：图斑详情卡（点击专题图 polygon 弹出；点击空白或关闭按钮收起） -->
+          <div id="patch-card" class="patch-card" hidden>
+            <div class="patch-card-head">
+              <strong>图斑详情</strong>
+              <button type="button" class="patch-card-close" id="patch-card-close" title="收起详情卡">×</button>
+            </div>
+            <div id="patch-card-body"></div>
+            <div class="patch-thumbs" id="patch-thumbs"></div>
+          </div>
         </section>
 
         <!-- ============ 右栏 · 分析结果（三张常驻卡片，引导性空态） ============ -->
@@ -371,10 +382,11 @@
           <!-- D. 检测结果（REQ-05/08/10/11） -->
           <section class="card" id="card-result">
             <div class="card-title">检测结果</div>
-            <!-- 两个并列视图：既有专题图/统计 + 新增双时相卷帘（REQ-10） -->
+            <!-- 并列视图：专题图/统计 + 双时相卷帘（REQ-10）+ 批次 A 转移流向桑基 -->
             <div class="view-tabs" id="result-tabs" role="tablist" aria-label="检测结果视图">
               <button type="button" class="view-tab active" data-view="thematic" role="tab" aria-selected="true">专题图 / 统计</button>
               <button type="button" class="view-tab" data-view="swipe" role="tab" aria-selected="false">双时相对比</button>
+              <button type="button" class="view-tab" data-view="sankey" role="tab" aria-selected="false">转移流向</button>
             </div>
             <div id="view-thematic">
             <div class="empty-state" id="result-empty">
@@ -443,6 +455,14 @@
                 <span class="swipe-corner swipe-corner-right" id="swipe-label-t2">t2 —</span>
               </div>
               <div class="swipe-tip">拖动中间分隔条比较两时相；左侧显示 t1，右侧显示 t2。</div>
+            </div>
+
+            <!-- 批次 A：转移流向（与「地物转移矩阵」表格同源，桑基图由矩阵变换而来） -->
+            <div id="view-sankey" hidden>
+              <div class="card-subtitle">转移流向<span class="readonly-badge">A3 · 矩阵变换</span></div>
+              <div class="chart chart-sankey" id="chart-sankey"></div>
+              <div class="swipe-tip">左侧为变化前（t1）类别，右侧为变化后（t2）类别，连线粗细为矩阵中的像元数；0 值转移不显示。</div>
+              <div class="empirical-note">经验阈值，非物候标定</div>
             </div>
           </section>
 

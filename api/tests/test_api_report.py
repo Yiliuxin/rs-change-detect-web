@@ -8,7 +8,10 @@ from pathlib import Path
 import pytest
 
 from app.config.constants import ATTRIBUTION_S2, EXPORT_FORMATS
-from _helpers import POYANG_T1, POYANG_T2, assert_error_body, poyang_geojson
+from _helpers import (
+    POYANG_T1, POYANG_T2, assert_error_body, export_products,
+    export_zip_entries, poyang_geojson,
+)
 
 URL = "/api/v1/report/export"
 
@@ -24,8 +27,10 @@ def test_report_export_happy_path_triplet(client, change_ready):
     assert r.status_code == 200, r.text
     b = r.json()
     assert b["run_id"] == change_ready["run_id"]
-    assert len(b["files"]) == len(EXPORT_FORMATS)
-    assert {f["format"] for f in b["files"]} == set(EXPORT_FORMATS)
+    products = export_products(b["files"])
+    assert len(products) == len(EXPORT_FORMATS)
+    assert {f["format"] for f in products} == set(EXPORT_FORMATS)
+    assert len(export_zip_entries(b["files"])) == 1  # 多格式自动打包
     assert all(f["size"] and f["size"] > 0 and f["url"] for f in b["files"])
     assert ATTRIBUTION_S2.split(" [")[0] in b["attribution"]
 

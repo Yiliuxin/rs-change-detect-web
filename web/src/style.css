@@ -872,3 +872,62 @@ input[type="range"]:disabled { opacity: .45; cursor: not-allowed; }
 }
 .user-chip .u-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .btn-logout { margin-left: 4px; }
+
+/* ===== 批次 A · 转移流向桑基 / 运行对比 / 图斑详情卡 ===== */
+.chart-sankey { height: 320px; }
+.chart-compare { height: 220px; }
+
+.hist-compare {
+  margin-top: 12px; padding: 10px; border: 1px solid var(--line);
+  border-radius: 10px; background: var(--card2);
+}
+.cmp-selects { display: grid; grid-template-columns: 1fr; gap: 8px; margin: 8px 0; }
+.cmp-selects label { font-size: 10.5px; font-weight: 700; color: var(--muted); }
+.cmp-selects select {
+  width: 100%; margin-top: 3px; padding: 6px 8px;
+  font-size: 11px; font-family: inherit; color: var(--txt);
+  background: #fff; border: 1px solid var(--line); border-radius: 7px; outline: none;
+}
+.cmp-table { font-size: 10.5px; }
+.cmp-table th, .cmp-table td { padding: 4px 5px; }
+.cmp-table td.k { text-align: left; }
+.cmp-table tr.cmp-diff { background: #fff5dc; }
+.cmp-table tr.cmp-diff td { font-weight: 700; color: #8a5a00; }
+.cmp-note { margin-top: 6px; font-size: 10px; color: var(--muted2); line-height: 1.5; }
+
+.patch-card {
+  position: absolute; z-index: 6; width: 236px; max-width: calc(100% - 24px);
+  background: rgba(255, 255, 255, .97); border: 1px solid var(--line);
+  border-radius: 10px; box-shadow: var(--shadow-hover); padding: 9px 10px;
+  font-size: 11px; color: var(--txt);
+}
+.patch-card-head {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 12px; margin-bottom: 6px; color: #1c2c44;
+}
+.patch-card-close {
+  appearance: none; border: none; background: var(--card2); color: var(--muted);
+  width: 20px; height: 20px; border-radius: 6px; cursor: pointer;
+  font-size: 15px; line-height: 1;
+}
+.patch-card-close:hover { background: var(--accent-soft); color: var(--accent2); }
+.patch-row {
+  display: flex; justify-content: space-between; gap: 8px;
+  padding: 2px 0; border-top: 1px dashed var(--line-soft);
+}
+.patch-row span { color: var(--muted2); flex: 0 0 52px; }
+.patch-row b {
+  font-weight: 700; font-variant-numeric: tabular-nums; text-align: right;
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.patch-note { margin-top: 5px; font-size: 9.5px; color: var(--muted2); line-height: 1.4; }
+.patch-thumbs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; margin-top: 8px; }
+.patch-thumb { min-width: 0; }
+.patch-thumb-img {
+  height: 56px; border: 1px solid var(--line-soft); border-radius: 6px;
+  background: var(--card2); overflow: hidden; display: grid; place-items: center;
+  font-size: 9.5px; color: var(--muted2); text-align: center; padding: 2px;
+}
+.patch-thumb-img img { width: 100%; height: 100%; object-fit: cover; }
+.patch-thumb-img.is-placeholder { padding: 4px; line-height: 1.4; }
+.patch-thumb-cap { font-size: 9.5px; color: var(--muted); text-align: center; margin-top: 3px; }

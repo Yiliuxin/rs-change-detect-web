@@ -15,10 +15,9 @@ import pytest
 from app.config.constants import COG_BUCKET, EXPORT_FORMATS
 from app.config.storage import object_url
 from app.service.common import ARTIFACT_URL_PREFIX, run_dir
+from _helpers import export_products, export_zip_entries
 
 URL = "/api/v1/artifacts"
-_FILE_BY_FORMAT = {"geotiff": "change.tif", "png": "change.png", "pdf": "report.pdf",
-                   "geojson": "change.geojson"}
 
 
 @pytest.mark.req("REQ-10")
@@ -54,9 +53,10 @@ def test_report_export_file_urls_are_same_origin_and_reachable(client, change_re
     })
     assert r.status_code == 200, r.text
     files = r.json()["files"]
-    assert len(files) == len(EXPORT_FORMATS)
+    assert len(export_products(files)) == len(EXPORT_FORMATS)
+    assert len(export_zip_entries(files)) == 1  # 打包项同样走同源白名单端点
     for f in files:
-        assert f["url"] == f"{URL}/{change_ready['run_id']}/{_FILE_BY_FORMAT[f['format']]}"
+        assert f["url"] == f"{URL}/{change_ready['run_id']}/{f['filename']}"
         assert f["url"].startswith(ARTIFACT_URL_PREFIX + "/")
         assert "minio://" not in f["url"] and "file://" not in f["url"]
         got = client.get(f["url"])

@@ -46,6 +46,7 @@ for _index in VALID_INDEXES:
 
 # REQ-11：回归法独立产物名（带 _reg 后缀，与差值法三件套互不覆盖）。
 # 同时为每个 index 生成 <index>_reg 归档名，保证 method × index 正交组合。
+ARTIFACT_MEDIA_TYPES[f"change{REGRESSION_ARTIFACT_SUFFIX}.geojson"] = "application/geo+json"
 ARTIFACT_MEDIA_TYPES.update({
     f"change{REGRESSION_ARTIFACT_SUFFIX}.tif": "image/tiff",
     f"change{REGRESSION_ARTIFACT_SUFFIX}.png": "image/png",
@@ -56,9 +57,33 @@ for _index in VALID_INDEXES:
     ARTIFACT_MEDIA_TYPES[f"change{_suffix}.tif"] = "image/tiff"
     ARTIFACT_MEDIA_TYPES[f"change{_suffix}.png"] = "image/png"
     ARTIFACT_MEDIA_TYPES[f"report{_suffix}.pdf"] = "application/pdf"
+    # GeoJSON 图斑归档名（index / regression × index），与 index_artifact_names
+    # / regression_archive_names 同源；缺登记会让图斑层拿不到历史 run 的矢量产物。
+    ARTIFACT_MEDIA_TYPES[f"change_{_index.lower()}.geojson"] = "application/geo+json"
+    ARTIFACT_MEDIA_TYPES[f"change{_suffix}.geojson"] = "application/geo+json"
+
+# 批次 A：多格式导出的打包文件。文件名含 run_id，故不进静态白名单表，
+# 由 artifact_media_type() 按「规范化 run_id + 固定名」精确匹配放行（同白名单口径）。
+EXPORT_ZIP_MEDIA_TYPE: str = "application/zip"
+
+
+def export_zip_name(run_id: str) -> str:
+    """打包文件名 ``export_<run_id>.zip``（落盘与 URL 同源）。"""
+    return f"export_{run_id}.zip"
+
+
+def artifact_media_type(filename: str, run_id: str = "") -> Optional[str]:
+    """产物名 → Content-Type；不在白名单 / 不属于本 run 的打包文件时返回 None。"""
+    if filename in ARTIFACT_MEDIA_TYPES:
+        return ARTIFACT_MEDIA_TYPES[filename]
+    if run_id and filename == export_zip_name(run_id):
+        return EXPORT_ZIP_MEDIA_TYPE
+    return None
+
 
 __all__ = ["REPO_ROOT", "RUNS_ROOT", "DATA_ROOT", "ARTIFACT_URL_PREFIX",
-           "ARTIFACT_MEDIA_TYPES", "git_short_commit", "utc_now", "run_dir",
+           "ARTIFACT_MEDIA_TYPES", "EXPORT_ZIP_MEDIA_TYPE", "export_zip_name",
+           "artifact_media_type", "git_short_commit", "utc_now", "run_dir",
            "artifact_url", "index_artifact_names", "regression_artifact_names",
            "regression_archive_names", "index_raster_names", "artifact_manifest"]
 
@@ -178,7 +203,7 @@ def artifact_manifest(run_id: str, index: str,
         ]
     else:
         names = [
-            "change.tif", "change.png", "report.pdf",
+            "change.tif", "change.png", "report.pdf", "change.geojson",
             "t1_composite.png", "t2_composite.png",
             "area_chart.png", *idx_names,
             *index_artifact_names(index).values(),

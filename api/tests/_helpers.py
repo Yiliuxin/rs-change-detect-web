@@ -27,6 +27,17 @@ POYANG_T2 = "2023-11-02"
 SCL_VALID_VEGETATION = 4          # SCL 类别 4 = 植被（有效像元）
 REF_CLASS_BY_CODE = {1: "增强", 2: "退化", 3: "稳定"}
 
+# 批次 A：/report/export 多格式时 files[] 会追加一条打包项，既有断言只统计
+# 真实产物文件（zip 由新增用例单独校验），避免把打包项误当第 5 种导出格式。
+def export_products(files):
+    """剔除 format='zip' 打包项后的产物清单。"""
+    return [f for f in files if f.get("format") != "zip"]
+
+
+def export_zip_entries(files):
+    """files[] 中的打包项（正常路径应恰好 1 条或 0 条）。"""
+    return [f for f in files if f.get("format") == "zip"]
+
 
 def geojson_polygon(bbox: Sequence[float]) -> str:
     """闭合的 GeoJSON Polygon 字符串（WGS84）。"""

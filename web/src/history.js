@@ -4,6 +4,7 @@
 // 三态：加载中 / 空态 / 错误态（带重试）；列表分页「加载更多」；点开详情 → 参数快照 + 产物 + 载入结果区。
 
 import * as api from './api.js';
+import { renderCompareBar } from './charts.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
@@ -16,6 +17,8 @@ const H = {
   items: [], total: 0, busy: false, error: '',
   expanded: '', detail: null,
   onSelect: null, onLoad: null,
+  // 批次 A：运行对比视图（两个下拉都来自 GET /runs，详情走 GET /runs/{id}）
+  compare: { open: false, busy: false, seq: 0, a: '', b: '' },
 };
 
 function notify(fn, detail) {
@@ -220,14 +223,175 @@ function closeDetail() {
   renderList();
 }
 
+// ---------- 批次 A：运行对比（前端 only，无新增后端接口） ----------
+// 两个下拉都取自 /runs 列表；分别 GET /runs/{id} 拿摘要 + params_snapshot，
+// 渲染三类面积并排条形图与「阈值/方法/指数/分块尺寸/OA/Kappa」两列表格。
+function runOptions(items, selected) {
+  if (!items.length) return '<option value="">— 暂无可选运行 —</option>';
+  return items.map((it) => {
+    const rid = String(it.run_id || '');
+    const label = String(it.aoi_name || 'AOI') + ' · ' + rid.slice(0, 8)
+      + ' · ' + (it.t1 || '—');
+    return '<option value="' + esc(rid) + '"' + (rid === selected ? ' selected' : '') + '>'
+      + esc(label) + '</option>';
+  }).join('');
+}
+
+function compareShell(items, err) {
+  const box = $('hist-compare');
+  if (!box) return;
+  box.innerHTML = `
+    <div class="hist-detail-head">
+      <strong>运行对比 <span class="readonly-badge">REQ-14 · 只读</span></strong>
+      <button type="button" class="btn btn-sm btn-ghost" id="hist-compare-close">关闭</button>
+    </div>
+    <div class="cmp-selects">
+      <label>运行 A<select id="cmp-run-a">${runOptions(items, H.compare.a)}</select></label>
+      <label>运行 B<select id="cmp-run-b">${runOptions(items, H.compare.b)}</select></label>
+    </div>
+    <div class="err-line" id="cmp-err">${esc(err || '')}</div>
+    <div id="cmp-body"><div class="empty-state compact"><p>请选择两条历史运行</p></div></div>`;
+}
+
+function closeCompare() {
+  if (!H.compare.open) return;
+  H.compare.open = false;
+  H.compare.seq += 1;
+  $('hist-compare').hidden = true;
+  $('hist-list').hidden = false;
+  $('hist-more').hidden = false;
+  $('hist-detail').hidden = !H.expanded;
+  renderList(); // 关闭即恢复原列表 / 计数 / 详情态
+}
+
+function openCompare() {
+  if (H.compare.open) return;
+  H.compare.open = true;
+  H.compare.seq += 1;
+  $('hist-compare').hidden = false;
+  ['hist-list', 'hist-more', 'hist-detail'].forEach((id) => { $(id).hidden = true; });
+  $('hist-count').textContent = '对比模式';
+  H.compare.a = H.items.length ? String(H.items[0].run_id || '') : '';
+  H.compare.b = H.items.length > 1 ? String(H.items[1].run_id || '') : '';
+  compareShell([]);
+  const seq = H.compare.seq;
+  // 第二个下拉（以及第一个）统一由 GET /runs 列表填充，取前 100 条
+  api.listRuns({ limit: 100, offset: 0 })
+    .then((data) => {
+      if (seq !== H.compare.seq || !H.compare.open) return;
+      const items = Array.isArray(data && data.items) ? data.items : [];
+      if (!items.length) { compareShell([], '暂无历史运行可对比'); return; }
+      if (!items.some((x) => String(x.run_id) === H.compare.a)) {
+        H.compare.a = String(items[0].run_id || '');
+      }
+      if (!items.some((x) => String(x.run_id) === H.compare.b)) {
+        H.compare.b = String((items[1] || items[0]).run_id || '');
+      }
+      compareShell(items);
+      loadCompare();
+    })
+    .catch((e) => {
+      if (seq !== H.compare.seq || !H.compare.open) return;
+      compareShell([], '运行列表加载失败：' + ((e && e.message) || '未知原因'));
+    });
+}
+
+function statsOf(d) {
+  const snap = (d && d.params_snapshot) || {};
+  return Array.isArray(snap.stats) ? snap.stats : [];
+}
+
+function num4(v) {
+  if (v == null || v === '' || !Number.isFinite(Number(v))) return '—';
+  return Number(v).toFixed(4);
+}
+
+// 对比卡 6 个字段：阈值 / 方法 / 指数 / 分块尺寸 / OA / Kappa
+function compareFields(d) {
+  const snap = (d && d.params_snapshot) || {};
+  const acc = snap.accuracy || snap.accuracy_report || (d && d.accuracy) || {};
+  return [
+    ['变化阈值', fmt(snap.threshold != null ? snap.threshold : d.threshold)],
+    ['检测方法', fmt(snap.method || d.method, 'otsu')],
+    ['指数', fmt(snap.index || d.index, 'NDVI')],
+    ['分块尺寸 (px)', fmt(snap.block_size)],
+    ['OA', num4(acc.overall_accuracy)],
+    ['Kappa', num4(acc.kappa)],
+  ];
+}
+
+function renderCompareCard(da, db) {
+  const body = $('cmp-body');
+  if (!body) return;
+  const ridA = String((da && da.run_id) || H.compare.a);
+  const ridB = String((db && db.run_id) || H.compare.b);
+  const fa = compareFields(da), fb = compareFields(db);
+  const rows = fa.map((it, i) => {
+    const va = it[1], vb = fb[i] ? fb[i][1] : '—';
+    return '<tr class="' + (String(va) !== String(vb) ? 'cmp-diff' : '') + '">'
+      + '<td class="k">' + esc(it[0]) + '</td><td>' + esc(va) + '</td><td>' + esc(vb) + '</td></tr>';
+  }).join('');
+  body.innerHTML = `
+    <div class="card-subtitle">三类面积对比<span class="hint">增强 / 退化 / 稳定</span></div>
+    <div class="chart chart-compare" id="chart-compare"></div>
+    <div class="card-subtitle">参数与精度<span class="hint">差异行高亮</span></div>
+    <table class="tbl cmp-table">
+      <thead><tr><th>字段</th><th>A ${esc(ridA.slice(0, 8))}</th><th>B ${esc(ridB.slice(0, 8))}</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div class="cmp-note">OA / Kappa 取自参数快照中的精度记录；未做样本评价的运行如实显示 —。</div>`;
+  renderCompareBar($('chart-compare'), [
+    { name: 'A ' + ridA.slice(0, 8), stats: statsOf(da) },
+    { name: 'B ' + ridB.slice(0, 8), stats: statsOf(db) },
+  ]);
+}
+
+async function loadCompare() {
+  const body = $('cmp-body');
+  // 连续切换下拉不丢弃请求：用 seq 只丢弃过期回调，最后一次选择必定生效
+  if (!body || !H.compare.open) return;
+  const a = $('cmp-run-a'), b = $('cmp-run-b');
+  const ridA = a ? String(a.value || '') : H.compare.a;
+  const ridB = b ? String(b.value || '') : H.compare.b;
+  if (!ridA || !ridB) {
+    body.innerHTML = '<div class="empty-state compact"><p>请选择两条历史运行</p></div>';
+    return;
+  }
+  H.compare.busy = true;
+  const seq = ++H.compare.seq;
+  body.innerHTML = '<div class="status-line"><span class="spinner"></span>正在读取两条运行详情…</div>';
+  try {
+    const [da, db] = await Promise.all([api.getRunDetail(ridA), api.getRunDetail(ridB)]);
+    if (seq !== H.compare.seq || !H.compare.open) return;
+    renderCompareCard(da, db);
+  } catch (e) {
+    if (seq !== H.compare.seq || !H.compare.open) return;
+    body.innerHTML = '<div class="err-line">对比数据加载失败：'
+      + esc((e && e.message) || '未知原因') + '</div>';
+  } finally {
+    H.compare.busy = false;
+  }
+}
+
 function bind() {
   $('hist-list').addEventListener('click', (e) => {
     const item = e.target.closest && e.target.closest('.hist-item');
     if (item) selectRun(item.dataset.rid);
   });
   $('hist-more').onclick = () => loadPage(false);
-  $('hist-refresh').onclick = () => { closeDetail(); loadPage(true); };
-  $('hist-retry').onclick = () => loadPage(true);
+  $('hist-refresh').onclick = () => { closeCompare(); closeDetail(); loadPage(true); };
+  $('hist-retry').onclick = () => { closeCompare(); loadPage(true); };
+  $('hist-compare-btn').onclick = openCompare;
+  $('hist-compare').addEventListener('click', (e) => {
+    if (e.target.closest && e.target.closest('#hist-compare-close')) closeCompare();
+  });
+  $('hist-compare').addEventListener('change', (e) => {
+    if (!e.target || !e.target.id) return;
+    if (e.target.id === 'cmp-run-a') H.compare.a = String(e.target.value || '');
+    else if (e.target.id === 'cmp-run-b') H.compare.b = String(e.target.value || '');
+    else return;
+    loadCompare();
+  });
   $('hist-detail').addEventListener('click', (e) => {
     if (e.target.closest && e.target.closest('#hist-detail-close')) { closeDetail(); return; }
     if (e.target.closest && e.target.closest('#hist-detail-retry')) { selectRun(H.expanded); return; }

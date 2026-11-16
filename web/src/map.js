@@ -191,7 +191,47 @@ function initLayers(map) {
       'circle-opacity': 0.95,
     },
   });
+  // 批次 A：变化图斑 polygon 层（change.geojson）。默认隐藏，有 feature 才显示；
+  // 放在样本点之下、AOI 线之上，避免遮挡打点 / 删除交互。
+  map.addSource('change-patches', { type: 'geojson', data: emptyFC() });
+  const patchColor = ['match', ['get', 'change_class'],
+    1, '#21a04c', 2, '#d94c3d', 3, '#5b7a99', '#8aa2bd'];
+  map.addLayer({
+    id: 'change-patch-fill', type: 'fill', source: 'change-patches',
+    layout: { visibility: 'none' },
+    paint: { 'fill-color': patchColor, 'fill-opacity': 0.22 },
+  }, 'sample-halo');
+  map.addLayer({
+    id: 'change-patch-line', type: 'line', source: 'change-patches',
+    layout: { visibility: 'none' },
+    paint: { 'line-color': patchColor, 'line-width': 1.2, 'line-opacity': 0.9 },
+  }, 'sample-halo');
+
   // B1：三层图片源在首次 setLayerImage 时按序懒创建（专题图恒在最上）
+}
+
+/** 注入变化图斑 FeatureCollection；空集合时自动隐藏两层。 */
+export function setChangePatches(map, fc) {
+  const src = map && map.getSource && map.getSource('change-patches');
+  if (!src) return;
+  const features = (fc && Array.isArray(fc.features)) ? fc.features : [];
+  src.setData({ type: 'FeatureCollection', features });
+  ['change-patch-fill', 'change-patch-line'].forEach((id) => {
+    if (map.getLayer(id)) {
+      map.setLayoutProperty(id, 'visibility', features.length ? 'visible' : 'none');
+    }
+  });
+}
+
+/** 图斑点击回调：handler(feature, point, lngLat)；空白点击由调用方自行判定。 */
+export function onPatchClick(map, handler) {
+  if (!map || typeof handler !== 'function') return;
+  map.on('click', 'change-patch-fill', (ev) => {
+    const f = ev.features && ev.features[0];
+    if (f) handler(f, ev.point, ev.lngLat);
+  });
+  map.on('mouseenter', 'change-patch-fill', () => { map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', 'change-patch-fill', () => { map.getCanvas().style.cursor = ''; });
 }
 
 export function createMap(containerId, center, zoom) {

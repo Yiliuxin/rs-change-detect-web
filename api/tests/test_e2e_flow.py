@@ -13,7 +13,7 @@ import pytest
 import rasterio
 
 from app.config.constants import EXPORT_FORMATS, MIN_SAMPLES_PER_CLASS, S2_FORMULA
-from _helpers import build_samples_from_change
+from _helpers import build_samples_from_change, export_products
 
 
 @pytest.mark.req("REQ-01")
@@ -61,7 +61,7 @@ def test_e2e_full_flow_artifacts_with_run_id(client, change_ready):
                       json={"run_id": run_id, "formats": list(EXPORT_FORMATS)})
     assert exp.status_code == 200, exp.text
     assert exp.json()["run_id"] == run_id
-    assert {f["format"] for f in exp.json()["files"]} == set(EXPORT_FORMATS)
+    assert {f["format"] for f in export_products(exp.json()["files"])} == set(EXPORT_FORMATS)
     for name in ("change.tif", "change.png", "report.pdf"):
         f = out / name
         assert f.is_file() and f.stat().st_size > 0

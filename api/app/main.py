@@ -18,7 +18,9 @@ from fastapi.responses import FileResponse
 from app.api.errors import install as install_error_handlers
 from app.api.v1 import accuracy, aoi, change, online, report, runs, sample, scene
 from app.config.storage import COG_BUCKET, RESULT_BUCKET, ensure_buckets, get_client
-from app.service.common import ARTIFACT_MEDIA_TYPES, ARTIFACT_URL_PREFIX, RUNS_ROOT
+from app.service.common import (
+    ARTIFACT_URL_PREFIX, RUNS_ROOT, artifact_media_type,
+)
 
 # API 版本前缀（HLD 2.2.3）
 API_V1_PREFIX = "/api/v1"
@@ -143,14 +145,16 @@ def get_artifact(run_id: str, filename: str) -> FileResponse:
       3) 最终路径 ``resolve()`` 后必须仍位于 ``ARTIFACT_ROOT`` 内且为真实文件。
     5 个业务路由契约不变；``storage.object_url()`` 的 minio:// 口径不受影响。
     """
-    if filename not in ARTIFACT_MEDIA_TYPES:
-        raise HTTPException(status_code=404, detail="产物名不在白名单内")
     try:
         canonical = str(uuid.UUID(run_id))
     except (ValueError, AttributeError, TypeError):
         raise HTTPException(status_code=404, detail="run_id 非法") from None
+    # 打包 zip 的文件名含 run_id，按规范化 run_id 精确匹配放行；其余仍走静态白名单。
+    media_type = artifact_media_type(filename, canonical)
+    if media_type is None:
+        raise HTTPException(status_code=404, detail="产物名不在白名单内")
 
     target = (ARTIFACT_ROOT / canonical / filename).resolve()
     if not target.is_relative_to(ARTIFACT_ROOT.resolve()) or not target.is_file():
         raise HTTPException(status_code=404, detail="产物不存在")
-    return FileResponse(target, media_type=ARTIFACT_MEDIA_TYPES[filename])
+    return FileResponse(target, media_type=media_type)

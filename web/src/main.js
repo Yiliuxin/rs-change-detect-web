@@ -13,6 +13,7 @@ import * as demo from './demo.js';
 import * as M from './map.js';
 import * as C from './charts.js';
 import * as HIST from './history.js';
+import * as PATCH from './patch-card.js';
 import { ONLINE_PLACES } from './places.js';
 import { loadChinaPlaces, loadChinaProvinces, searchPlaces, boxAround, tierLabel } from './china-geo.js';
 import { initProbe } from './probe.js';
@@ -655,6 +656,22 @@ function syncRunAdvancedUi() {
   }
 }
 
+// 批次 A：图斑 polygon 层取 change.geojson（含 index/method 归档名兜底），
+// 仍走带 token 的 artifactObjectUrl → Blob 通道；产物缺失时详情卡自然收起。
+const PATCH_GEOJSON_NAMES = [
+  'change.geojson', 'change_reg.geojson', 'change_ndvi.geojson', 'change_ndwi.geojson',
+];
+function firstArtifactUrl(arts, names) {
+  for (const n of names) {
+    const u = arts && arts[n];
+    if (u) return String(u);
+  }
+  return '';
+}
+function fallbackPatchUrl(runId) {
+  return runId ? '/api/v1/artifacts/' + encodeURIComponent(runId) + '/change.geojson' : '';
+}
+
 // 同步 / 后台运行 SUCCESS 共用同一套结果渲染函数（REQ-13）：设置 S.change、专题图叠加、
 // 结果卡 / 参数快照 / 卷帘 / 导出 / 图上点选 run 标签，保证两条路径渲染口径完全一致。
 function applyChangeResult(data) {
@@ -689,6 +706,8 @@ function applyChangeResult(data) {
   renderSnapshot();
   renderRegressionSummary(); // 4A：回归法摘要（同步 / 后台 SUCCESS 共用同一渲染口径）
   refreshSwipeFromChange(data); // 本轮合成图同步到「双时相对比」视图（缺图则置灰）
+  PATCH.loadPatches(map, firstArtifactUrl(arts, PATCH_GEOJSON_NAMES)
+    || fallbackPatchUrl(data && data.run_id));
   refreshExportState();
   updatePickRunLabel();
 }
@@ -1089,6 +1108,8 @@ function renderTransition() {
   const tr = d.transition_matrix || snap.transition_matrix || null;
   const block = $('transition-block');
   if (!block) return;
+  // 先刷新桑基图（无矩阵时显示占位标题），再做表格的显隐与渲染
+  C.renderSankey($('chart-sankey'), tr);
   const ok = !!(tr && Array.isArray(tr.pixel_matrix) && tr.pixel_matrix.length === 4);
   block.hidden = !ok;
   if (!ok) return;
@@ -1426,7 +1447,7 @@ async function triggerDownload(f) {
   if (!f || !f.url) return;
   // 文件名优先级：显式 filename → URL 末段（后端 url 形如 /api/v1/artifacts/<run>/change.png）
   // → format 缺省名；仅当三者皆缺才落 .bin 占位
-  const DEFAULT_NAME = { png: 'change.png', geotiff: 'change.tif', pdf: 'report.pdf', geojson: 'change.geojson' };
+  const DEFAULT_NAME = { png: 'change.png', geotiff: 'change.tif', pdf: 'report.pdf', geojson: 'change.geojson', zip: 'export.zip' };
   const name = f.filename
     || (f.url ? String(f.url).split('/').pop() : '')
     || DEFAULT_NAME[String(f.format || '').toLowerCase()]
@@ -1507,9 +1528,12 @@ async function doExport(formats) {
     else setDataBadge(false, '');
     S.exportResult = res.data;
     renderFiles(res.data.files, res.demo);
-    // 逐个触发下载：每个文件都要先带 token 取 Blob，串行可避免浏览器把并发下载判为
-    // 恶意批量下载而拦截；单个失败只提示，不阻断其余格式
-    for (const f of (res.data.files || [])) {
+    // 多格式时后端已打包 zip：只触发这一个下载（同一 downloadArtifact Blob 通道），
+    // 规避浏览器把连续多个文件下载判为恶意批量下载而拦截；单格式行为保持原样。
+    const all = res.data.files || [];
+    const zip = all.find((f) => f && String(f.format).toLowerCase() === 'zip' && f.url);
+    const downloads = zip ? [zip] : all;
+    for (const f of downloads) {
       if (f && f.url) await triggerDownload(f);
     }
     renderSnapshot();
@@ -1530,7 +1554,7 @@ async function doExport(formats) {
 
 // 结果卡两个并列视图：既有「专题图 / 统计」与新增「双时相对比」
 function setResultView(view) {
-  const v = view === 'swipe' ? 'swipe' : 'thematic';
+  const v = (view === 'swipe' || view === 'sankey') ? view : 'thematic';
   document.querySelectorAll('#result-tabs .view-tab').forEach((b) => {
     const on = b.dataset.view === v;
     b.classList.toggle('active', on);
@@ -1538,7 +1562,9 @@ function setResultView(view) {
   });
   $('view-thematic').hidden = v !== 'thematic';
   $('view-swipe').hidden = v !== 'swipe';
+  $('view-sankey').hidden = v !== 'sankey';
   if (v === 'thematic') C.resizeCharts();
+  if (v === 'sankey') C.resizeSankey(); // 隐藏容器初始化时宽度为 0，切进来必须重算
 }
 
 // 本轮 /result/change 成功后同步卷帘图源（artifacts 为 {name:url} 清单）
@@ -1566,6 +1592,8 @@ function loadHistoryRun(d) {
     return '';
   };
   const png = artUrl(['change.png', 'change_ndvi.png', 'change_ndwi.png']);
+  const artMap = {};
+  arts.forEach((a) => { if (a && a.name) artMap[a.name] = String(a.url || ''); });
   // A1/A2：历史回看从 params_snapshot 取（后端三处透出的同源数据）
   S.change = {
     run_id: d.run_id,
@@ -1579,7 +1607,10 @@ function loadHistoryRun(d) {
     intensity: snap.intensity || null,
     patch_stats: snap.patch_stats || null,
     transition_matrix: snap.transition_matrix || null,
+    artifacts: artMap, // 图斑详情卡的 t1/t2 合成图缩略同源
   };
+  PATCH.loadPatches(map, firstArtifactUrl(artMap, PATCH_GEOJSON_NAMES)
+    || fallbackPatchUrl(d.run_id));
   S.changePngUrl = png;
   const b = (Array.isArray(d.bbox) && d.bbox.length === 4) ? boundsFromArray(d.bbox) : S.aoi;
   if (b) {
@@ -2546,6 +2577,15 @@ function init() {
     updatePlaceMarkers(); // 地名标注：内置地名库 + 预置影像区中心点（预置未加载时先标内置项）
   });
   bindMapEvents();
+  // 批次 A：专题图 polygon 点击 → 图斑详情卡（空白点击/关闭按钮收起，不阻塞地图交互）
+  PATCH.initPatchCard({
+    map,
+    getRunId: currentRunId,
+    getArtifacts: () => (S.change && S.change.artifacts) || {},
+    getIntensity: () => (S.change
+      && (S.change.intensity || (S.change.params_snapshot || {}).intensity)) || null,
+    canShow: () => !S.pickMode && S.mapMode !== 'sample',
+  });
   // B2：探针只读 HUD（节流 180ms + 取消旧请求），失败显示 — 且不打断打点模式
   initProbe({ map, getRunId: currentRunId });
 
@@ -2556,6 +2596,7 @@ function init() {
   renderSnapshot();
   renderRegressionSummary();
   renderFiles([], false);
+  C.renderSankey($('chart-sankey'), null); // 首屏即初始化，切到该 tab 时 resize
   refreshExportState();
   refreshGates();
   setMapMode('aoi');

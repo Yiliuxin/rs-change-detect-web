@@ -10,6 +10,11 @@ const NAMES = { 1: '增强', 2: '退化', 3: '稳定' };
 let pie = null;
 let bar = null;
 let intensityBar = null;
+let sankey = null;
+let compareBar = null;
+
+// 桑基节点沿用既有三类主色；A3 地物判据的第 4 类用稳定蓝浅色变体，不引入新色系。
+const SANKEY_COLORS = { ...COLORS, 4: '#8aa2bd' };
 
 // A1 五档（与后端 constants.py INTENSITY_CODES / 文案一一对应，仅用于展示）
 const INTENSITY_ZH = { 1: '显著退化', 2: '轻微退化', 3: '稳定', 4: '轻微改善', 5: '显著改善' };
@@ -156,8 +161,142 @@ export function renderIntensityBar(el, intensity) {
   intensityBar.resize();
 }
 
+// ===== 批次 A · 转移流向桑基图（前端 only） =====
+// 数据直接由 change_service 的转移矩阵变换：行=变化前类别、列=变化后类别、
+// value=矩阵值；源/目标节点加 t1·/t2· 前缀避免 ECharts 同名节点合流成环。
+function sankeyModel(transition) {
+  const tr = transition && !Array.isArray(transition) ? transition : {};
+  const matrix = Array.isArray(transition) ? transition
+    : (Array.isArray(tr.pixel_matrix) && tr.pixel_matrix.length ? tr.pixel_matrix
+      : (Array.isArray(tr.area_matrix_ha) && tr.area_matrix_ha.length ? tr.area_matrix_ha
+        : (Array.isArray(tr.matrix) ? tr.matrix : [])));
+  const n = matrix.length;
+  const codes = (Array.isArray(tr.codes) && tr.codes.length === n)
+    ? tr.codes.map(Number)
+    : Array.from({ length: n }, (_, i) => i + 1);
+  const labels = tr.labels || {};
+  const name = (c) => String(labels[String(c)] || NAMES[c] || ('类' + c)).split('/')[0];
+  const src = (c) => 't1·' + name(c);
+  const dst = (c) => 't2·' + name(c);
+  const links = [];
+  for (let i = 0; i < n; i += 1) {
+    const row = Array.isArray(matrix[i]) ? matrix[i] : [];
+    for (let j = 0; j < n; j += 1) {
+      const value = Number(row[j] || 0);
+      if (!Number.isFinite(value) || value <= 0) continue; // 过滤 value=0 的边
+      links.push({
+        source: src(codes[i]), target: dst(codes[j]), value,
+        lineStyle: { color: SANKEY_COLORS[codes[i]] || '#8aa2bd' },
+      });
+    }
+  }
+  const used = new Set();
+  links.forEach((l) => { used.add(l.source); used.add(l.target); });
+  const nodes = [];
+  codes.forEach((c) => {
+    if (used.has(src(c))) nodes.push({ name: src(c), itemStyle: { color: SANKEY_COLORS[c] || '#8aa2bd' } });
+  });
+  codes.forEach((c) => {
+    if (used.has(dst(c))) nodes.push({ name: dst(c), itemStyle: { color: SANKEY_COLORS[c] || '#8aa2bd' } });
+  });
+  const unit = Array.isArray(tr.pixel_matrix) ? '像元' : 'ha';
+  return { nodes, links, unit };
+}
+
+/** 转移矩阵 → 桑基图（series.type='sankey'）；无矩阵数据时给出占位标题。 */
+export function renderSankey(el, transition) {
+  if (!el) return;
+  if (!sankey || sankey.isDisposed()) sankey = echarts.init(el, null, { renderer: 'canvas' });
+  const { nodes, links, unit } = sankeyModel(transition);
+  const short = (s) => String(s || '').replace(/^t[12]·/, '');
+  sankey.setOption({
+    backgroundColor: 'transparent',
+    textStyle: { fontFamily: 'Segoe UI, Microsoft YaHei, sans-serif' },
+    title: {
+      text: links.length ? '转移流向（t1 → t2）' : '暂无转移矩阵数据',
+      left: 'center', top: 2,
+      textStyle: { color: '#5b6b82', fontSize: 12, fontWeight: 600 },
+    },
+    tooltip: {
+      trigger: 'item',
+      backgroundColor: 'rgba(255,255,255,0.97)', borderColor: '#d8e2ee',
+      textStyle: { color: '#24344d', fontSize: 12 },
+      extraCssText: 'box-shadow:0 4px 16px rgba(16,34,58,.12);border-radius:8px;',
+      formatter: (p) => (p.dataType === 'edge'
+        ? short(p.data.source) + ' → ' + short(p.data.target)
+          + '<br/>' + Number(p.data.value).toLocaleString() + ' ' + unit
+        : short(p.name)),
+    },
+    series: [{
+      type: 'sankey', left: 14, right: 84, top: 40, bottom: 14,
+      nodeWidth: 12, nodeGap: 12, layoutIterations: 32,
+      emphasis: { focus: 'adjacency' },
+      label: {
+        color: '#3c4d66', fontSize: 11,
+        formatter: (p) => short(p.name),
+      },
+      lineStyle: { curveness: 0.5, opacity: 0.38 },
+      data: nodes, links,
+    }],
+  }, true);
+  sankey.resize();
+}
+
+export function resizeSankey() {
+  if (sankey && !sankey.isDisposed()) sankey.resize();
+}
+
+// ===== 批次 A · 历史运行对比：面积三分类并排条形图 =====
+/** groups: [{name, stats:[{change_class, area_ha}]}, ...]，最多取前两条。 */
+export function renderCompareBar(el, groups) {
+  if (!el) return;
+  if (!compareBar || compareBar.isDisposed()) compareBar = echarts.init(el, null, { renderer: 'canvas' });
+  const gs = (Array.isArray(groups) ? groups : []).slice(0, 2);
+  const areas = (g) => {
+    const acc = { 1: 0, 2: 0, 3: 0 };
+    ((g && g.stats) || []).forEach((s) => {
+      const c = Number(s && s.change_class);
+      if (Object.prototype.hasOwnProperty.call(acc, c)) acc[c] += Number((s && s.area_ha) || 0);
+    });
+    return [1, 2, 3].map((c) => Number(acc[c].toFixed(2)));
+  };
+  const palette = ['#1f7ae0', '#e4a23c'];
+  compareBar.setOption({
+    backgroundColor: 'transparent',
+    textStyle: { fontFamily: 'Segoe UI, Microsoft YaHei, sans-serif' },
+    title: { text: '三类面积对比（公顷）', left: 'center', top: 2,
+      textStyle: { color: '#5b6b82', fontSize: 12, fontWeight: 600 } },
+    tooltip: {
+      trigger: 'axis', axisPointer: { type: 'shadow' },
+      backgroundColor: 'rgba(255,255,255,0.97)', borderColor: '#d8e2ee',
+      textStyle: { color: '#24344d', fontSize: 12 },
+    },
+    legend: { bottom: 0, textStyle: { color: '#5b6b82', fontSize: 11 },
+      data: gs.map((g) => g.name) },
+    grid: { left: 48, right: 14, top: 38, bottom: 34 },
+    xAxis: {
+      type: 'category', data: [1, 2, 3].map((c) => NAMES[c]),
+      axisLine: { lineStyle: { color: '#c3cfdd' } },
+      axisLabel: { color: '#5b6b82', fontSize: 11 },
+    },
+    yAxis: {
+      type: 'value', name: 'ha', nameTextStyle: { color: '#8494a9' },
+      splitLine: { lineStyle: { color: '#e6edf4' } },
+      axisLabel: { color: '#5b6b82', fontSize: 11 },
+    },
+    series: gs.map((g, i) => ({
+      name: g.name, type: 'bar', barMaxWidth: 26,
+      data: areas(g),
+      itemStyle: { color: palette[i] || palette[0], borderRadius: [4, 4, 0, 0] },
+    })),
+  }, true);
+  compareBar.resize();
+}
+
 export function resizeCharts() {
   if (pie && !pie.isDisposed()) pie.resize();
   if (bar && !bar.isDisposed()) bar.resize();
   if (intensityBar && !intensityBar.isDisposed()) intensityBar.resize();
+  if (sankey && !sankey.isDisposed()) sankey.resize();
+  if (compareBar && !compareBar.isDisposed()) compareBar.resize();
 }

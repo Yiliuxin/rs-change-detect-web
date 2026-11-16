@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
@@ -17,7 +18,7 @@ import numpy as np
 import rasterio
 
 from app.algorithm.change_detector import (
-    CHANGE_CODES, CHANGE_LABELS_EN, CHANGE_NODATA,
+    CHANGE_CODES, CHANGE_LABELS_EN, CHANGE_NODATA, M2_PER_HA,
 )
 from app.algorithm.mask_pipeline import judge_valid_ratio
 from app.algorithm.renderer import render_change_png
@@ -781,12 +782,56 @@ def write_pdf(report: dict, output_path, font_path: str = DEFAULT_FONT_PATH) -> 
     }
 
 
-def write_geojson(change, profile: dict, output_path) -> Dict[str, object]:
+def _crs_ring_area_ha(rings, profile: dict) -> float:
+    """由 ``rasterio.features.shapes`` 的 CRS 坐标环算面积（公顷）。
+
+    投影坐标系下鞋带公式直接给出 m²；地理坐标系（单测用 EPSG:4326）按
+    纬度等距近似把 deg² 换算为 m²。只做展示口径，不参与统计入库。
+    """
+    def signed_area(ring) -> float:
+        s = 0.0
+        for i in range(len(ring) - 1):
+            x1, y1 = float(ring[i][0]), float(ring[i][1])
+            x2, y2 = float(ring[i + 1][0]), float(ring[i + 1][1])
+            s += x1 * y2 - x2 * y1
+        return s / 2.0
+
+    if not rings:
+        return 0.0
+    outer = abs(signed_area(rings[0]))
+    holes = sum(abs(signed_area(r)) for r in rings[1:])
+    area_crs2 = max(0.0, outer - holes)
+    try:
+        from rasterio.crs import CRS
+        geographic = bool(CRS.from_user_input(profile.get("crs")).is_geographic)
+    except Exception:  # noqa: BLE001 - 缺 crs 时按地理坐标保守处理
+        geographic = True
+    m2 = area_crs2
+    if geographic:
+        lat = sum(float(p[1]) for p in rings[0]) / max(1, len(rings[0]))
+        m2 *= (111320.0 ** 2) * math.cos(math.radians(lat))
+    return float(m2) / M2_PER_HA
+
+
+def _dominant_intensity(intensity: Optional[dict], code: int):
+    """本轮该变化类的五档主档（真实计数最大者）；无强度数据时返回 (0, '')。"""
+    groups = (4, 5) if code == 1 else ((1, 2) if code == 2 else (3,))
+    levels = (intensity or {}).get("levels") or []
+    hit = [lv for lv in levels if int(lv.get("code", 0)) in groups]
+    if not hit:
+        return 0, ""
+    best = max(hit, key=lambda lv: int(lv.get("pixel_count") or 0))
+    return int(best["code"]), str(best.get("label") or "")
+
+
+def write_geojson(change, profile: dict, output_path,
+                  intensity: Optional[dict] = None) -> Dict[str, object]:
     """变化图斑导出 GeoJSON（RFC 7946 / WGS84）。
 
     仅导出 1 增强 / 2 退化两类图斑（稳定为背景、面积占绝对主导，导出只会
     撑爆文件且无分析价值）。像元几何经 ``rasterio.features.shapes`` 合并成
     多边形（transform 直接落在栅格 CRS），坐标再统一重投影 EPSG:4326。
+    批次 A：属性补面积 area_ha 与本类强度主档，供图斑详情卡直接消费。
     返回 ``{path, feature_count}``；无变化图斑时写空 FeatureCollection。
     """
     from rasterio.features import shapes as feature_shapes
@@ -799,6 +844,7 @@ def write_geojson(change, profile: dict, output_path) -> Dict[str, object]:
     for geom, value in feature_shapes(arr, mask=mask,
                                       transform=profile.get("transform")):
         code = int(value)
+        level, level_zh = _dominant_intensity(intensity, code)
         rings: List[list] = []
         for ring in geom["coordinates"]:
             xs = [float(p[0]) for p in ring]
@@ -810,6 +856,9 @@ def write_geojson(change, profile: dict, output_path) -> Dict[str, object]:
             "properties": {
                 "change_class": code,
                 "class_zh": "增强" if code == 1 else "退化",
+                "area_ha": round(_crs_ring_area_ha(geom["coordinates"], profile), 4),
+                "intensity_level": level,
+                "intensity_zh": level_zh,
             },
             "geometry": {"type": "Polygon", "coordinates": rings},
         })
@@ -883,7 +932,8 @@ def export_triplet(
         notes["pdf"] = pdf_meta
 
     if "geojson" in allowed:
-        gj_meta = write_geojson(change, profile, out_dir / file_names["geojson"])
+        gj_meta = write_geojson(change, profile, out_dir / file_names["geojson"],
+                                intensity=enriched.get("intensity"))
         files["geojson"] = gj_meta["path"]
         notes["geojson"] = gj_meta
 

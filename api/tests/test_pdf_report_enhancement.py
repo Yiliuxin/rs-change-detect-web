@@ -25,7 +25,7 @@ from app.config.constants import (
 )
 from app.repository.db import db_cursor
 from app.service.common import ARTIFACT_MEDIA_TYPES, run_dir
-from _helpers import POYANG_T1, POYANG_T2, poyang_geojson
+from _helpers import POYANG_T1, POYANG_T2, export_products, poyang_geojson
 
 CHANGE_URL = "/api/v1/result/change"
 EXPORT_URL = "/api/v1/report/export"
@@ -175,5 +175,5 @@ def test_report_export_attribution_uses_verbatim_constants(pdf_flow):
     for text in attribution_lines({"year": str(POYANG_T1)[:4]}):
         assert text in attribution
     assert ATTRIBUTION_LS in attribution
-    assert len(pdf_flow["export"]["files"]) == len(EXPORT_FORMATS)
+    assert len(export_products(pdf_flow["export"]["files"])) == len(EXPORT_FORMATS)
     assert all(f["size"] > 0 for f in pdf_flow["export"]["files"])

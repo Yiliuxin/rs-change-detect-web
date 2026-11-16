@@ -20,6 +20,17 @@ EXPECTED_PAIR_COUNT = 12
 S2_PAIR_COUNT = 11
 
 
+def _preset_only(pairs):
+    """只看预置组：在线取数会动态写入 ``pair_user_<日期>_<时间>`` 组，
+    它们不是 /scene/preset_aois 语义下的「预置影像对」，也不该改变固定计数断言。
+    """
+    return [p for p in pairs if not str(p.get("name", "")).startswith("user_")]
+
+
+def _preset_only_scenes(scenes):
+    return [s for s in scenes if "pair_user_" not in str(s.get("cog_path", ""))]
+
+
 @pytest.fixture(scope="module")
 def preset(client):
     r = client.get(URL)
@@ -31,10 +42,11 @@ def preset(client):
 def test_preset_aois_returns_12_groups_sorted_with_valid_bbox(preset):
     """12 组、name 字典序、bbox [w,s,e,n] 合法且经纬度在中国范围内。"""
     assert isinstance(preset, list)
-    assert len(preset) == EXPECTED_PAIR_COUNT, [p["name"] for p in preset]
-    names = [p["name"] for p in preset]
+    fixed = _preset_only(preset)
+    assert len(fixed) == EXPECTED_PAIR_COUNT, [p["name"] for p in fixed]
+    names = [p["name"] for p in fixed]
     assert names == sorted(names) and len(set(names)) == len(names)
-    for p in preset:
+    for p in fixed:
         assert set(p) == {"name", "bbox", "t1", "t2", "sensor"}, p
         w, s, e, n = p["bbox"]
         assert len(p["bbox"]) == 4
@@ -69,11 +81,12 @@ def test_preset_aois_same_scene_batch_as_match_full_list(client, preset):
     match = client.get(MATCH_URL)
     assert match.status_code == 200, match.text
     body = match.json()
-    assert body["count"] == len(body["scenes"]) == S2_PAIR_COUNT * 2
-    assert all(s["sensor"] == "S2" for s in body["scenes"])  # 既有契约：全量分支只列 S2
+    scenes = _preset_only_scenes(body["scenes"])
+    assert len(scenes) == S2_PAIR_COUNT * 2
+    assert all(s["sensor"] == "S2" for s in scenes)  # 既有契约：全量分支只列 S2
 
-    from_match = {s["cog_path"] for s in body["scenes"]}
-    s2_pairs = [p for p in preset if p["name"] != "landsat_poyang"]
+    from_match = {s["cog_path"] for s in scenes}
+    s2_pairs = [p for p in _preset_only(preset) if p["name"] != "landsat_poyang"]
     assert len(s2_pairs) == S2_PAIR_COUNT
     from_preset = {p[k]["source"] for p in s2_pairs for k in ("t1", "t2")}
     assert from_preset == from_match

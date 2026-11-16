@@ -28,7 +28,7 @@ from app.repository.db import db_cursor
 from app.service import change_async, change_service
 from app.service.common import ARTIFACT_MEDIA_TYPES, run_dir
 from _helpers import (
-    POYANG_T1, POYANG_T2, assert_error_body, poyang_geojson,
+    POYANG_T1, POYANG_T2, assert_error_body, export_products, poyang_geojson,
 )
 
 URL = "/api/v1/result/change"
@@ -266,10 +266,11 @@ def test_regression_report_export_uses_reg_names(client, reg_flow):
         "run_id": rid, "formats": ["geotiff", "png", "pdf"],
     })
     assert r.status_code == 200, r.text
-    names = [f["url"].rsplit("/", 1)[-1] for f in r.json()["files"]]
+    files = r.json()["files"]
+    names = [f["url"].rsplit("/", 1)[-1] for f in export_products(files)]
     assert set(names) == {"change_reg.tif", "change_reg.png", "report_reg.pdf"}
     assert all(f["size"] > 0 and client.get(f["url"]).status_code == 200
-               for f in r.json()["files"])
+               for f in files)
 
 
 @pytest.mark.req("REQ-11")
