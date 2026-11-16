@@ -76,19 +76,29 @@ class RunDetailResponse(RunSummary):
 @router.get(
     "",
     response_model=RunListResponse,
-    responses={400: {"model": ErrorResponse, "description": "EX12 分页参数非法"},
+    responses={400: {"model": ErrorResponse,
+                     "description": "EX12 分页/过滤参数非法（index 枚举、days 越界）"},
                500: {"model": ErrorResponse, "description": "SYS-04 数据库异常"}},
-    summary="历史 run 列表（分页，按创建时间倒序）",
+    summary="历史 run 列表（分页，按创建时间倒序；支持 q / index / days 可选过滤）",
 )
 def list_runs(
     request: Request,
     limit: int = Query(run_service.DEFAULT_PAGE_LIMIT, description="每页条数，默认 20，1..100"),
     offset: int = Query(0, description="偏移量，默认 0"),
+    q: Optional[str] = Query(None, description="模糊匹配 run_id 前缀与 params_snapshot 里的地名/组名文本"),
+    index: Optional[str] = Query(None, description="指数枚举过滤：NDVI / NDWI（非法 → EX12）"),
+    days: Optional[int] = Query(None, description="最近 N 天（按 run 创建时间，1..3650，非法 → EX12）"),
 ) -> RunListResponse:
     """REQ-14：返回 run_id / AOI 名称与 bbox / 双时相日期与 source / created_at /
-    threshold / 三类面积合计；登录态下按人隔离（注册/登录扩展）。"""
+    threshold / 三类面积合计；登录态下按人隔离（注册/登录扩展）。
+
+    批次 D：q / index / days 全部可选，缺省时行为与历史版本完全一致（老前端不带
+    参数不受影响）；total 按过滤后计数；过滤条件变化时前端归零 offset，分页语义不变。
+    """
     user_id = getattr(request.state, "user_id", None)
-    return RunListResponse(**run_service.list_runs(limit, offset, user_id=user_id))
+    return RunListResponse(**run_service.list_runs(
+        limit, offset, user_id=user_id, q=q, index=index, days=days,
+    ))
 
 
 @router.get(

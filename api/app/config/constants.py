@@ -330,6 +330,20 @@ INDEX_RASTER_BAND2: Final[str] = "auxiliary_index"
 PROBE_THROTTLE_MS: Final[int] = 180
 
 # ---------------------------------------------------------------------------
+# 批次 D 检测参数模板：口径面板参数白名单（模板保存/回填的唯一键集合）
+# ---------------------------------------------------------------------------
+# 键集合与 POST /result/change 口径面板提交链路（ChangeRequest）同源，前端回填用：
+#   index      : NDVI | NDWI                       （REQ-07，VALID_INDEXES）
+#   method     : otsu | regression                 （REQ-11，VALID_CHANGE_METHODS）
+#   block_size : 256 | 512                         （REQ-06，BLOCK_SIZE_OPTIONS）
+#   threshold  : (-1, 1) 开区间浮点数或 null        （REQ-07，MANUAL_THRESHOLD_RANGE；
+#                null = Otsu 自适应，阈值方式 otsu/manual 由该键是否为空派生）
+# 多余键一律丢弃；枚举键取值非法按 EX1 口径报错（{code,message,run_id}，中文提示）。
+TEMPLATE_PARAM_KEYS: Final[Tuple[str, ...]] = ("index", "method", "block_size", "threshold")
+# 模板名长度上限（与 users.username 的 32 位 VARCHAR 同风格，落库 VARCHAR(64)）
+TEMPLATE_NAME_MAX: Final[int] = 64
+
+# ---------------------------------------------------------------------------
 # 错误码（第 5 章 EX*/SYS-*）中文提示，供路由统一封装 {code, message, run_id}
 # ---------------------------------------------------------------------------
 # 来源：HLD 第 5 章出错处理设计
@@ -361,4 +375,7 @@ ERROR_MESSAGES: Final[Dict[str, str]] = {
     "AUTH-03": "无权访问该运行记录",
     "AUTH-04": "用户名已存在",
     "AUTH-05": "注册信息不合法，请检查用户名与密码格式",
+    # 批次 D 扩展（检测参数模板）：沿用 EX/SYS 的 {code,message,run_id} 错误体口径
+    "TMPL-01": "同名模板已存在，请更换名称后重试",
+    "TMPL-02": "检测参数模板不存在或无权访问",
 }

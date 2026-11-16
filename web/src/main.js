@@ -13,6 +13,7 @@ import * as demo from './demo.js';
 import * as M from './map.js';
 import * as C from './charts.js';
 import * as HIST from './history.js';
+import * as TMPL from './templates.js';
 import * as PATCH from './patch-card.js';
 import { ONLINE_PLACES } from './places.js';
 import { loadChinaPlaces, loadChinaProvinces, searchPlaces, boxAround, tierLabel } from './china-geo.js';
@@ -610,6 +611,76 @@ async function autoConfirmScene() {
     renderCaliber();
     refreshGates();
   }
+}
+
+// ===== 批次 D（NF9 参数快照模板化）：口径面板 ⇄ 模板区读写 =====
+// panelParams()：把面板现状整理成后端白名单四键——index 大写 / method 小写 /
+// block_size 整数 / threshold 数字或 null（null = Otsu 自适应，面板由「手动覆盖」开关派生）。
+function panelParams() {
+  const { index, method, threshold } = runParams();
+  return {
+    index,
+    method,
+    block_size: Number(($('block-size') && $('block-size').value) || 256),
+    threshold: threshold === undefined ? null : threshold,
+  };
+}
+
+// applyTemplateToPanel()：模板回填——**只改面板状态，不自动提交**（既不触发
+// POST /scene/match 口径确认，也不触发 POST /result/change 检测）；
+// 返回 {changed, note} 供模板区提示条展示「回填后与当前口径的差异」，无差异则空数组。
+function applyTemplateToPanel(p) {
+  const before = panelParams();
+  const changed = [];
+  let note = '';
+
+  if (p.index && p.index !== before.index) {
+    document.querySelectorAll('input[name="index-type"]').forEach((el) => {
+      el.checked = String(el.value).toUpperCase() === p.index;
+    });
+    changed.push('指数 ' + before.index + ' → ' + p.index);
+  }
+  if (p.method && p.method !== before.method) {
+    const sel = $('change-method');
+    if (sel) sel.value = p.method;
+    changed.push('方法 ' + (METHOD_LABELS[before.method] || before.method)
+      + ' → ' + (METHOD_LABELS[p.method] || p.method));
+  }
+  if (p.block_size != null && Number(p.block_size) !== before.block_size) {
+    const sel = $('block-size');
+    if (sel) sel.value = String(p.block_size);
+    changed.push('分块 ' + before.block_size + ' → ' + p.block_size + ' px');
+  }
+  // 阈值：null = Otsu 自适应（关闭「手动覆盖」）；数字 = 勾选并回填滑块
+  if (Object.prototype.hasOwnProperty.call(p, 'threshold')) {
+    const box = $('manual-threshold');
+    const slider = $('threshold-slider');
+    if (p.threshold == null) {
+      if (box && box.checked) { box.checked = false; changed.push('阈值 手动 → Otsu 自适应'); }
+    } else {
+      const t = Number(p.threshold);
+      const lo = Number((slider && slider.min) || -0.5);
+      const hi = Number((slider && slider.max) || 0.5);
+      if (!Number.isFinite(t) || t < lo || t > hi) {
+        // 后端阈值域（-1 < T < 1）比面板滑块更宽：如实提示，不擅自裁剪改值
+        note = '模板阈值 ' + (Number.isFinite(t) ? t.toFixed(2) : '—')
+          + ' 超出面板滑块范围 ' + lo.toFixed(2) + ' ~ ' + hi.toFixed(2) + '，阈值项未回填。';
+      } else {
+        const fromT = before.threshold == null
+          ? 'Otsu 自适应'
+          : '手动 T=' + Number(before.threshold).toFixed(2);
+        const toT = '手动 T=' + (t >= 0 ? '+' : '') + t.toFixed(2);
+        if (slider) slider.value = String(t);
+        if (box) box.checked = true;
+        if (fromT !== toT) changed.push('阈值 ' + fromT + ' → ' + toT);
+      }
+    }
+  }
+
+  syncRunAdvancedUi();   // 折叠区开关 / 滑块 / 阈值方式文案同步
+  renderCaliber();       // 只读口径面板（含分块尺寸）随之刷新，回填有可见结果
+  refreshGates();
+  return { changed, note };
 }
 
 // ===== UI-03：检测运行（REQ-05~08 / REQ-10） =====
@@ -2519,6 +2590,10 @@ function bindEvents() {
   $('btn-export-csv').onclick = downloadAreaStatsCsv;
   $('btn-onl-auto-best').onclick = autoSelectBestOnlineCandidate;
   syncRunAdvancedUi(); // 初始化开关/滑块/实时显值，不改变任何既有门控与离线路径
+
+  // ===== 批次 D（NF9）：口径面板「参数模板」区（保存 / 回填 / 删除） =====
+  // 回填只改面板状态、不自动提交；模板接口不可用时降级为禁用 + 提示，不阻断主流程。
+  TMPL.initTemplates({ getParams: panelParams, applyParams: applyTemplateToPanel });
 
   // ===== 3A（REQ-13）：C 卡「后台运行」开关（默认关 = 同步提交，既有行为零变化） =====
   $('chk-bg-run').addEventListener('change', syncBgModeUi);

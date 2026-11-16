@@ -29,19 +29,28 @@ CODE_HTTP = {
     # 认证扩展（注册/登录）：401 未认证 / 凭证错误，403 越权，409 冲突，400 参数非法
     "AUTH-01": 401, "AUTH-02": 401, "AUTH-03": 403,
     "AUTH-04": 409, "AUTH-05": 400,
+    # 批次 D 扩展（检测参数模板）：重名冲突 409，模板不存在/他人模板 404
+    "TMPL-01": 409, "TMPL-02": 404,
 }
 
 __all__ = ["ApiError", "CODE_HTTP", "as_api_error", "install"]
 
 
 class ApiError(Exception):
-    """业务/系统错误：``{code, message, run_id}``。"""
+    """业务/系统错误：``{code, message, run_id}``。
+
+    ``message`` 可选覆写：EX*/SYS 文案原则上逐字取 ``ERROR_MESSAGES``；
+    批次 D 模板参数校验按 EX1 口径报错（code=EX1），但文案需描述具体参数
+    （如「检测参数非法：index 须为 NDVI/NDWI」），故允许以中文覆写 message，
+    未传时行为与历史版本逐字一致。
+    """
 
     def __init__(self, code: str, run_id: Optional[str] = None,
-                 http_status: Optional[int] = None, detail: Optional[str] = None):
+                 http_status: Optional[int] = None, detail: Optional[str] = None,
+                 message: Optional[str] = None):
         self.code = code
-        # 逐字取 ERROR_MESSAGES，不臆造中文提示
-        self.message = ERROR_MESSAGES.get(code, code)
+        # 逐字取 ERROR_MESSAGES，不臆造中文提示；message 显式传入时以传入值为准
+        self.message = message if message is not None else ERROR_MESSAGES.get(code, code)
         self.run_id = run_id
         self.http_status = http_status if http_status is not None else CODE_HTTP.get(code, 400)
         self.detail = detail

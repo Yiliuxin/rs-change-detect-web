@@ -78,6 +78,10 @@ app.include_router(online.router, prefix=API_V1_PREFIX)
 from app.api.v1 import auth as _auth  # noqa: E402
 app.include_router(_auth.router, prefix=API_V1_PREFIX)
 
+# 批次 D 扩展：检测参数模板 CRUD（口径面板参数快照，JWT 保护、按人隔离）
+from app.api.v1 import templates as _templates  # noqa: E402
+app.include_router(_templates.router, prefix=API_V1_PREFIX)
+
 # --------------------------------------------------------------------------- #
 # JWT 网关（注册/登录扩展）：/api/v1/* 除 /auth/* 外一律要求 Bearer token；
 # 校验通过后把 user_id/username 写入 request.state 供路由做数据归属隔离。

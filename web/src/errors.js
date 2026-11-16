@@ -23,6 +23,9 @@ export const ERROR_MESSAGES = {
   // B 级扩展（在线取数）：文案逐字照抄 api/app/config/constants.py ERROR_MESSAGES
   'SYS-06': '在线数据源不可达或影像下载失败，请稍后重试',
   'SYS-07': '在线取数结果写入对象存储或数据库失败，请稍后重试',
+  // 批次 D（NF9 检测参数模板）：文案逐字照抄 api/app/config/constants.py ERROR_MESSAGES
+  'TMPL-01': '同名模板已存在，请更换名称后重试',
+  'TMPL-02': '检测参数模板不存在或无权访问',
 };
 
 // 后端真实业务错误：{code, message, run_id}。此类错误必须全局展示，不允许被演示降级吞掉。

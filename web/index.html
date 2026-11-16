@@ -88,6 +88,24 @@
             </div>
             <div class="card-subtitle">锁定口径面板<span class="readonly-badge">NF5 · 只读</span></div>
             <div class="kv" id="caliber-panel"><span class="hint">选择一组影像对后自动确认口径</span></div>
+
+            <!-- 批次 D（REQ-04 / NF9 参数快照模板化）：口径模板区
+                 保存 = 面板四键快照；回填只改面板状态、不自动提交；无选中时删除禁用 -->
+            <div class="card-subtitle gap-top">参数模板<span class="hint" id="tmpl-count">—</span></div>
+            <div class="tmpl-area" id="tmpl-area">
+              <div class="tmpl-row">
+                <select id="tmpl-select" aria-label="口径模板" disabled>
+                  <option value="">暂无模板，设置好口径后点保存</option>
+                </select>
+                <button type="button" class="btn btn-sm" id="tmpl-save"
+                  title="把当前口径面板（index / method / block_size / threshold）保存为模板">保存</button>
+                <button type="button" class="btn btn-sm btn-ghost" id="tmpl-del" disabled
+                  title="请先在下拉中选择一个模板">删除</button>
+              </div>
+              <div class="tmpl-hint" id="tmpl-hint">模板 = 口径面板四键快照；回填不自动提交，仍需点「运行变化检测」应用。</div>
+              <div class="err-line" id="tmpl-err"></div>
+              <div class="ok-line" id="tmpl-ok" hidden></div>
+            </div>
           </section>
 
           <!-- C. 检测运行（UI-03 入口 / REQ-05~08 / REQ-10） -->
@@ -270,6 +288,24 @@
               <button type="button" class="btn btn-sm btn-ghost" id="hist-refresh" title="从头重新加载历史运行列表">刷新列表</button>
               <button type="button" class="btn btn-sm btn-ghost" id="hist-retry" hidden title="加载失败后重试">重试</button>
               <button type="button" class="btn btn-sm btn-ghost" id="hist-compare-btn" title="选两个 run 对比面积与参数快照">对比</button>
+            </div>
+            <!-- 批次 D（REQ-14）：筛选条 —— 关键词（300ms 防抖）/ 指数 / 时间；
+                 任一变化即 offset 归零重拉第一页，翻页沿用当前条件 -->
+            <div class="hist-filter" id="hist-filter">
+              <input type="search" id="hist-q" class="hist-q" autocomplete="off"
+                placeholder="搜索 run_id / 地名…" aria-label="搜索历史运行" />
+              <select id="hist-index" aria-label="按指数筛选">
+                <option value="">全部指数</option>
+                <option value="NDVI">NDVI</option>
+                <option value="NDWI">NDWI</option>
+              </select>
+              <select id="hist-days" aria-label="按时间筛选">
+                <option value="">全部时间</option>
+                <option value="7">近 7 天</option>
+                <option value="30">近 30 天</option>
+              </select>
+              <button type="button" class="btn btn-sm btn-ghost" id="hist-filter-clear"
+                title="复位关键词 / 指数 / 时间三项筛选">清空</button>
             </div>
             <div class="err-line" id="hist-err"></div>
             <div class="hist-compare" id="hist-compare" hidden></div>
@@ -586,6 +622,22 @@
 
       <div id="banner" class="banner" hidden></div>
       <div id="toasts" class="toasts" aria-live="polite"></div>
+
+      <!-- 批次 D（NF9）：模板命名弹层（自定义弹层，与卡片同风格；Esc / 点遮罩取消，Enter 保存） -->
+      <div class="tmpl-modal" id="tmpl-modal" hidden>
+        <div class="tmpl-modal-card" role="dialog" aria-modal="true" aria-labelledby="tmpl-modal-title">
+          <div class="card-title" id="tmpl-modal-title">保存为口径模板</div>
+          <label class="fld" for="tmpl-name">模板名称（1–64 字符）</label>
+          <input type="text" id="tmpl-name" maxlength="64" autocomplete="off" spellcheck="false"
+            placeholder="例如 鄱阳湖-NDWI-差值-256" />
+          <div class="tmpl-modal-params" id="tmpl-modal-params">—</div>
+          <div class="err-line" id="tmpl-modal-err"></div>
+          <div class="btn-row gap-top">
+            <button type="button" class="btn btn-sm btn-ghost" id="tmpl-modal-cancel">取消</button>
+            <button type="button" class="btn btn-sm btn-primary" id="tmpl-modal-save">保存</button>
+          </div>
+        </div>
+      </div>
     </div>
     <script type="module" src="/src/main.js"></script>
   </body>

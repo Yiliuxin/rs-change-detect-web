@@ -524,13 +524,70 @@ export async function downloadArtifact(url, filename) {
   return true;
 }
 
-// GET /runs?limit=&offset= → { total, limit, offset, items:[...] }（按 created_at 倒序）
+// GET /runs?limit=&offset=&q=&index=&days= → { total, limit, offset, items:[...] }（按 created_at 倒序）
+// 批次 D（REQ-14）：新增三个**可选**查询参数，缺省时请求与历史版本完全等价（老行为零变化）：
+//   q     关键词（≤100，模糊匹配 run_id 与快照文本里的地名/组名）；
+//   index NDVI / NDWI（后端大小写不敏感，这里统一大写下发）；
+//   days  最近 N 天（1..3650）；非法枚举/越界由后端返回 400 EX12，前端不自行臆造校验。
 export function listRuns(params = {}) {
   const q = new URLSearchParams();
   if (params.limit != null) q.set('limit', String(params.limit));
   if (params.offset != null) q.set('offset', String(params.offset));
+  const kw = String(params.q == null ? '' : params.q).trim();
+  if (kw) q.set('q', kw.slice(0, 100));           // 后端上限 100 字符，超长按前端截断
+  if (params.index) q.set('index', String(params.index).toUpperCase());
+  if (params.days != null && params.days !== '') q.set('days', String(params.days));
   const qs = q.toString();
   return apiGet('/runs' + (qs ? '?' + qs : ''));
+}
+
+// ==========================================================================
+// 批次 D（NF9 参数快照模板化）：检测参数模板 CRUD —— /api/v1/templates
+//   POST   /templates        {name, params} → {id,user_id,name,params,created_at}
+//   GET    /templates        → {total, items:[...]}（created_at 倒序）
+//   DELETE /templates/{id}   → {id, deleted:true}
+// 与 fromLngLat / onlineCall 同款「判别式返回」，调用方无需 try/catch：
+//   { ok:true,  data }                                成功
+//   { ok:false, code, message, run_id, status }       后端业务错误体（TMPL-01 重名 409 /
+//                                                     EX1 参数非法 400 / TMPL-02 不存在 404）
+//   { ok:false, unavailable:true, status }            网络失败 / 裸 404-405（端点未启用）→ 降级
+// 注意：401 已由 fetchWithTimeout 统一清票据回登录页，不在此重复处理。
+// ==========================================================================
+async function templateCall(method, path, body) {
+  let resp;
+  try {
+    const opts = method === 'GET' || method === 'DELETE' ? { method } : jsonOptions(body);
+    resp = await fetchWithTimeout(BASE + path, opts);
+  } catch (_) {
+    return { ok: false, unavailable: true, status: 0 };
+  }
+  if (!resp.ok) {
+    const err = await safeError(resp);
+    if (err) {
+      return { ok: false, code: err.code, message: err.message, run_id: err.run_id, status: resp.status };
+    }
+    return { ok: false, unavailable: true, status: resp.status };
+  }
+  try {
+    return { ok: true, data: await resp.json() };
+  } catch (_) {
+    return { ok: false, unavailable: true, status: resp.status };
+  }
+}
+
+// GET /templates：本人模板列表（created_at 倒序）
+export function listTemplates() {
+  return templateCall('GET', '/templates');
+}
+
+// POST /templates：params 只带口径面板白名单四键（index/method/block_size/threshold）
+export function createTemplate(name, params) {
+  return templateCall('POST', '/templates', { name: String(name || ''), params: params || {} });
+}
+
+// DELETE /templates/{id}：不存在或他人 → TMPL-02(404)
+export function deleteTemplate(id) {
+  return templateCall('DELETE', '/templates/' + encodeURIComponent(String(id || '')));
 }
 
 // GET /runs/{run_id} → 摘要 + params_snapshot 全量 + 全部产物下载 URL

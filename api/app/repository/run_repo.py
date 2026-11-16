@@ -8,6 +8,7 @@ JOIN ``scene`` 取双时相日期与数据源、LEFT JOIN ``change_result`` 聚�
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Tuple
 
 from app.repository.db import db_cursor
@@ -40,16 +41,57 @@ _RUN_SELECT = """
 """
 
 
+def _like_escape(text: str) -> str:
+    """转义 ILIKE 通配符（%/_/\），q 里的特殊字符按字面匹配，防模式注入放大。"""
+    return (text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_"))
+
+
+def _filter_where(user_id: Optional[str], q: Optional[str], index: Optional[str],
+                  days: Optional[int]) -> Tuple[str, tuple]:
+    """拼装过滤条件（全部 %s 参数化，杜绝拼接注入；无过滤返回空串 → 与旧行为一致）。
+
+    - q：run_id 前缀匹配（ILIKE 'q%'）或 params_snapshot 全文匹配（地名/组名等）；
+    - index：``params_snapshot->>'index'`` 精确匹配（服务层已归一化大写）；
+    - days：``aoi.created_at``（run 创建时间）≥ now - N 天。
+    """
+    conds: List[str] = []
+    params: List = []
+    if user_id:
+        conds.append("t.user_id::text = %s")
+        params.append(user_id)
+    if q:
+        esc = _like_escape(q.strip())
+        conds.append("(t.run_id::text ILIKE %s OR t.params_snapshot::text ILIKE %s)")
+        params.extend([esc + "%", "%" + esc + "%"])
+    if index:
+        conds.append("t.params_snapshot->>'index' = %s")
+        params.append(index)
+    if days:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=int(days))
+        conds.append("a.created_at >= %s")
+        params.append(cutoff)
+    where = ("WHERE " + " AND ".join(conds)) if conds else ""
+    return where, tuple(params)
+
+
 def list_runs(limit: int, offset: int,
-              user_id: Optional[str] = None) -> Tuple[int, List[dict]]:
+              user_id: Optional[str] = None,
+              q: Optional[str] = None,
+              index: Optional[str] = None,
+              days: Optional[int] = None) -> Tuple[int, List[dict]]:
     """按 ``aoi.created_at`` 倒序分页，返回 ``(total, rows)``。
 
     ``user_id`` 非空时仅返回该用户的 run（注册/登录扩展：数据按人隔离）。
+    ``q / index / days``（批次 D）为可选过滤：全部缺省时 SQL 与旧行为完全一致，
+    total 按过滤后计数；days 依赖 ``aoi.created_at``，故计数查询须 JOIN aoi。
     """
-    where = "WHERE t.user_id::text = %s" if user_id else ""
-    params: tuple = (user_id,) if user_id else ()
+    where, params = _filter_where(user_id, q, index, days)
     with db_cursor() as cur:
-        cur.execute(f"SELECT COUNT(*) AS n FROM task t {where}", params)
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM task t "
+            "JOIN aoi a ON a.aoi_id = t.aoi_id " + where,
+            params,
+        )
         total = int(cur.fetchone()["n"])
         cur.execute(
             _RUN_SELECT + f" {where} "

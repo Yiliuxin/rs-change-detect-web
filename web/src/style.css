@@ -947,3 +947,47 @@ input[type="range"]:disabled { opacity: .45; cursor: not-allowed; }
 .patch-thumb-img img { width: 100%; height: 100%; object-fit: cover; }
 .patch-thumb-img.is-placeholder { padding: 4px; line-height: 1.4; }
 .patch-thumb-cap { font-size: 9.5px; color: var(--muted); text-align: center; margin-top: 3px; }
+
+/* ===== 批次 D（NF9）：口径面板「参数模板」区 + 模板命名弹层 ===== */
+.tmpl-area { margin-top: 2px; }
+.tmpl-row { display: flex; align-items: center; gap: 6px; }
+.tmpl-row select {
+  flex: 1 1 auto; min-width: 0; width: auto;
+  padding: 6px 24px 6px 8px; font-size: 11.5px;
+}
+.tmpl-row select:disabled { background: var(--card2); color: var(--muted2); cursor: not-allowed; }
+.tmpl-row > .btn { flex: 0 0 auto; }
+.tmpl-hint { margin-top: 5px; font-size: 10.5px; color: var(--muted2); line-height: 1.5; word-break: break-all; }
+
+.tmpl-modal {
+  position: fixed; inset: 0; z-index: 70;
+  display: grid; place-items: center; padding: 16px;
+  background: rgba(16, 34, 58, .32);
+}
+.tmpl-modal-card {
+  width: min(360px, 92vw); padding: 14px 16px;
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: var(--radius); box-shadow: var(--shadow-hover);
+}
+.tmpl-modal-card .card-title { margin-bottom: 10px; }
+.tmpl-modal-params {
+  margin-top: 8px; padding: 6px 9px; border: 1px dashed var(--line); border-radius: 8px;
+  background: var(--card2); font-size: 10.5px; color: var(--muted);
+  line-height: 1.55; word-break: break-all;
+}
+
+/* ===== 批次 D（REQ-14）：历史运行筛选条（关键词 / 指数 / 时间 / 清空，单行） ===== */
+.hist-filter { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
+.hist-filter .hist-q {
+  flex: 1 1 90px; min-width: 0; width: auto;
+  padding: 6px 8px; font-size: 11.5px; border-radius: 8px;
+  border: 1px solid var(--line); background: #fff; color: var(--txt);
+  font-family: inherit; outline: none;
+}
+.hist-filter .hist-q:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(31, 122, 224, .14); }
+.hist-filter select {
+  flex: 0 1 88px; min-width: 0; width: auto;
+  padding: 6px 22px 6px 8px; font-size: 11.5px;
+  background-position: calc(100% - 13px) 13px, calc(100% - 8px) 13px;
+}
+.hist-filter > .btn { flex: 0 0 auto; }

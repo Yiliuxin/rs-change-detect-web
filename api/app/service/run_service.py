@@ -18,6 +18,7 @@ import rasterio
 from app.algorithm.change_detector import CHANGE_LABELS_ZH
 from app.algorithm.geotransform import raster_meta
 from app.api.errors import ApiError, as_api_error
+from app.config.constants import VALID_INDEXES
 from app.repository import run_repo, task_repo
 from app.service.cog_source import parse_cog_path
 from app.service.common import RUNS_ROOT, artifact_media_type, artifact_url
@@ -151,9 +152,24 @@ def _raster_meta(run_id: str) -> Optional[dict]:
     return None
 
 
+# 批次 D /runs 可选过滤参数边界：q 最长 100 字符；days 为 1..3650 的整数
+Q_MAX_LEN: int = 100
+DAYS_MAX: int = 3650
+
+
 def list_runs(limit: int = DEFAULT_PAGE_LIMIT, offset: int = 0,
-              user_id: Optional[str] = None) -> dict:
-    """GET /api/v1/runs：分页列表，按 created_at 倒序（REQ-14）；user_id 非空时按人隔离。"""
+              user_id: Optional[str] = None,
+              q: Optional[str] = None,
+              index: Optional[str] = None,
+              days: Optional[int] = None) -> dict:
+    """GET /api/v1/runs：分页列表，按 created_at 倒序（REQ-14）；user_id 非空时按人隔离。
+
+    批次 D 可选过滤（全部缺省时行为与历史版本完全一致，老前端不受影响）：
+      * q：模糊匹配 run_id 前缀与 params_snapshot 里的地名/组名文本；
+      * index：指数枚举过滤（NDVI/NDWI，非法 → EX12）；
+      * days：最近 N 天（按 run 创建时间 aoi.created_at，1..3650，非法 → EX12）。
+    total 按过滤后计数；分页语义不变（q/index/days 变化时前端归零 offset）。
+    """
     try:
         try:
             lim, off = int(limit), int(offset)
@@ -164,7 +180,32 @@ def list_runs(limit: int = DEFAULT_PAGE_LIMIT, offset: int = 0,
                 "EX12",
                 detail=f"分页参数越界：limit 需在 1..{MAX_PAGE_LIMIT}，offset 需 ≥ 0",
             )
-        total, rows = run_repo.list_runs(lim, off, user_id=user_id)
+        # q：可选字符串，去首尾空白；空串视同未传（与缺省行为一致）
+        clean_q = str(q).strip() if q is not None else None
+        if clean_q == "":
+            clean_q = None
+        if clean_q and len(clean_q) > Q_MAX_LEN:
+            raise ApiError("EX12", detail=f"q 过长：最长 {Q_MAX_LEN} 字符，收到 {len(clean_q)}")
+        # index：归一化大写后校验枚举（与 /result/change 的 index 校验同源）
+        clean_index: Optional[str] = None
+        if index is not None:
+            clean_index = str(index).strip().upper()
+            if clean_index not in VALID_INDEXES:
+                raise ApiError(
+                    "EX12",
+                    detail=f"index 非法：{index!r}，仅支持 {list(VALID_INDEXES)}",
+                )
+        # days：可选整数，1..DAYS_MAX，非法 → EX12
+        clean_days: Optional[int] = None
+        if days is not None:
+            try:
+                clean_days = int(days)
+            except (TypeError, ValueError) as exc:
+                raise ApiError("EX12", detail=f"days 需为整数：{days!r}") from exc
+            if clean_days < 1 or clean_days > DAYS_MAX:
+                raise ApiError("EX12", detail=f"days 越界：需在 1..{DAYS_MAX}，收到 {clean_days}")
+        total, rows = run_repo.list_runs(lim, off, user_id=user_id,
+                                         q=clean_q, index=clean_index, days=clean_days)
         return {
             "total": int(total),
             "limit": lim,

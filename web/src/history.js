@@ -15,6 +15,9 @@ const PAGE_SIZE = 20;
 
 const H = {
   items: [], total: 0, busy: false, error: '',
+  // 批次 D（REQ-14）：筛选条件（GET /runs 的可选 q / index / days）；空串=不筛选
+  filters: { q: '', index: '', days: '' },
+  filterTimer: null, pendingReset: false,
   expanded: '', detail: null,
   onSelect: null, onLoad: null,
   // 批次 A：运行对比视图（两个下拉都来自 GET /runs，详情走 GET /runs/{id}）
@@ -60,6 +63,56 @@ function fmt(v, fallback = '—') {
   return String(v);
 }
 
+// ---------- 批次 D（REQ-14）：筛选条 ⇄ /runs 查询参数 ----------
+// 三个条件全部可选：缺省时不带该 query 参数，请求与历史版本完全一致。
+// 筛选状态以 H.filters 为准（输入防抖 300ms 后才写入），保证「加载更多」翻页时
+// 携带的条件与第一页完全一致，不会因输入框里的半成品关键词而错位。
+function hasFilter() {
+  return !!(H.filters.q || H.filters.index || H.filters.days);
+}
+
+function filterQuery() {
+  const out = {};
+  if (H.filters.q) out.q = H.filters.q;
+  if (H.filters.index) out.index = H.filters.index;
+  if (H.filters.days) out.days = Number(H.filters.days);
+  return out;
+}
+
+function readFilters() {
+  const qEl = $('hist-q'), iEl = $('hist-index'), dEl = $('hist-days');
+  H.filters = {
+    q: qEl ? String(qEl.value || '').trim().slice(0, 100) : '',   // 后端 q 上限 100 字符
+    index: iEl ? String(iEl.value || '') : '',
+    days: dEl ? String(dEl.value || '') : '',
+  };
+}
+
+// 筛选变化：offset 归零 → 重新拉第一页（total 由后端按过滤后计数返回）
+function applyFilter() {
+  closeDetail();      // 条件变了，已展开的详情不再对应本列表
+  loadPage(true);
+}
+
+// 关键词输入防抖 300ms；指数 / 时间下拉变化即时生效
+function onFilterInput() {
+  window.clearTimeout(H.filterTimer);
+  H.filterTimer = window.setTimeout(() => { readFilters(); applyFilter(); }, 300);
+}
+
+function onFilterChange() {
+  window.clearTimeout(H.filterTimer);
+  readFilters();
+  applyFilter();
+}
+
+function clearFilter() {
+  window.clearTimeout(H.filterTimer);
+  ['hist-q', 'hist-index', 'hist-days'].forEach((id) => { const el = $(id); if (el) el.value = ''; });
+  H.filters = { q: '', index: '', days: '' };
+  applyFilter();
+}
+
 // ---------- 三态 ----------
 function renderLoading(reset) {
   const box = $('hist-list');
@@ -72,6 +125,12 @@ function renderLoading(reset) {
 }
 
 function renderEmpty() {
+  // 有筛选条件时的空态与「确实没有历史运行」区分，避免用户误以为数据丢了
+  if (hasFilter()) {
+    $('hist-list').innerHTML = '<div class="empty-state compact"><p>没有符合条件的历史运行</p>'
+      + '<p class="empty-sub">换个关键词，或点「清空」复位指数与时间筛选后重试。</p></div>';
+    return;
+  }
   $('hist-list').innerHTML = '<div class="empty-state compact"><p>暂无历史运行</p>'
     + '<p class="empty-sub">先在 A 卡应用 AOI 并完成一次变化检测，历史记录会出现在这里。</p></div>';
 }
@@ -124,17 +183,24 @@ function renderList() {
         </div>`;
     }).join('');
   }
-  $('hist-count').textContent = '共 ' + H.total + ' 条 · 已显示 ' + H.items.length + ' 条';
+  $('hist-count').textContent = '共 ' + H.total + ' 条'
+    + (hasFilter() ? '（已筛选）' : '') + ' · 已显示 ' + H.items.length + ' 条';
   updateMore();
 }
 
 async function loadPage(reset) {
-  if (H.busy) return;
+  // 请求在途时若筛选又变化，不丢条件：打标记，本次结束后再重拉第一页
+  if (H.busy) {
+    if (reset) H.pendingReset = true;
+    return;
+  }
   H.busy = true;
   const offset = reset ? 0 : H.items.length;
   renderLoading(reset);
   try {
-    const data = await api.listRuns({ limit: PAGE_SIZE, offset });
+    // reset=true：offset 归零重拉第一页；否则按累计 offset 追加。
+    // 两种情况都携带当前筛选条件，保证翻页不丢条件（total 恒为过滤后计数）。
+    const data = await api.listRuns({ limit: PAGE_SIZE, offset, ...filterQuery() });
     const items = Array.isArray(data && data.items) ? data.items : [];
     H.total = Number(data && data.total) || 0;
     H.items = reset ? items : H.items.concat(items);
@@ -148,6 +214,7 @@ async function loadPage(reset) {
   } finally {
     H.busy = false;
     updateMore();
+    if (H.pendingReset) { H.pendingReset = false; loadPage(true); }
   }
 }
 
@@ -374,6 +441,16 @@ async function loadCompare() {
 }
 
 function bind() {
+  // 批次 D（REQ-14）：筛选条路由——关键词防抖 300ms、下拉即时生效、清空一键复位
+  const qEl = $('hist-q');
+  if (qEl) qEl.addEventListener('input', onFilterInput);
+  ['hist-index', 'hist-days'].forEach((id) => {
+    const el = $(id);
+    if (el) el.addEventListener('change', onFilterChange);
+  });
+  const clr = $('hist-filter-clear');
+  if (clr) clr.onclick = clearFilter;
+
   $('hist-list').addEventListener('click', (e) => {
     const item = e.target.closest && e.target.closest('.hist-item');
     if (item) selectRun(item.dataset.rid);
