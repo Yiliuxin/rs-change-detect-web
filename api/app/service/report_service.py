@@ -13,9 +13,12 @@ import zipfile
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import numpy as np
 import rasterio
 
-from app.algorithm.change_detector import CHANGE_LABELS_ZH
+from app.algorithm.change_detector import (
+    CHANGE_LABELS_ZH, CHANGE_NODATA, CHANGE_TRANSITION,
+)
 from app.algorithm.writers import (
     attribution_lines, export_triplet, validate_export_formats,
 )
@@ -135,10 +138,24 @@ def export(run_id: str, formats: List[str]) -> dict:
                     }
 
             valid_ratio = float(report.get("valid_ratio", 0.0))
+            # 批次 B1：检测时落盘的过渡带掩膜 → 重建专题图渲染副本，保证
+            # 重新导出的 PNG / GeoJSON 与首次检测同口径。老 run 无掩膜文件
+            # 时 render_change=None，write_png / write_geojson 如实回退三类。
+            render_change = None
+            mask_path = out_dir / "transition_band_mask.npy"
+            if mask_path.is_file():
+                try:
+                    band_mask = np.load(str(mask_path))
+                    if band_mask.shape == change.shape:
+                        render_change = change.copy()
+                        render_change[(band_mask.astype(bool))
+                                      & (change != CHANGE_NODATA)] = CHANGE_TRANSITION
+                except Exception:  # noqa: BLE001 - 掩膜损坏/旧版格式一律跳过
+                    render_change = None
             export_triplet(
                 change, profile, valid_ratio, report, out_dir,
                 formats=allowed, run_id=run_id, params_snapshot=snapshot,
-                names=names,
+                names=names, render_change=render_change,
             )
 
             # 防御性确保 results 桶存在；不可用时仅回退本地路径

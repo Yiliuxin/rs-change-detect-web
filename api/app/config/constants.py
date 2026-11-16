@@ -293,6 +293,27 @@ LANDCOVER_NOTE: Final[str] = INTENSITY_NOTE
 LANDCOVER_NOTE_EN: Final[str] = INTENSITY_NOTE_EN
 
 # ---------------------------------------------------------------------------
+# 批次 B1 置信度过渡带（|Δ| 贴近阈值 T，判定证据不足）
+# ---------------------------------------------------------------------------
+# 口径：| |Δ| − T | ≤ TRANSITION_BAND_RATIO · T，即 (1−r)T ≤ |Δ| ≤ (1+r)T
+# 的有效像元标记为「过渡带（不确定）」，在专题图上用独立灰色、在 stats 中单列。
+# 语义口径（务必与 README 一致）：过渡带是「证据不足」的置信度提示，
+# **不是第四类变化**——三类分类图（GeoTIFF / 图斑统计 / 精度评价）仍只有
+# 1 增强 / 2 退化 / 3 稳定，过渡带仅作为旁路标记参与渲染与统计呈现。
+TRANSITION_BAND_RATIO: Final[float] = 0.25
+TRANSITION_BAND_CODE: Final[int] = 4
+TRANSITION_BAND_LABEL_ZH: Final[str] = "过渡带（不确定）"
+TRANSITION_BAND_LABEL_EN: Final[str] = "TRANSITION BAND (UNCERTAIN)"
+TRANSITION_BAND_COLOR: Final[Tuple[int, int, int]] = (150, 150, 150)
+TRANSITION_BAND_NOTE: Final[str] = (
+    "过渡带表示 |Δ| 贴近阈值、判定证据不足，不是第四类变化；"
+    "三类分类与精度评价口径不变"
+)
+# 批次 B2 图斑形态指标：度 → 米的等距近似系数（AOI ≤ 0.25°，忽略椭球改正，
+# 仅作周长/紧凑度/主走向的展示口径，不参与面积入库）
+PATCH_SHAPE_DEG_TO_M: Final[float] = 111320.0
+
+# ---------------------------------------------------------------------------
 # B2 鼠标拾取探针：双时相指数栅格（探针前置产物，float32 / NaN / deflate）
 # ---------------------------------------------------------------------------
 INDEX_RASTER_T1: Final[str] = "index_t1.tif"

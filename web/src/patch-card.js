@@ -12,8 +12,8 @@ const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
 }[c]));
 
-const CLASS_ZH = { 1: '增强', 2: '退化', 3: '稳定' };
-const CLASS_COLOR = { 1: '#21a04c', 2: '#d94c3d', 3: '#5b7a99' };
+const CLASS_ZH = { 1: '增强', 2: '退化', 3: '稳定', 4: '过渡带（不确定）' };
+const CLASS_COLOR = { 1: '#21a04c', 2: '#d94c3d', 3: '#5b7a99', 4: '#969696' };
 const INTENSITY_ZH = {
   1: '显著退化', 2: '轻微退化', 3: '稳定', 4: '轻微改善', 5: '显著改善',
 };
@@ -56,6 +56,7 @@ function ringAreaHa(geometry) {
 
 // 逐斑块 Δ 不在 GeoJSON 属性里，强度档取本轮该类五档中的主档（真实统计，非臆造）
 function dominantIntensity(intensity, cls) {
+  if (cls === 4) return null; // 过渡带证据不足，不套用任何强度主档
   const groups = cls === 1 ? [4, 5] : (cls === 2 ? [1, 2] : [3]);
   const levels = (intensity && Array.isArray(intensity.levels)) ? intensity.levels : [];
   const hit = levels.filter((lv) => groups.includes(Number(lv && lv.code)));
@@ -118,13 +119,19 @@ function showCard(feature, point) {
   const intText = dom ? dom.code + ' · ' + dom.label : '—';
   const rid = state && state.getRunId ? String(state.getRunId() || '') : '';
   const color = CLASS_COLOR[cls] || '#8aa2bd';
+  // 批次 B2：三项形态指标与 Top10 表 / GeoJSON properties 同源；老产物缺字段显示 —
+  const metric = (v, d, unit) => (v == null || v === '' || !Number.isFinite(Number(v)))
+    ? '—' : Number(v).toFixed(d) + unit;
 
   body.innerHTML = `
     <div class="patch-row"><span>类别</span><b style="color:${color}">${esc(CLASS_ZH[cls] || p.class_zh || '—')}</b></div>
     <div class="patch-row"><span>面积</span><b>${esc(areaText)}</b></div>
     <div class="patch-row"><span>强度档</span><b>${esc(intText)}</b></div>
+    <div class="patch-row"><span>周长</span><b>${esc(metric(p.perimeter_m, 1, ' m'))}</b></div>
+    <div class="patch-row"><span>紧凑度</span><b>${esc(metric(p.compactness, 3, ''))}</b></div>
+    <div class="patch-row"><span>主走向</span><b>${esc(metric(p.orientation_deg, 1, '°'))}</b></div>
     <div class="patch-row"><span>run_id</span><b title="${esc(rid)}">${esc(rid ? rid.slice(0, 8) + '…' : '—')}</b></div>
-    <div class="patch-note">强度档按本轮同类主档（无逐斑块 Δ 数据）</div>`;
+    <div class="patch-note">强度档按本轮同类主档；周长/紧凑度/主走向为 111320·cos(lat) 近似口径</div>`;
 
   const map = state && state.map;
   const container = (map && typeof map.getContainer === 'function') ? map.getContainer() : null;

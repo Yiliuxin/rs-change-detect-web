@@ -12,6 +12,7 @@ let bar = null;
 let intensityBar = null;
 let sankey = null;
 let compareBar = null;
+let deltaHist = null;
 
 // 桑基节点沿用既有三类主色；A3 地物判据的第 4 类用稳定蓝浅色变体，不引入新色系。
 const SANKEY_COLORS = { ...COLORS, 4: '#8aa2bd' };
@@ -101,6 +102,80 @@ export function renderBar(el, stats) {
     }],
   }, true);
   bar.resize();
+}
+
+// ===== 批次 B1 · Δ 指数分布直方图：竖线标出置信度过渡带区间 =====
+// 数据来自后端 params_snapshot.index_histogram（_index_histogram 的 32 bin），
+// 无数据整块隐藏、不伪造分布。4 条灰色竖线为 ±[band_low, band_high]，
+// 红色虚线为 ±T；过渡带是「证据不足」而非第四类变化。
+export function renderDeltaHistogram(el, hist) {
+  if (!el) return;
+  const counts = (hist && Array.isArray(hist.counts)) ? hist.counts : [];
+  const edges = (hist && Array.isArray(hist.edges)) ? hist.edges : [];
+  if (counts.length < 2 || edges.length !== counts.length + 1) {
+    el.hidden = true;
+    return;
+  }
+  el.hidden = false;
+  if (!deltaHist || deltaHist.isDisposed()) {
+    deltaHist = echarts.init(el, null, { renderer: 'canvas' });
+  }
+  const data = counts.map((c, i) => [
+    Number(((edges[i] + edges[i + 1]) / 2).toFixed(5)), Number(c),
+  ]);
+  const lines = [];
+  const low = Number(hist.band_low), high = Number(hist.band_high);
+  if (Number.isFinite(low) && Number.isFinite(high)) {
+    [-high, -low, low, high].forEach((v, i) => lines.push({
+      xAxis: Number(v.toFixed(5)),
+      lineStyle: { color: '#969696', type: 'dotted', width: 1.2 },
+      label: {
+        show: i === 3, formatter: '过渡带 ±0.25T', color: '#6f6f6f',
+        fontSize: 10, position: 'insideEndTop',
+      },
+    }));
+  }
+  const thr = Number(hist.threshold);
+  if (Number.isFinite(thr)) {
+    [-thr, thr].forEach((v) => lines.push({
+      xAxis: Number(v.toFixed(5)),
+      lineStyle: { color: '#d63031', type: 'dashed', width: 1.3 },
+      label: { show: false },
+    }));
+  }
+  deltaHist.setOption({
+    backgroundColor: 'transparent',
+    textStyle: { fontFamily: 'Segoe UI, Microsoft YaHei, sans-serif' },
+    title: {
+      text: 'Δ 指数分布与置信度过渡带', left: 'center', top: 2,
+      textStyle: { color: '#5b6b82', fontSize: 12, fontWeight: 600 },
+    },
+    tooltip: {
+      trigger: 'axis', axisPointer: { type: 'shadow' },
+      backgroundColor: 'rgba(255,255,255,0.97)', borderColor: '#d8e2ee',
+      textStyle: { color: '#24344d', fontSize: 12 },
+    },
+    grid: { left: 54, right: 16, top: 38, bottom: 26 },
+    xAxis: {
+      type: 'value', name: 'Δ', nameTextStyle: { color: '#8494a9' },
+      splitLine: { lineStyle: { color: '#e6edf4' } },
+      axisLabel: {
+        color: '#5b6b82', fontSize: 10,
+        formatter: (v) => Number(v).toFixed(2),
+      },
+    },
+    yAxis: {
+      type: 'value', name: '像元', nameTextStyle: { color: '#8494a9' },
+      splitLine: { lineStyle: { color: '#e6edf4' } },
+      axisLabel: { color: '#5b6b82', fontSize: 10 },
+    },
+    series: [{
+      type: 'bar', barWidth: '92%', data,
+      itemStyle: { color: '#378add', opacity: 0.85 },
+      markLine: { symbol: 'none', silent: true, animation: false, data: lines },
+    }],
+  }, true);
+  deltaHist.resize();
 }
 
 // A1：五档变化强度横向条形图（数据来自 /result/change 的 intensity.levels）
@@ -296,6 +371,7 @@ export function renderCompareBar(el, groups) {
 export function resizeCharts() {
   if (pie && !pie.isDisposed()) pie.resize();
   if (bar && !bar.isDisposed()) bar.resize();
+  if (deltaHist && !deltaHist.isDisposed()) deltaHist.resize();
   if (intensityBar && !intensityBar.isDisposed()) intensityBar.resize();
   if (sankey && !sankey.isDisposed()) sankey.resize();
   if (compareBar && !compareBar.isDisposed()) compareBar.resize();

@@ -25,6 +25,7 @@ from app.algorithm.change_detector import (
     CHANGE_DEGRADED, CHANGE_ENHANCED, CHANGE_LABELS_ZH, M2_PER_HA,
     pixel_area_from_profile,
 )
+from app.algorithm.patch_shape import shape_metrics_from_labels
 from app.config.constants import (
     PATCH_CONNECTIVITY, PATCH_MAX_PIXELS, PATCH_SKIP_REASON, PATCH_TOP_N,
 )
@@ -157,14 +158,20 @@ def patch_stats(change, profile: Optional[dict] = None,
     top: List[Dict[str, object]] = []
     for rank, (size, code, label_id, lab) in enumerate(ordered, start=1):
         lng, lat = _centroid_lonlat(lab, label_id, transform, crs)
+        area_ha = float(size) * area / M2_PER_HA
+        # 批次 B2：三项形态指标与 write_geojson 同源（同一 4 连通轮廓 → WGS84 → 近似米制）
+        shape = shape_metrics_from_labels(lab, label_id, transform, crs, area_ha)
         top.append({
             "rank": rank,
             "change_class": int(code),
             "class_zh": CHANGE_LABELS_ZH[int(code)],
             "pixel_count": int(size),
-            "area_ha": float(size) * area / M2_PER_HA,
+            "area_ha": area_ha,
             "centroid_lng": lng,
             "centroid_lat": lat,
+            "perimeter_m": shape["perimeter_m"],
+            "compactness": shape["compactness"],
+            "orientation_deg": shape["orientation_deg"],
         })
 
     return {

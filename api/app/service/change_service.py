@@ -22,7 +22,9 @@ import numpy as np
 
 from app.algorithm import index_calculator
 from app.algorithm.change_detector import (
-    change_pixel_ratio, change_stats, classify_change, delta_ndvi,
+    CHANGE_NODATA, CHANGE_TRANSITION, M2_PER_HA, change_pixel_ratio,
+    change_stats, classify_change, delta_ndvi, transition_band_edges,
+    transition_band_mask, transition_band_stats,
 )
 from app.algorithm.cog_reader import read_aoi
 from app.algorithm.composite import (
@@ -51,7 +53,7 @@ from app.config.constants import (
     BLOCK_SIZE, EXPORT_FORMATS, INDEX_RASTER_T1, INDEX_RASTER_T2,
     LANDSAT_SENSORS, MANUAL_THRESHOLD_RANGE, METHOD_OTSU, METHOD_REGRESSION,
     REGRESSION_MAX_ROUNDS, REGRESSION_SIGMA_FACTOR, radiometric_formula,
-    VALID_CHANGE_METHODS, VALID_INDEXES,
+    TRANSITION_BAND_RATIO, VALID_CHANGE_METHODS, VALID_INDEXES,
     VALID_RATIO_MIN, VALID_RATIO_WARN,
 )
 from app.repository import aoi_repo, change_result_repo, scene_repo, task_repo
@@ -114,7 +116,9 @@ def _validate_method(method: str, run_id: str) -> str:
 def _index_histogram(values, valid_mask, threshold: float, name: str) -> dict:
     """指数差值 / 回归残差分布直方图（32 bin，仅统计有效且有限值像元）。
 
-    供 PDF 内嵌佐证阈值合理性；无有效值返回空 dict（写 PDF 时如实跳过）。
+    供 PDF 内嵌佐证阈值合理性；``band_low`` / ``band_high`` 为批次 B1
+    置信度过渡带上下界，直方图据此画 4 条竖线。无有效值返回空 dict
+    （写 PDF 时如实跳过）。
     """
     arr = np.asarray(values, dtype=float)
     mask = np.asarray(valid_mask, dtype=bool)
@@ -122,13 +126,90 @@ def _index_histogram(values, valid_mask, threshold: float, name: str) -> dict:
     if vals.size == 0:
         return {}
     counts, edges = np.histogram(vals, bins=32)
+    band_low, band_high = transition_band_edges(threshold)
     return {
         "name": str(name),
         "counts": [int(c) for c in counts],
         "edges": [float(e) for e in edges],
         "threshold": float(threshold),
         "valid_count": int(vals.size),
+        "band_low": float(band_low),
+        "band_high": float(band_high),
     }
+
+
+def _build_conclusion(report: dict) -> Tuple[str, str]:
+    """组装一句「结论」+ 一行纯 ASCII 可检索摘要（批次 B3）。
+
+    数字**全部取自本轮 report**（禁止编造）：两期水体/植被面积 = 转移矩阵
+    row_totals / col_totals × 单像元面积；主导转移方向 = top[0]；三类面积 =
+    stats；阈值 / 方法 / 来源 = 本轮参数快照。缺任一必要字段返回 ("", "")，
+    老 run 的 PDF「结果摘要」段据此整段跳过，绝不补写占位数字。
+    """
+    stats = report.get("stats") or []
+    trans = report.get("transition_matrix")
+    if not isinstance(stats, list) or not stats or not isinstance(trans, dict):
+        return "", ""
+    st: Dict[int, dict] = {}
+    for item in stats:
+        try:
+            st[int(item.get("change_class", 0))] = item
+        except (TypeError, ValueError, AttributeError):
+            continue
+    if not all(c in st for c in (1, 2, 3)):
+        return "", ""
+    row_totals = trans.get("row_totals") or []
+    col_totals = trans.get("col_totals") or []
+    if not (isinstance(row_totals, list) and len(row_totals) >= 2
+            and isinstance(col_totals, list) and len(col_totals) >= 2):
+        return "", ""
+    snap = report.get("params_snapshot") or {}
+    area_m2 = float(snap.get("pixel_area_m2") or 0.0)
+    if area_m2 <= 0:
+        return "", ""
+
+    # LANDCOVER_CODES 前两类 = 1 水体 / 2 植被；行列合计直接取本轮矩阵
+    def _water_veg_ha(totals) -> float:
+        return (float(totals[0]) + float(totals[1])) * area_m2 / M2_PER_HA
+
+    x, y = _water_veg_ha(row_totals), _water_veg_ha(col_totals)
+    pct = ((y - x) / x * 100.0) if x > 0 else 0.0
+    verb = "增至" if pct >= 0 else "减至"
+    sign = "+" if pct >= 0 else "−"
+
+    top = trans.get("top") or []
+    d0 = top[0] if (isinstance(top, list) and top and isinstance(top[0], dict)) else {}
+    dominant_zh = ""
+    if d0:
+        dominant_zh = (f"主导转移方向为 {d0.get('from_label', '—')} → "
+                       f"{d0.get('to_label', '—')}（{float(d0.get('area_ha', 0.0)):.2f} ha）")
+    method = str(report.get("method") or "otsu").lower()
+    method_zh = "回归残差法" if method == METHOD_REGRESSION else "Otsu 差值法"
+    thr = float(report.get("threshold") or 0.0)
+    src = str(report.get("threshold_source") or "")
+    band = report.get("transition_band") or {}
+    band_zh = ""
+    if isinstance(band, dict) and band.get("pixel_count") is not None:
+        band_zh = (f"；过渡带（证据不足，非第四类变化）{int(band['pixel_count'])} 像元、"
+                   f"占 {float(band.get('ratio', 0.0)) * 100:.2f}%")
+    t1, t2 = str(snap.get("t1") or ""), str(snap.get("t2") or "")
+    idx = str(report.get("index") or "")
+    area = {c: float(st[c].get("area_ha") or 0.0) for c in (1, 2, 3)}
+
+    zh = (f"结论（{idx}，{t1} → {t2}）：水体/植被面积由 {x:.2f} ha {verb} {y:.2f} ha"
+          f"（{sign}{abs(pct):.1f}%）；{dominant_zh}；本轮三类统计为增强 {area[1]:.2f} ha、"
+          f"退化 {area[2]:.2f} ha、稳定 {area[3]:.2f} ha{band_zh}；"
+          f"采用 {method_zh}，阈值 T={thr:.4f}（{src}），"
+          f"过渡带带宽 ±{TRANSITION_BAND_RATIO:.2f}T。")
+    ascii_line = (
+        f"INDEX={idx} T1={t1} T2={t2} "
+        f"WATER_VEG_T1_HA={x:.4f} WATER_VEG_T2_HA={y:.4f} DELTA_PCT={pct:+.2f} "
+        f"DOMINANT={d0.get('label_en', 'NA')} "
+        f"ENHANCED_HA={area[1]:.4f} DEGRADED_HA={area[2]:.4f} STABLE_HA={area[3]:.4f} "
+        f"TRANSITION_PIXELS={int(band.get('pixel_count', 0)) if isinstance(band, dict) else 0} "
+        f"THRESHOLD_T={thr:.4f} METHOD={method} SOURCE={src}"
+    )
+    return zh, ascii_line
 
 
 def _stage_progress(on_stage, name: str, done=None, total=None) -> None:
@@ -489,6 +570,22 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
             hist_src = d
         index_histogram = _index_histogram(hist_src, valid, thr, hist_name)
 
+        # 批次 B1 置信度过渡带：| |Δ| − T | ≤ 0.25·T 的像元判定「证据不足」。
+        # 口径见 constants.TRANSITION_BAND_*：过渡带不是第四类变化，这里只生成
+        # 专题图渲染副本 + 单列 stats 字段，**不改写三类 change**——GeoTIFF、
+        # 图斑统计、五档强度、精度评价、探针仍严格只有 1/2/3。
+        band_mask = transition_band_mask(hist_src, thr, valid_mask=valid)
+        band_mask &= (change != CHANGE_NODATA)   # nodata 永远不进过渡带
+        band_marked = change.copy()
+        band_marked[band_mask] = CHANGE_TRANSITION
+        band_summary = transition_band_stats(
+            band_mask, int(summary["valid_count"]),
+            float(summary["pixel_area_m2"]), thr,
+        )
+        # 掩膜落盘：/report/export 重新生成 PNG / GeoJSON 时复用同一口径；
+        # 老 run 无此文件则如实跳过过渡带呈现，不反推、不伪造。
+        np.save(str(out_dir / "transition_band_mask.npy"), band_mask)
+
         # A1 变化强度分级：与三类严格同一阈值 T、同一差分源 hist_src
         # （回归法即残差）。传入形态学后的最终三类图作粗类权威，保证
         # 4+5 档 == 增强、1+2 档 == 退化、3 == 稳定，三类数字逐项自洽。
@@ -558,6 +655,10 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
             "intensity": intensity_summary,
             "patch_stats": patch_summary,
             "transition_matrix": transition_summary,
+            # 批次 B1/B3：过渡带统计、Δ 直方图与结论走参数快照这一既有字段通道，
+            # 历史 run 回看与前端结果卡不新增接口即可取到同源数据。
+            "transition_band": band_summary,
+            "index_histogram": index_histogram,
         })
 
         year = str(snapshot.get("t1") or "")[:4] or "2023"
@@ -578,6 +679,7 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
             "change_pixel_ratio": float(ratio_change),
             "stats": stats,
             "index_histogram": index_histogram,
+            "transition_band": band_summary,
             # A1 / A2 / A3：透出点 ② run_report.json（PDF 与报告导出复用）
             "intensity": intensity_summary,
             "patch_stats": patch_summary,
@@ -588,11 +690,19 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
             "attribution_lines": attribution_lines({"year": year}),
         }
 
+        # 批次 B3：一句话结论只取本轮 stats / 转移矩阵 / 阈值方法（数字可追溯，
+        # 禁止编造）；缺字段返回空串，老 run 的 PDF「结果摘要」段据此整段跳过。
+        conclusion_zh, conclusion_ascii = _build_conclusion(report)
+        report["conclusion"] = conclusion_zh
+        report["conclusion_ascii"] = conclusion_ascii
+        # 复用 params_snapshot 这一既有字段通道透给前端结果卡，不新增接口
+        snapshot["conclusion"] = conclusion_zh
+
         _stage_progress(on_stage, "render_export", 1, 3)  # 阶段 5：渲染导出
         exported = export_triplet(
             change, profile, valid_ratio, report, out_dir,
             formats=EXPORT_FORMATS, run_id=run_id, params_snapshot=snapshot,
-            names=out_names,
+            names=out_names, render_change=band_marked,
         )
         _stage_progress(on_stage, "render_export", 2, 3)
         # 归档一份带 index 小写后缀的三件套副本：NDVI / NDWI 各自留存，互不覆盖；
@@ -649,6 +759,9 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
             "intensity": intensity_summary,
             "patch_stats": patch_summary,
             "transition_matrix": transition_summary,
+            # 批次 B1/B3：过渡带单列统计与结论句（同源亦写入 params_snapshot）
+            "transition_band": band_summary,
+            "conclusion": conclusion_zh,
         }
     except ApiError:
         raise

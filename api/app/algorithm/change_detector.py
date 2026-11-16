@@ -4,6 +4,11 @@
 纯函数：三类编码由本模块统一定义（HLD 锁定，禁止改写）：
     0 = nodata/无效；1 = 增强；2 = 退化；3 = 稳定。
 分类口径：Δ > +T → 1；Δ < −T → 2；|Δ| ≤ T → 3；无效像元 → 0。
+
+批次 B1 追加「置信度过渡带」：| |Δ| − T | ≤ 0.25·T 的像元判定证据不足。
+过渡带是**置信度提示，不是第四类变化**：它单独编码为 CHANGE_TRANSITION，
+只用于专题图渲染与 stats 单列，不进 CHANGE_CODES、不改写三类分类图
+（GeoTIFF / 图斑统计 / 精度评价仍严格只有 1/2/3）。
 """
 from __future__ import annotations
 
@@ -12,6 +17,10 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from app.algorithm.geotransform import pixel_area_m2 as _ds_pixel_area_m2
+from app.config.constants import (
+    TRANSITION_BAND_CODE, TRANSITION_BAND_LABEL_EN, TRANSITION_BAND_LABEL_ZH,
+    TRANSITION_BAND_NOTE, TRANSITION_BAND_RATIO,
+)
 
 # 三类编码（HLD 锁定值，渲染 / 掩膜 / 报告统一引用此处的唯一来源）
 CHANGE_NODATA: int = 0
@@ -23,15 +32,19 @@ CHANGE_LABELS_ZH: Dict[int, str] = {1: "增强", 2: "退化", 3: "稳定", 0: "�
 CHANGE_LABELS_EN: Dict[int, str] = {
     1: "ENHANCED", 2: "DEGRADED", 3: "STABLE", 0: "NODATA",
 }
+# 批次 B1：过渡带是「证据不足」的旁路标记，不是第四类变化，故不进 CHANGE_CODES；
+# 也不写进 CHANGE_LABELS_ZH/EN（精度评价的类别字典严格只有三类）。
+CHANGE_TRANSITION: int = TRANSITION_BAND_CODE
 
 # 平方米 → 公顷（物理单位换算，非业务阈值）
 M2_PER_HA: float = 10000.0
 
 __all__ = [
     "CHANGE_NODATA", "CHANGE_ENHANCED", "CHANGE_DEGRADED", "CHANGE_STABLE",
-    "CHANGE_CODES", "CHANGE_LABELS_ZH", "CHANGE_LABELS_EN",
+    "CHANGE_CODES", "CHANGE_LABELS_ZH", "CHANGE_LABELS_EN", "CHANGE_TRANSITION",
     "delta_ndvi", "classify_change", "change_pixel_ratio",
     "pixel_area_from_profile", "change_stats",
+    "transition_band_edges", "transition_band_mask", "transition_band_stats",
 ]
 
 
@@ -69,6 +82,61 @@ def classify_change(dndvi, threshold: float, valid_mask: Optional[np.ndarray] = 
     out[valid & (d > t)] = CHANGE_ENHANCED           # Δ > +T 增强
     out[valid & (d < -t)] = CHANGE_DEGRADED          # Δ < −T 退化
     return out
+
+
+def transition_band_edges(threshold: float,
+                          ratio: float = TRANSITION_BAND_RATIO) -> Tuple[float, float]:
+    """过渡带上下界：((1−r)·T, (1+r)·T)，T 取 |T|；r 需落在 [0, 1)。"""
+    t = abs(float(threshold))
+    r = float(ratio)
+    if not np.isfinite(t) or t < 0.0 or not (0.0 <= r < 1.0):
+        raise ValueError(f"阈值/带宽非法：T={threshold!r}, ratio={ratio!r}")
+    return (1.0 - r) * t, (1.0 + r) * t
+
+
+def transition_band_mask(delta, threshold: float,
+                         valid_mask: Optional[np.ndarray] = None,
+                         ratio: float = TRANSITION_BAND_RATIO) -> np.ndarray:
+    """置信度过渡带掩膜（批次 B1）：| |Δ| − T | ≤ r·T 的有效像元为 True。
+
+    口径取常量 ``TRANSITION_BAND_RATIO``；Δ 用与分类阈值同源的差分/残差
+    （差值法 = index_t2 − index_t1，回归法 = 残差 r）。这些像元「证据不足」，
+    **不是第四类变化**：本函数只产出旁路标记，不改写三类分类图。
+    """
+    low, high = transition_band_edges(threshold, ratio)
+    a = np.abs(_as_f32(delta))
+    valid = np.isfinite(a)
+    if valid_mask is not None:
+        vm = np.asarray(valid_mask, dtype=bool)
+        if vm.shape != a.shape:
+            raise ValueError(f"valid_mask 形状 {vm.shape} 与 Δ 数组 {a.shape} 不一致")
+        valid &= vm
+    return valid & (a >= low) & (a <= high)
+
+
+def transition_band_stats(mask, valid_count: int, pixel_area_m2: float,
+                          threshold: float,
+                          ratio: float = TRANSITION_BAND_RATIO) -> Dict[str, object]:
+    """过渡带像元数 / 占比 / 面积与带宽口径（stats 增补字段，单列不并入三类）。
+
+    占比分母为三类有效像元总数 ``valid_count``（过渡带是其中的子集标记）。
+    """
+    low, high = transition_band_edges(threshold, ratio)
+    n = int(np.count_nonzero(np.asarray(mask, dtype=bool)))
+    denom = int(valid_count)
+    return {
+        "code": CHANGE_TRANSITION,
+        "label": TRANSITION_BAND_LABEL_ZH,
+        "label_en": TRANSITION_BAND_LABEL_EN,
+        "pixel_count": n,
+        "ratio": float(n / denom) if denom > 0 else 0.0,
+        "area_ha": float(n) * float(pixel_area_m2) / M2_PER_HA,
+        "threshold": abs(float(threshold)),
+        "band_ratio": float(ratio),
+        "band_low": float(low),
+        "band_high": float(high),
+        "note": TRANSITION_BAND_NOTE,
+    }
 
 
 def change_pixel_ratio(change, valid_mask: Optional[np.ndarray] = None) -> float:

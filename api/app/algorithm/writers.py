@@ -18,9 +18,11 @@ import numpy as np
 import rasterio
 
 from app.algorithm.change_detector import (
-    CHANGE_CODES, CHANGE_LABELS_EN, CHANGE_NODATA, M2_PER_HA,
+    CHANGE_CODES, CHANGE_LABELS_EN, CHANGE_NODATA, CHANGE_TRANSITION,
+    M2_PER_HA, transition_band_edges,
 )
 from app.algorithm.mask_pipeline import judge_valid_ratio
+from app.algorithm.patch_shape import shape_metrics
 from app.algorithm.renderer import render_change_png
 from app.config.constants import (
     ATTRIBUTION_LS,
@@ -43,6 +45,7 @@ from app.config.constants import (
     LANDCOVER_NOTE,
     LANDCOVER_NOTE_EN,
     PATCH_PDF_TOP_N,
+    TRANSITION_BAND_LABEL_ZH,
     VALID_RATIO_MIN,
     VALID_RATIO_WARN,
 )
@@ -250,10 +253,17 @@ def render_area_chart(stats, output_path) -> str:
 
 
 def render_index_histogram(hist: dict, output_path) -> str:
-    """REQ-12 扩展：指数差值 / 回归残差分布直方图 PNG，红色虚线标检测阈值。
+    """REQ-12 扩展：指数差值 / 回归残差分布直方图 PNG。
+
+    红色虚线标检测阈值 ±T；批次 B1 用 4 条灰色竖线标出置信度过渡带区间
+    | |Δ| − T | ≤ 0.25·T（即 ±[band_low, band_high]），区间内再铺淡灰底，
+    直观说明「证据不足」的像元落在哪里。带宽口径来自
+    ``change_detector.transition_band_edges``（常量 TRANSITION_BAND_RATIO），
+    老 histogram 无带宽字段时由自身 threshold 按同一常量推导，缺 threshold
+    则如实跳过竖线，不伪造区间。
 
     ``hist`` 结构见 change_service._index_histogram：{name, counts, edges,
-    threshold, valid_count}；缺键或缺数据时返回空串（调用方跳过，不伪造）。
+    threshold, valid_count, band_low, band_high}；缺数据时返回空串（调用方跳过）。
     """
     counts = [int(c) for c in (hist.get("counts") or [])]
     edges = [float(e) for e in (hist.get("edges") or [])]
@@ -267,12 +277,27 @@ def render_index_histogram(hist: dict, output_path) -> str:
     width = (edges[-1] - edges[0]) / max(len(counts), 1) * 0.92
     thr = hist.get("threshold")
     name = str(hist.get("name") or "INDEX DELTA")
+    band_low, band_high = hist.get("band_low"), hist.get("band_high")
+    if (band_low is None or band_high is None) and thr is not None:
+        try:
+            band_low, band_high = transition_band_edges(float(thr))
+        except ValueError:
+            band_low = band_high = None
 
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(6.4, 3.0), dpi=150)
     try:
         ax.bar(centers, counts, width=width, color="#378ADD", alpha=0.85)
+        if band_low is not None and band_high is not None:
+            lo, hi = abs(float(band_low)), abs(float(band_high))
+            for v in (-hi, -lo, lo, hi):
+                # 竖线标出过渡带区间边界：证据不足，不是第四类变化
+                ax.axvline(v, color="#969696", linestyle=":", linewidth=1.1)
+            ax.axvspan(-hi, -lo, color="#969696", alpha=0.12)
+            ax.axvspan(lo, hi, color="#969696", alpha=0.12)
+            ax.text(hi, ax.get_ylim()[1] * 0.80, " transition band (+/-0.25T)",
+                    color="#6f6f6f", fontsize=7, ha="right", va="top")
         if thr is not None:
             t = abs(float(thr))
             for v in (-t, t):
@@ -390,6 +415,23 @@ def write_pdf(report: dict, output_path, font_path: str = DEFAULT_FONT_PATH) -> 
 
     _line(L("变化检测专题报告 / CHANGE DETECTION REPORT", "CHANGE DETECTION REPORT"),
           size=15, gap=26)
+
+    # —— 批次 B3 结果摘要：结论句由 change_service 只用本轮 stats 组装 ——
+    # 老 run 的 run_report.json 没有 conclusion 字段时**整段跳过**（连标题都不打），
+    # 绝不用占位数字补写；结论是本段第一句，随后才是 RUN_ID / valid_ratio 等明细。
+    conclusion = str(report.get("conclusion") or "").strip()
+    if conclusion:
+        _ensure(100)
+        _line(L("结果摘要 / RESULT SUMMARY", "RESULT SUMMARY"),
+              size=11.5, gap=18, color=(0, 60, 130))
+        # reportlab drawString 不自动换行：按每行 46 个全角字符保守折行
+        for seg in (conclusion[i:i + 46] for i in range(0, len(conclusion), 46)):
+            _line(seg, size=9.5, gap=14)
+        # 纯 ASCII 行：TTFont 中文字形会被编码，另给一行可直接字节检索的真实数字
+        _ascii_line("RESULT SUMMARY: " +
+                    str(report.get("conclusion_ascii") or "").strip(), gap=15)
+        y -= 4
+
     _line(f"RUN_ID: {report.get('run_id', '')}", gap=18)
     # —— 首页必回显：valid_ratio + 四段阈值提示（REQ-05 / EX3/EX5/EX11）——
     _line(f"VALID_RATIO = {valid_ratio:.4f}", size=12, gap=20, color=(0, 60, 130))
@@ -779,6 +821,9 @@ def write_pdf(report: dict, output_path, font_path: str = DEFAULT_FONT_PATH) -> 
         "intensity_table": intensity_table_used,
         "patch_table": patch_table_used,
         "transition_table": transition_table_used,
+        # 批次 B3：便于测试 / 验收直接取回写入 PDF 的结论原文（老 run 为空串）
+        "conclusion": conclusion,
+        "conclusion_ascii": str(report.get("conclusion_ascii") or ""),
     }
 
 
@@ -814,7 +859,12 @@ def _crs_ring_area_ha(rings, profile: dict) -> float:
 
 
 def _dominant_intensity(intensity: Optional[dict], code: int):
-    """本轮该变化类的五档主档（真实计数最大者）；无强度数据时返回 (0, '')。"""
+    """本轮该变化类的五档主档（真实计数最大者）；无强度数据时返回 (0, '')。
+
+    过渡带（编码 4）是「证据不足」标记，不套用任何一类强度主档。
+    """
+    if code == CHANGE_TRANSITION:
+        return 0, ""
     groups = (4, 5) if code == 1 else ((1, 2) if code == 2 else (3,))
     levels = (intensity or {}).get("levels") or []
     hit = [lv for lv in levels if int(lv.get("code", 0)) in groups]
@@ -825,21 +875,29 @@ def _dominant_intensity(intensity: Optional[dict], code: int):
 
 
 def write_geojson(change, profile: dict, output_path,
-                  intensity: Optional[dict] = None) -> Dict[str, object]:
+                  intensity: Optional[dict] = None,
+                  include_transition: bool = False) -> Dict[str, object]:
     """变化图斑导出 GeoJSON（RFC 7946 / WGS84）。
 
-    仅导出 1 增强 / 2 退化两类图斑（稳定为背景、面积占绝对主导，导出只会
-    撑爆文件且无分析价值）。像元几何经 ``rasterio.features.shapes`` 合并成
-    多边形（transform 直接落在栅格 CRS），坐标再统一重投影 EPSG:4326。
-    批次 A：属性补面积 area_ha 与本类强度主档，供图斑详情卡直接消费。
+    默认仅导出 1 增强 / 2 退化两类图斑（稳定为背景，导出无分析价值）；
+    ``include_transition=True`` 时额外导出批次 B1 的 4 过渡带标记斑块，
+    供地图图例 hover 四类联动高亮。注意：过渡带是「证据不足」标记而非
+    第四类变化，故不进 ``patch_stats`` 的斑块统计口径。
+
+    像元几何经 ``rasterio.features.shapes`` 合并成多边形（transform 落在栅格
+    CRS），坐标再统一重投影 EPSG:4326。属性含面积 area_ha、本类强度主档
+    （批次 A）与三项形态指标 perimeter_m / compactness / orientation_deg
+    （批次 B2，口径见 ``patch_shape.shape_metrics``，与 Top10 表同源）。
     返回 ``{path, feature_count}``；无变化图斑时写空 FeatureCollection。
     """
     from rasterio.features import shapes as feature_shapes
     from rasterio.warp import transform as warp_transform
 
     arr = np.asarray(change)
-    mask = np.isin(arr, (1, 2))
+    codes = (1, 2, CHANGE_TRANSITION) if include_transition else (1, 2)
+    mask = np.isin(arr, codes)
     src_crs = profile.get("crs") or "EPSG:32649"
+    zh = {1: "增强", 2: "退化", CHANGE_TRANSITION: TRANSITION_BAND_LABEL_ZH}
     features: List[dict] = []
     for geom, value in feature_shapes(arr, mask=mask,
                                       transform=profile.get("transform")):
@@ -851,14 +909,20 @@ def write_geojson(change, profile: dict, output_path,
             ys = [float(p[1]) for p in ring]
             txs, tys = warp_transform(src_crs, "EPSG:4326", xs, ys)
             rings.append([[float(x), float(y)] for x, y in zip(txs, tys)])
+        area_ha = round(_crs_ring_area_ha(geom["coordinates"], profile), 4)
+        # 周长/紧凑度/主走向只用外环（洞不计入周长），面积与 area_ha 同源
+        shape = shape_metrics(rings[0], area_ha) if rings else {}
         features.append({
             "type": "Feature",
             "properties": {
                 "change_class": code,
-                "class_zh": "增强" if code == 1 else "退化",
-                "area_ha": round(_crs_ring_area_ha(geom["coordinates"], profile), 4),
+                "class_zh": zh.get(code, "无效"),
+                "area_ha": area_ha,
                 "intensity_level": level,
                 "intensity_zh": level_zh,
+                "perimeter_m": shape.get("perimeter_m", 0.0),
+                "compactness": shape.get("compactness", 0.0),
+                "orientation_deg": shape.get("orientation_deg", 0.0),
             },
             "geometry": {"type": "Polygon", "coordinates": rings},
         })
@@ -879,12 +943,18 @@ def export_triplet(
     run_id: str = "",
     params_snapshot: Optional[dict] = None,
     names: Optional[Dict[str, str]] = None,
+    render_change=None,
 ) -> Dict[str, object]:
     """一次性导出 GeoTIFF / PNG / PDF / GeoJSON 四件套。
 
     缺省文件名 ``change.tif`` / ``change.png`` / ``report.pdf`` /
     ``change.geojson``；``names`` 可按 ``{geotiff, png, pdf, geojson}`` 覆盖
     文件名（REQ-11 回归法用 ``_reg`` 后缀隔离，缺省调用行为完全不变）。
+
+    ``render_change`` 为批次 B1 的专题图渲染专用副本（在三类 ``change`` 上把
+    过渡带像元旁路标成编码 4）。**只影响 PNG 与 GeoJSON 呈现**：GeoTIFF 仍写
+    严格三类 ``change``，图斑统计 / 精度评价 / 探针口径均不变；老 run 无该
+    副本时全部回退到 ``change``，如实不含过渡带。
     """
     allowed = validate_export_formats(formats)
     out_dir = Path(output_dir)
@@ -918,7 +988,8 @@ def export_triplet(
 
     if "png" in allowed:
         png_meta = write_png(
-            change, float(valid_ratio), out_dir / file_names["png"],
+            render_change if render_change is not None else change,
+            float(valid_ratio), out_dir / file_names["png"],
             run_id=run_id, params_snapshot=params_snapshot,
             otsu_threshold=enriched.get("otsu_threshold"),
             attribution_lines=enriched.get("attribution_lines"),
@@ -932,8 +1003,14 @@ def export_triplet(
         notes["pdf"] = pdf_meta
 
     if "geojson" in allowed:
-        gj_meta = write_geojson(change, profile, out_dir / file_names["geojson"],
-                                intensity=enriched.get("intensity"))
+        # 过渡带斑块随渲染副本一起导出（图例四类联动高亮）；老 run 无副本时
+        # include_transition=False，严格保持既有 1/2 两类图斑口径。
+        gj_meta = write_geojson(
+            render_change if render_change is not None else change,
+            profile, out_dir / file_names["geojson"],
+            intensity=enriched.get("intensity"),
+            include_transition=render_change is not None,
+        )
         files["geojson"] = gj_meta["path"]
         notes["geojson"] = gj_meta
 

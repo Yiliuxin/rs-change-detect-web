@@ -194,8 +194,9 @@ function initLayers(map) {
   // 批次 A：变化图斑 polygon 层（change.geojson）。默认隐藏，有 feature 才显示；
   // 放在样本点之下、AOI 线之上，避免遮挡打点 / 删除交互。
   map.addSource('change-patches', { type: 'geojson', data: emptyFC() });
+  // 批次 B1：4 过渡带（证据不足）用独立灰，与后端专题图 PNG 色板一致
   const patchColor = ['match', ['get', 'change_class'],
-    1, '#21a04c', 2, '#d94c3d', 3, '#5b7a99', '#8aa2bd'];
+    1, '#21a04c', 2, '#d94c3d', 3, '#5b7a99', 4, '#969696', '#8aa2bd'];
   map.addLayer({
     id: 'change-patch-fill', type: 'fill', source: 'change-patches',
     layout: { visibility: 'none' },
@@ -234,6 +235,67 @@ export function onPatchClick(map, handler) {
   map.on('mouseleave', 'change-patch-fill', () => { map.getCanvas().style.cursor = ''; });
 }
 
+// ===== 批次 B4 图例联动高亮：只调 paint opacity，不增删/重排任何图层 =====
+// 结果卡图例（增强/退化/稳定/过渡带）hover → 地图对应类别 opacity 1.0、
+// 其余类别 0.25；移出恢复各层基线值。图例 DOM 用事件委托，兼容结果卡里
+// 由 JS 动态渲染的 <tr data-change-class>；过渡带走同一条 code=4 路径。
+const HL_ON = 1.0;
+const HL_DIM = 0.25;
+const BASE_FILL_OPACITY = 0.22;
+const BASE_LINE_OPACITY = 0.9;
+const BASE_SAMPLE_OPACITY = 0.95;
+
+export function highlightClass(map, code) {
+  const c = Number(code);
+  if (!map || !Number.isFinite(c)) return;
+  const byClass = ['match', ['get', 'change_class'], c, HL_ON, HL_DIM];
+  const bySample = ['match', ['get', 'cls'], c, HL_ON, HL_DIM];
+  if (map.getLayer('change-patch-fill')) {
+    map.setPaintProperty('change-patch-fill', 'fill-opacity', byClass);
+  }
+  if (map.getLayer('change-patch-line')) {
+    map.setPaintProperty('change-patch-line', 'line-opacity', byClass);
+  }
+  if (map.getLayer('sample-circles')) {
+    map.setPaintProperty('sample-circles', 'circle-opacity', bySample);
+  }
+}
+
+export function clearClassHighlight(map) {
+  if (!map) return;
+  if (map.getLayer('change-patch-fill')) {
+    map.setPaintProperty('change-patch-fill', 'fill-opacity', BASE_FILL_OPACITY);
+  }
+  if (map.getLayer('change-patch-line')) {
+    map.setPaintProperty('change-patch-line', 'line-opacity', BASE_LINE_OPACITY);
+  }
+  if (map.getLayer('sample-circles')) {
+    map.setPaintProperty('sample-circles', 'circle-opacity', BASE_SAMPLE_OPACITY);
+  }
+}
+
+function bindLegendHighlight(map) {
+  ['map-legend', 'card-result'].forEach((id) => {
+    const root = document.getElementById(id);
+    if (!root) return;
+    const rowOf = (e) => {
+      const t = e && e.target;
+      return (t && t.closest) ? t.closest('[data-change-class]') : null;
+    };
+    root.addEventListener('mouseover', (e) => {
+      const row = rowOf(e);
+      if (row && root.contains(row)) highlightClass(map, Number(row.dataset.changeClass));
+    });
+    root.addEventListener('mouseout', (e) => {
+      const row = rowOf(e);
+      if (!row || !root.contains(row)) return;
+      if (row.contains(e.relatedTarget)) return; // 同一行内子元素间移动不恢复
+      clearClassHighlight(map);
+    });
+    root.addEventListener('mouseleave', () => clearClassHighlight(map));
+  });
+}
+
 export function createMap(containerId, center, zoom) {
   const map = new maplibregl.Map({
     container: containerId,
@@ -245,6 +307,7 @@ export function createMap(containerId, center, zoom) {
     pitchWithRotate: false,
   });
   map.addControl(new maplibregl.NavigationControl({ showCompass: false, visualizePitch: false }), 'top-right');
+  bindLegendHighlight(map);
   map.on('load', () => {
     initLayers(map);
     refreshGraticule(map);

@@ -329,7 +329,7 @@
           <div id="map"></div>
           <!-- B1 图层面板：三层显隐 + 各自透明度 + 三类色块图例（REQ-10） -->
           <div id="map-legend" class="map-legend layer-panel">
-            <h4>图层控制 · 三类色带</h4>
+            <h4>图层控制 · 变化色带</h4>
             <div class="layer-row">
               <label class="chk layer-chk"><input type="checkbox" id="layer-t1" checked /> t1 真彩</label>
               <input type="range" id="layer-t1-opacity" min="0" max="100" value="100" aria-label="t1 真彩不透明度" />
@@ -345,10 +345,12 @@
               <input type="range" id="layer-change-opacity" min="0" max="100" value="85" aria-label="变化专题图不透明度" />
               <span class="slider-val" id="layer-change-val">85%</span>
             </div>
+            <!-- 批次 B：四类图例；hover 由 map.js 联动高亮地图同类别图斑 -->
             <div class="layer-legend">
-              <div class="legend-row"><span class="legend-code">1</span><span class="legend-swatch" style="background:#21a04c"></span>增强</div>
-              <div class="legend-row"><span class="legend-code">2</span><span class="legend-swatch" style="background:#d94c3d"></span>退化</div>
-              <div class="legend-row"><span class="legend-code">3</span><span class="legend-swatch" style="background:#5b7a99"></span>稳定</div>
+              <div class="legend-row" data-change-class="1"><span class="legend-code">1</span><span class="legend-swatch" style="background:#21a04c"></span>增强</div>
+              <div class="legend-row" data-change-class="2"><span class="legend-code">2</span><span class="legend-swatch" style="background:#d94c3d"></span>退化</div>
+              <div class="legend-row" data-change-class="3"><span class="legend-code">3</span><span class="legend-swatch" style="background:#5b7a99"></span>稳定</div>
+              <div class="legend-row" data-change-class="4"><span class="legend-code">4</span><span class="legend-swatch" style="background:#969696"></span>过渡带（不确定）</div>
             </div>
           </div>
           <div id="map-hint" class="map-hint"></div>
@@ -395,6 +397,11 @@
               <p class="empty-sub">在左侧「检测运行」卡片点击<strong>「运行变化检测」</strong>，此处将展示有效像元占比、阈值与三类像元统计。</p>
             </div>
             <div id="result-body" hidden>
+              <!-- 批次 B3：与 PDF「结果摘要」同一句结论；老 run 无字段时整块隐藏 -->
+              <div class="conclusion-box" id="conclusion-box" hidden>
+                <div class="conclusion-k">结果摘要 · 自动结论</div>
+                <div class="conclusion-v" id="conclusion-text"></div>
+              </div>
               <div class="ratio-box">
                 <div class="ratio-k">VALID RATIO</div>
                 <div class="ratio-v" id="valid-ratio">—</div>
@@ -407,6 +414,8 @@
                 <div class="metric"><div class="k">检测方法</div><div class="v" id="method-val">—</div></div>
               </div>
               <div class="gap-top"><table class="tbl" id="stats-table"></table></div>
+              <!-- 批次 B1：过渡带是「证据不足」，不是第四类变化 -->
+              <div class="band-note" id="band-note" hidden>过渡带为 |Δ| 贴近阈值、判定证据不足的像元，不是第四类变化；仅在专题图与统计中单列，不计入三类面积。</div>
               <!-- 面积统计 CSV 导出（REQ-08/11/14）：GET /report/area_stats/{run_id}.csv → Blob 同源下载 -->
               <div class="btn-row gap-top">
                 <button type="button" class="btn btn-sm" id="btn-export-csv"
@@ -414,6 +423,8 @@
               </div>
               <div class="chart" id="chart-pie"></div>
               <div class="chart" id="chart-bar"></div>
+              <!-- 批次 B1：Δ 指数分布直方图，竖线标出置信度过渡带区间 -->
+              <div class="chart" id="chart-delta-hist" hidden></div>
 
               <!-- A1 变化强度分级：五档表 + ECharts 横向条形图；无数据整块隐藏 -->
               <div class="inner-card" id="intensity-block" hidden>

@@ -8,8 +8,9 @@ matplotlib Agg）。本模块用 numpy 生成 RGB 画布、用内置 **5×7 ASCI
 否则退化为 5×7 ASCII 点阵文字并在返回元数据中如实说明。PNG 优先用 rasterio
 ``driver="PNG"``（3 波段 uint8）落盘，失败再退 PIL。
 
-三类配色：1 增强=绿、2 退化=红、3 稳定=灰蓝、0 无效=深灰；图例含 1/2/3
-色块与中文名，并叠加 Copernicus 合规署名。
+配色：1 增强=绿、2 退化=红、3 稳定=灰蓝、0 无效=深灰；批次 B1 追加
+4 过渡带=独立中性灰（|Δ| 贴近阈值、证据不足的旁路标记，不是第四类变化）。
+图例含 1/2/3/4 色块与中文名，并叠加 Copernicus 合规署名。
 """
 from __future__ import annotations
 
@@ -21,23 +22,33 @@ import numpy as np
 import rasterio
 from rasterio.errors import NotGeoreferencedWarning
 
-from app.algorithm.change_detector import CHANGE_CODES, CHANGE_NODATA
+from app.algorithm.change_detector import (
+    CHANGE_CODES, CHANGE_NODATA, CHANGE_TRANSITION,
+)
 from app.algorithm.mask_pipeline import judge_valid_ratio
+from app.config.constants import TRANSITION_BAND_COLOR
 
-# 三类配色（R, G, B）
+# 配色（R, G, B）：三类 + 批次 B1 过渡带独立中性灰
 CLASS_COLORS: Dict[int, Tuple[int, int, int]] = {
     CHANGE_NODATA: (64, 64, 64),   # 0 无效：深灰
     1: (46, 160, 67),              # 1 增强：绿
     2: (214, 48, 49),              # 2 退化：红
     3: (120, 140, 160),            # 3 稳定：灰蓝
+    CHANGE_TRANSITION: TRANSITION_BAND_COLOR,  # 4 过渡带：独立灰（证据不足）
 }
-CLASS_NAMES_ZH: Dict[int, str] = {1: "增强", 2: "退化", 3: "稳定", 0: "无效"}
-CLASS_NAMES_EN: Dict[int, str] = {1: "ENHANCED", 2: "DEGRADED", 3: "STABLE", 0: "NODATA"}
+CLASS_NAMES_ZH: Dict[int, str] = {
+    1: "增强", 2: "退化", 3: "稳定", CHANGE_TRANSITION: "过渡带", 0: "无效",
+}
+CLASS_NAMES_EN: Dict[int, str] = {
+    1: "ENHANCED", 2: "DEGRADED", 3: "STABLE",
+    CHANGE_TRANSITION: "TRANSITION", 0: "NODATA",
+}
 
 DEFAULT_FONT_PATH: str = r"C:\Windows\Fonts\msyh.ttc"
 _BG_COLOR: Tuple[int, int, int] = (245, 245, 245)
 _HEADER_H: int = 72
-_LEGEND_H: int = 140
+# 图例多一行「过渡带」，纵向留出 5 行色块 + 署名行的空间
+_LEGEND_H: int = 162
 _GLYPH_SCALE: int = 2
 _GLYPH_ADVANCE: int = 6 * _GLYPH_SCALE
 
@@ -220,13 +231,13 @@ def build_change_canvas(
     # ③ ASCII 图例（无中文字体时）
     if not ttf_ok:
         draw_text_5x7(canvas, 8, legend_y0 + 4, "LEGEND", color=(20, 20, 20))
-        for i, code in enumerate((1, 2, 3, 0)):
+        for i, code in enumerate((1, 2, 3, CHANGE_TRANSITION, 0)):
             y = legend_y0 + 24 + i * 20
             if swatch_x1 > 8:
                 canvas[y:y + 14, 8:swatch_x1] = palette[code]
             draw_text_5x7(canvas, 50, y, f"{code} {CLASS_NAMES_EN[code]}", color=(20, 20, 20))
         for j, line in enumerate(attribution_lines or ()):
-            draw_text_5x7(canvas, 8, legend_y0 + 106 + j * 16, line, color=(70, 70, 70))
+            draw_text_5x7(canvas, 8, legend_y0 + 126 + j * 16, line, color=(70, 70, 70))
         info["text_mode"] = "ascii5x7"
     else:
         # ④ 中文图例 / 中文 EX5 告警（PIL + 微软雅黑）
@@ -237,14 +248,14 @@ def build_change_canvas(
             draw.rectangle([6, 44, banner_x1, 44 + 24], fill=(255, 238, 185))
             draw.text((10, 46), "有效数据偏低，结论仅供参考", font=font, fill=(150, 30, 30))
         draw.text((8, legend_y0 + 2), "图例 LEGEND / CHANGE CLASS", font=font, fill=(20, 20, 20))
-        for i, code in enumerate((1, 2, 3, 0)):
+        for i, code in enumerate((1, 2, 3, CHANGE_TRANSITION, 0)):
             y = legend_y0 + 24 + i * 20
             if swatch_x1 > 8:
                 draw.rectangle([8, y, swatch_x1, y + 14], fill=palette[code], outline=(0, 0, 0))
             draw.text((50, y - 2), f"{code}  {CLASS_NAMES_ZH[code]}  {CLASS_NAMES_EN[code]}",
                       font=font, fill=(20, 20, 20))
         for j, line in enumerate(attribution_lines or ()):
-            draw.text((8, legend_y0 + 104 + j * 16), line, font=font, fill=(70, 70, 70))
+            draw.text((8, legend_y0 + 124 + j * 16), line, font=font, fill=(70, 70, 70))
         canvas = np.asarray(pil_img).copy()
         info["text_mode"] = "ttf"
         info["font"] = "msyh.ttc"

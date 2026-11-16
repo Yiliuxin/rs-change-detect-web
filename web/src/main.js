@@ -999,27 +999,47 @@ function renderChangeResult() {
   $('result-body').hidden = !d;
   if (!d) return;
   renderValidRatio();
+  const snap = d.params_snapshot || {};
+  // 批次 B3：结论复用既有字段通道（响应 / 参数快照），老 run 无字段整块隐藏
+  const conclusion = String(d.conclusion || snap.conclusion || '').trim();
+  const cbox = $('conclusion-box');
+  if (cbox) {
+    cbox.hidden = !conclusion;
+    $('conclusion-text').textContent = conclusion;
+  }
   $('threshold-val').textContent = d.threshold != null ? Number(d.threshold).toFixed(3) : '—';
   $('runid-val').textContent = d.run_id || '—';
-  const method = String(d.method || (d.params_snapshot && d.params_snapshot.method) || 'otsu').toLowerCase();
+  const method = String(d.method || snap.method || 'otsu').toLowerCase();
   $('method-val').textContent = METHOD_LABELS[method] || method || '—';
   const stats = d.stats || [];
   const totalPx = stats.reduce((a, s) => a + Number(s.pixel_count || 0), 0);
-  const names = { 1: '增强', 2: '退化', 3: '稳定' };
-  const colors = { 1: '#21a04c', 2: '#d94c3d', 3: '#5b7a99' };
+  const names = { 1: '增强', 2: '退化', 3: '稳定', 4: '过渡带（不确定）' };
+  const colors = { 1: '#21a04c', 2: '#d94c3d', 3: '#5b7a99', 4: '#969696' };
   let html = '<thead><tr><th>类别</th><th>像元数</th><th>面积 (ha)</th><th>占比</th></tr></thead><tbody>';
   for (const s of stats) {
     const c = Number(s.change_class);
     const pct = totalPx ? (Number(s.pixel_count || 0) / totalPx * 100).toFixed(1) + '%' : '—';
-    html += `<tr><td><span class="sw-sm" style="background:${colors[c] || '#999'}"></span>${c} ${esc(names[c] || '—')}</td>`
+    html += `<tr data-change-class="${c}"><td><span class="sw-sm" style="background:${colors[c] || '#999'}"></span>${c} ${esc(names[c] || '—')}</td>`
       + `<td>${esc(s.pixel_count != null ? Number(s.pixel_count).toLocaleString() : '—')}</td>`
       + `<td>${esc(s.area_ha != null ? Number(s.area_ha).toFixed(1) : '—')}</td>`
       + `<td>${pct}</td></tr>`;
   }
+  // 批次 B1：过渡带单列展示（证据不足，不是第四类变化，不并入三类 stats / 饼图）
+  const band = d.transition_band || snap.transition_band || null;
+  if (band && band.pixel_count != null) {
+    const bpct = band.ratio != null ? (Number(band.ratio) * 100).toFixed(1) + '%' : '—';
+    html += `<tr data-change-class="4" class="band-row"><td><span class="sw-sm" style="background:${colors[4]}"></span>4 ${esc(names[4])}</td>`
+      + `<td>${Number(band.pixel_count).toLocaleString()}</td>`
+      + `<td>${band.area_ha != null ? Number(band.area_ha).toFixed(1) : '—'}</td>`
+      + `<td>${bpct}</td></tr>`;
+  }
   html += '</tbody>';
   $('stats-table').innerHTML = html;
+  const bnote = $('band-note');
+  if (bnote) bnote.hidden = !band;
   C.renderPie($('chart-pie'), stats);
   C.renderBar($('chart-bar'), stats);
+  C.renderDeltaHistogram($('chart-delta-hist'), d.index_histogram || snap.index_histogram || null);
   renderIntensityAndPatches();
   renderTransition();
 }
@@ -1084,9 +1104,11 @@ function renderIntensityAndPatches() {
   metrics.innerHTML = metricItems.map(([k, v]) =>
     `<div class="metric"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join('');
   const top = Array.isArray(patches.top) ? patches.top : [];
-  let thtml = '<thead><tr><th>#</th><th>类别</th><th>像元数</th><th>面积 (ha)</th><th>质心 (lng, lat)</th></tr></thead><tbody>';
+  // 批次 B2：Top10 表增周长 / 紧凑度 / 主走向三列（与 GeoJSON properties 同源）
+  let thtml = '<thead><tr><th>#</th><th>类别</th><th>像元数</th><th>面积 (ha)</th>'
+    + '<th>质心 (lng, lat)</th><th>周长 (m)</th><th>紧凑度</th><th>主走向 (°)</th></tr></thead><tbody>';
   if (!top.length) {
-    thtml += '<tr><td colspan="5" class="hint">无变化图斑</td></tr>';
+    thtml += '<tr><td colspan="8" class="hint">无变化图斑</td></tr>';
   } else {
     for (const t of top) {
       const lng = t.centroid_lng, lat = t.centroid_lat;
@@ -1094,7 +1116,9 @@ function renderIntensityAndPatches() {
         : num(lng, 5) + ', ' + num(lat, 5);
       thtml += `<tr><td>${esc(t.rank)}</td><td>${esc(t.class_zh || t.change_class)}</td>`
         + `<td>${esc(Number(t.pixel_count || 0).toLocaleString())}</td>`
-        + `<td>${num(t.area_ha, 2)}</td><td>${esc(centroid)}</td></tr>`;
+        + `<td>${num(t.area_ha, 2)}</td><td>${esc(centroid)}</td>`
+        + `<td>${num(t.perimeter_m, 1)}</td><td>${num(t.compactness, 3)}</td>`
+        + `<td>${num(t.orientation_deg, 1)}</td></tr>`;
     }
   }
   thtml += '</tbody>';
@@ -1607,6 +1631,10 @@ function loadHistoryRun(d) {
     intensity: snap.intensity || null,
     patch_stats: snap.patch_stats || null,
     transition_matrix: snap.transition_matrix || null,
+    // 批次 B1/B3：历史 run 同样从参数快照这一既有通道取过渡带、结论与 Δ 直方图
+    transition_band: snap.transition_band || null,
+    conclusion: snap.conclusion || '',
+    index_histogram: snap.index_histogram || null,
     artifacts: artMap, // 图斑详情卡的 t1/t2 合成图缩略同源
   };
   PATCH.loadPatches(map, firstArtifactUrl(artMap, PATCH_GEOJSON_NAMES)

@@ -74,6 +74,12 @@ class ChangeResponse(BaseModel):
         default=None, description="变化图斑统计（A2）；无数据时为 null")
     transition_matrix: Optional[Dict[str, Any]] = Field(
         default=None, description="地物转移矩阵 4×4（A3）；无数据时为 null")
+    # 批次 B1：过渡带是「证据不足」标记，单列统计，不并入三类 stats
+    transition_band: Optional[Dict[str, Any]] = Field(
+        default=None, description="置信度过渡带像元数/占比/带宽（B1）；无数据时为 null")
+    # 批次 B3：与 PDF「结果摘要」同一句结论（复用本接口，不新增端点）
+    conclusion: str = Field(
+        "", description="由本轮 stats 自动组装的结论；老 run 无字段时为空串")
 
 
 class ChangeAsyncAccept(BaseModel):
