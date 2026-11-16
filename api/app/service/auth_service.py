@@ -3,7 +3,7 @@
 
 安全口径：
   - 口令 PBKDF2-HMAC-SHA256 / 120_000 轮 / 16B 随机盐，存 ``pbkdf2_sha256$iter$salt$hash``；
-  - JWT HS256，12h 过期，claims 仅 sub/username/exp（无敏感字段）；
+  - JWT HS256，默认 168h（7 天，可用 AUTH_TOKEN_TTL_HOURS 覆盖），claims 仅 sub/username/exp（无敏感字段）；
   - 密钥取环境变量 ``AUTH_JWT_SECRET``，缺省用开发密钥并告警（生产必须显式配置）。
 """
 from __future__ import annotations
@@ -30,7 +30,9 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 _PBKDF2_ITER = 120_000
-_TOKEN_TTL_SEC = 12 * 3600
+# 登录票据有效期：环境变量 AUTH_TOKEN_TTL_HOURS 可覆盖；缺省 7 天（168h），
+# 避免隔天录屏/答辩演示中票据过期反复弹 AUTH-01
+_TOKEN_TTL_SEC = int(os.environ.get("AUTH_TOKEN_TTL_HOURS", "168")) * 3600
 _USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,20}$")
 
 # JWT 签名密钥（环境变量优先；缺省开发密钥仅限本地/演示）
