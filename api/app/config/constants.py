@@ -379,3 +379,26 @@ ERROR_MESSAGES: Final[Dict[str, str]] = {
     "TMPL-01": "同名模板已存在，请更换名称后重试",
     "TMPL-02": "检测参数模板不存在或无权访问",
 }
+
+# ---------------------------------------------------------------------------
+# 批次 E · 只读实验接口（NF9 可复现：基于既有 run 的落盘影像与 AOI 复算）
+# ---------------------------------------------------------------------------
+# 对比上限、敏感性档位、阈值方式枚举、缓存版次一律在此登记（REQ-04/NF5 常量唯一源）：
+# 算法 / 路由 / 服务禁止就地写死数值。批次 E 只写 runs/<run_id>/experiments.json 缓存，
+# 不产生新 run、不写 task 表、不落盘 GeoTIFF / GeoJSON / PNG / PDF 产物。
+
+# 方法对比单次请求允许的最大变体数；超过 → EX12(400)。来源：批次 E 接口契约
+COMPARE_MAX_VARIANTS: Final[int] = 4
+# 阈值方式白名单：otsu=Otsu 自适应阈值；manual=人工固定阈值（threshold 必填）。
+THRESHOLD_MODE_OTSU: Final[str] = "otsu"
+THRESHOLD_MODE_MANUAL: Final[str] = "manual"
+VALID_THRESHOLD_MODES: Final[Tuple[str, ...]] = (THRESHOLD_MODE_OTSU, THRESHOLD_MODE_MANUAL)
+# 阈值敏感性 5 档倍率（相对基准 T = |params_snapshot["threshold"]|）；档位与上限取自常量源。
+SENSITIVITY_SCALES: Final[Tuple[float, ...]] = (0.8, 0.9, 1.0, 1.1, 1.2)
+# 只读实验缓存文件（位于 runs/<run_id>/，受 .gitignore 保护）与缓存结构版次。
+EXPERIMENTS_CACHE_FILE: Final[str] = "experiments.json"
+EXPERIMENTS_CACHE_VERSION: Final[int] = 1
+# 缓存辅助常量：对比签名取哈希前 N 位；compare / sensitivity 在缓存字典中的固定键。
+EXPERIMENTS_CACHE_SIGNATURE_LEN: Final[int] = 16
+EXPERIMENTS_CACHE_COMPARE_KEY: Final[str] = "compare"
+EXPERIMENTS_CACHE_SENSITIVITY_KEY: Final[str] = "sensitivity"

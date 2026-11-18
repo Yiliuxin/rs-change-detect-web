@@ -328,7 +328,9 @@ export function exportReport(payload) {
 }
 
 // ==========================================================================
-// B 级扩展（可选）：在线取数 —— REQ-02 在线分支
+// B 级扩展（可选）+ 批次 E：在线取数 / 长耗时实验共用通道 —— REQ-02 在线分支 / 方法对比 / 敏感性
+//   onlineFetch / onlineCall 由「在线取数」与「批次 E 长耗时实验接口」共用：
+//   统一注入 Bearer + 401 跳登录；单次请求超时由各调用方 timeoutMs 决定，绝不包裹轮询循环。
 //   POST /scene/discover            STAC 检索候选 tile（纯检索，不下载）
 //   POST /scene/fetch               按需下载入库，返回 {fetch_id, status}
 //   GET  /scene/fetch/{fetch_id}    查询进度 {status, progress, error, scene_ids}
@@ -712,4 +714,27 @@ export async function autoSample(payload) {
     return { ok: false, code: err.code, message: err.message, run_id: err.run_id, status: resp.status };
   }
   return { ok: false, unavailable: true, status: resp.status };
+}
+
+// ==========================================================================
+// 批次 E（方法对比 / 敏感性分析）：POST /result/compare · POST /result/sensitivity
+// 两个接口预计耗时 10~60s，远超 TIMEOUT_MS(15000)，必须走 onlineCall 的长超时通道：
+//   - 复用 onlineFetch / onlineCall（在线取数 / 长耗时实验共用），内部注入 Bearer + 401 跳登录；
+//   - 不做演示降级：实验端点不可用时由调用方 experiments.js 内联提示，绝不污染离线预置路径；
+//   - 判别式返回（调用方无需 try/catch，零未捕获 JS 异常）：
+//       { ok:true,  data }                             成功
+//       { ok:false, code, message, run_id, status }    后端业务错误体（EX1 全同基准 / EX12 参数非法 / EX2 run 不存在）
+//       { ok:false, unavailable:true, status }         网络失败 / 超时 / 裸 404-405（端点未启用）
+// 后端会做 run 归属校验；force:false 由调用方固定下发，命中 experiments.json 缓存即秒开。
+// ==========================================================================
+const EXPERIMENT_TIMEOUT_MS = 90000;
+
+// POST /result/compare：{run_id, variants:[{index,method,threshold_mode,threshold}], force}
+export function compareVariants(payload) {
+  return onlineCall('/result/compare', jsonOptions(payload), EXPERIMENT_TIMEOUT_MS, false);
+}
+
+// POST /result/sensitivity：{run_id, force}
+export function thresholdSensitivity(payload) {
+  return onlineCall('/result/sensitivity', jsonOptions(payload), EXPERIMENT_TIMEOUT_MS, false);
 }

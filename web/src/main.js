@@ -14,6 +14,7 @@ import * as M from './map.js';
 import * as C from './charts.js';
 import * as HIST from './history.js';
 import * as TMPL from './templates.js';
+import * as EXP from './experiments.js';
 import * as PATCH from './patch-card.js';
 import { ONLINE_PLACES } from './places.js';
 import { loadChinaPlaces, loadChinaProvinces, searchPlaces, boxAround, tierLabel } from './china-geo.js';
@@ -781,6 +782,8 @@ function applyChangeResult(data) {
     || fallbackPatchUrl(data && data.run_id));
   refreshExportState();
   updatePickRunLabel();
+  // 批次 E：本轮检测成功后 run 变化，清空上一次方法对比 / 敏感性结果，避免展示错 run 的数据
+  EXP.onRunChanged();
 }
 
 async function runChangeDetection() {
@@ -1647,9 +1650,10 @@ async function doExport(formats) {
 // 全部为新增状态与回调：离线 A~F、gate()、在线取数卡、既有 5 接口语义零变化。
 // ==========================================================================
 
-// 结果卡两个并列视图：既有「专题图 / 统计」与新增「双时相对比」
+// 批次 E：结果卡页签白名单扩展到 5 个（thematic / swipe / sankey / method / sensitivity）
 function setResultView(view) {
-  const v = (view === 'swipe' || view === 'sankey') ? view : 'thematic';
+  const VIEWS = ['thematic', 'swipe', 'sankey', 'method', 'sensitivity'];
+  const v = VIEWS.includes(view) ? view : 'thematic';
   document.querySelectorAll('#result-tabs .view-tab').forEach((b) => {
     const on = b.dataset.view === v;
     b.classList.toggle('active', on);
@@ -1658,8 +1662,12 @@ function setResultView(view) {
   $('view-thematic').hidden = v !== 'thematic';
   $('view-swipe').hidden = v !== 'swipe';
   $('view-sankey').hidden = v !== 'sankey';
+  $('view-method').hidden = v !== 'method';
+  $('view-sensitivity').hidden = v !== 'sensitivity';
   if (v === 'thematic') C.resizeCharts();
   if (v === 'sankey') C.resizeSankey(); // 隐藏容器初始化时宽度为 0，切进来必须重算
+  // 批次 E：两个实验页签的图表容器此前为 hidden（宽度 0），切进来必须重算
+  if (v === 'method' || v === 'sensitivity') C.resizeExperiments();
 }
 
 // 本轮 /result/change 成功后同步卷帘图源（artifacts 为 {name:url} 清单）
@@ -1750,6 +1758,8 @@ function loadHistoryRun(d) {
   }
   SWIPE.setSwipeRun(d);
   updatePickRunLabel();
+  // 批次 E：载入历史 run 后清空上一次实验结果并重置按钮态
+  EXP.onRunChanged();
   showToast('已载入历史运行 ' + String(d.run_id).slice(0, 8) + ' 到结果区', 'ok');
 }
 
@@ -2704,6 +2714,8 @@ function init() {
   refreshGates();
   setMapMode('aoi');
   setResultView('thematic');
+  // 批次 E：结果卡第 4/5 页签（方法对比 / 敏感性）初始化，注入当前 run 与口径快照读取
+  EXP.initExperiments({ getRunId: currentRunId, getBase: () => S.change });
   updatePickRunLabel();
 
   // 影像对清单启动即加载（自由流程：无 AOI 也可浏览，GET /scene/match 不强制 aoi_id）

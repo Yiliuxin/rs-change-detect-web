@@ -425,6 +425,8 @@
               <button type="button" class="view-tab active" data-view="thematic" role="tab" aria-selected="true">专题图 / 统计</button>
               <button type="button" class="view-tab" data-view="swipe" role="tab" aria-selected="false">双时相对比</button>
               <button type="button" class="view-tab" data-view="sankey" role="tab" aria-selected="false">转移流向</button>
+              <button type="button" class="view-tab" data-view="method" role="tab" aria-selected="false">方法对比</button>
+              <button type="button" class="view-tab" data-view="sensitivity" role="tab" aria-selected="false">敏感性</button>
             </div>
             <div id="view-thematic">
             <div class="empty-state" id="result-empty">
@@ -510,6 +512,54 @@
               <div class="chart chart-sankey" id="chart-sankey"></div>
               <div class="swipe-tip">左侧为变化前（t1）类别，右侧为变化后（t2）类别，连线粗细为矩阵中的像元数；0 值转移不显示。</div>
               <div class="empirical-note">经验阈值，非物候标定</div>
+            </div>
+
+            <!-- 批次 E · 第 4 页签：方法对比（POST /api/v1/result/compare） -->
+            <div id="view-method" hidden>
+              <div class="card-subtitle">方法对比<span class="readonly-badge">批次 E · 实验</span></div>
+              <div class="exp-empty" id="exp-method-empty">
+                尚未运行对比实验。选择变体后，对比不同「指数 × 方法」组合下的三类面积、过渡带占比与一致率。
+              </div>
+              <div class="btn-row gap-top">
+                <button type="button" class="btn btn-sm btn-primary" id="btn-exp-compare"
+                  title="请先运行变化检测或载入历史运行">运行对比实验</button>
+              </div>
+              <div class="status-line" id="exp-method-progress" hidden>
+                <span class="spinner"></span>
+                <span id="exp-method-status">正在读取落盘影像与 AOI…</span>
+                <span class="exp-elapsed" id="exp-method-elapsed">已耗时 0s</span>
+              </div>
+              <div class="err-line" id="exp-method-err"></div>
+              <div id="exp-method-result" hidden>
+                <div class="exp-note" id="exp-method-meta"></div>
+                <div class="chart exp-chart" id="chart-method"></div>
+                <div class="exp-table-wrap"><table class="tbl exp-table" id="exp-method-table"></table></div>
+              </div>
+            </div>
+
+            <!-- 批次 E · 第 5 页签：阈值敏感性（POST /api/v1/result/sensitivity） -->
+            <div id="view-sensitivity" hidden>
+              <div class="card-subtitle">阈值敏感性<span class="readonly-badge">批次 E · 实验</span></div>
+              <div class="exp-empty" id="exp-sens-empty">
+                尚未运行敏感性分析。以基准 T 扫描各阈值倍数五档，观察增强 / 退化 / 稳定面积随阈值的变化。
+              </div>
+              <div class="btn-row gap-top">
+                <button type="button" class="btn btn-sm btn-primary" id="btn-exp-sensitivity"
+                  title="请先运行变化检测或载入历史运行">运行敏感性分析</button>
+              </div>
+              <div class="status-line" id="exp-sens-progress" hidden>
+                <span class="spinner"></span>
+                <span id="exp-sens-status">正在读取落盘影像与 AOI…</span>
+                <span class="exp-elapsed" id="exp-sens-elapsed">已耗时 0s</span>
+              </div>
+              <div class="err-line" id="exp-sens-err"></div>
+              <div id="exp-sens-result" hidden>
+                <div class="exp-note" id="exp-sens-meta"></div>
+                <div class="chart exp-chart" id="chart-sensitivity"></div>
+                <div class="exp-conclusion" id="exp-sens-conclusion"></div>
+                <div class="exp-table-wrap"><table class="tbl exp-table" id="exp-sens-table"></table></div>
+                <div class="exp-note exp-note-strong">敏感性只扫人工可调的阈值维度；Otsu 自适应阈值场景以 Otsu 值为基准 T 进行扫描。过渡带为证据不足标记，不并入三类面积。</div>
+              </div>
             </div>
           </section>
 
@@ -635,6 +685,21 @@
           <div class="btn-row gap-top">
             <button type="button" class="btn btn-sm btn-ghost" id="tmpl-modal-cancel">取消</button>
             <button type="button" class="btn btn-sm btn-primary" id="tmpl-modal-save">保存</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 批次 E · 方法对比变体选择弹层（自定义弹层；Esc / 点遮罩取消） -->
+      <div class="exp-modal" id="exp-modal" hidden>
+        <div class="exp-modal-card" role="dialog" aria-modal="true" aria-labelledby="exp-modal-title">
+          <div class="card-title" id="exp-modal-title">运行对比实验 · 选择变体</div>
+          <div class="exp-modal-desc">最多 4 个变体；需至少一项配置与基准不同；结果缓存于 experiments.json（秒开 / 可复现）；预计耗时 10~60s。</div>
+          <div class="exp-modal-base" id="exp-modal-base">基准：—</div>
+          <div class="exp-variant-list" id="exp-variant-list"></div>
+          <div class="err-line" id="exp-modal-err"></div>
+          <div class="btn-row gap-top">
+            <button type="button" class="btn btn-sm btn-ghost" id="exp-modal-cancel">取消</button>
+            <button type="button" class="btn btn-sm btn-primary" id="exp-modal-run">运行对比实验</button>
           </div>
         </div>
       </div>

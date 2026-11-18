@@ -82,6 +82,10 @@ app.include_router(_auth.router, prefix=API_V1_PREFIX)
 from app.api.v1 import templates as _templates  # noqa: E402
 app.include_router(_templates.router, prefix=API_V1_PREFIX)
 
+# 批次 E 扩展：只读实验接口（方法对比 / 阈值敏感性；基于既有 run 复算，仅写 experiments.json 缓存）
+from app.api.v1 import experiments as _experiments  # noqa: E402
+app.include_router(_experiments.router, prefix=API_V1_PREFIX)
+
 # --------------------------------------------------------------------------- #
 # JWT 网关（注册/登录扩展）：/api/v1/* 除 /auth/* 外一律要求 Bearer token；
 # 校验通过后把 user_id/username 写入 request.state 供路由做数据归属隔离。

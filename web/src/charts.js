@@ -13,6 +13,9 @@ let intensityBar = null;
 let sankey = null;
 let compareBar = null;
 let deltaHist = null;
+// 批次 E：方法对比分组条形图 / 阈值敏感性折线图（独立实例，不与批次 A compareBar 复用）
+let methodGroups = null;
+let sensitivityLine = null;
 
 // 桑基节点沿用既有三类主色；A3 地物判据的第 4 类用稳定蓝浅色变体，不引入新色系。
 const SANKEY_COLORS = { ...COLORS, 4: '#8aa2bd' };
@@ -368,6 +371,153 @@ export function renderCompareBar(el, groups) {
   compareBar.resize();
 }
 
+// ==========================================================================
+// 批次 E · 结果卡第 4/5 页签图表（方法对比分组条形图 / 阈值敏感性折线图）
+// 与批次 A 的 renderCompareBar（2 组历史对比）完全独立：仅新增实例与导出，
+// 不改既有 renderCompareBar 及 resizeCharts 对其它实例的行为。
+// ==========================================================================
+
+/** 批次 E：方法对比分组条形图。
+ *  groups: [{name, stats:[{change_class, area_ha}]}, ...]，支持 1~5 组；
+ *  每组 3 条柱（增强 / 退化 / 稳定），y 轴面积 ha，沿用三类主色 COLORS。
+ */
+export function renderMethodGroups(el, groups) {
+  if (!el) return;
+  if (!methodGroups || methodGroups.isDisposed()) {
+    methodGroups = echarts.init(el, null, { renderer: 'canvas' });
+  }
+  const gs = (Array.isArray(groups) ? groups : []).slice(0, 5);
+  const areas = (g) => {
+    const acc = { 1: 0, 2: 0, 3: 0 };
+    ((g && g.stats) || []).forEach((s) => {
+      const c = Number(s && s.change_class);
+      if (Object.prototype.hasOwnProperty.call(acc, c)) acc[c] += Number((s && s.area_ha) || 0);
+    });
+    return [1, 2, 3].map((c) => Number(acc[c].toFixed(2)));
+  };
+  const names = gs.map((g) => String((g && g.name) || '—'));
+  const cols = gs.map((g) => areas(g));
+  methodGroups.setOption({
+    backgroundColor: 'transparent',
+    textStyle: { fontFamily: 'Segoe UI, Microsoft YaHei, sans-serif' },
+    title: { text: '方法对比 · 三类面积（公顷）', left: 'center', top: 2,
+      textStyle: { color: '#5b6b82', fontSize: 12, fontWeight: 600 } },
+    tooltip: {
+      trigger: 'axis', axisPointer: { type: 'shadow' },
+      backgroundColor: 'rgba(255,255,255,0.97)', borderColor: '#d8e2ee',
+      textStyle: { color: '#24344d', fontSize: 12 },
+      formatter: (ps) => {
+        const arr = Array.isArray(ps) ? ps : [ps];
+        if (!arr.length) return '';
+        return String(arr[0].name) + arr.map((p) => '<br/>' + p.marker + p.seriesName
+          + '：' + Number(p.value).toFixed(2) + ' ha').join('');
+      },
+    },
+    legend: { bottom: 0, data: [1, 2, 3].map((c) => NAMES[c]),
+      textStyle: { color: '#5b6b82', fontSize: 11 }, itemWidth: 12, itemHeight: 10 },
+    grid: { left: 48, right: 14, top: 38, bottom: 48 },
+    xAxis: {
+      type: 'category', data: names,
+      axisLine: { lineStyle: { color: '#c3cfdd' } },
+      axisLabel: { color: '#5b6b82', fontSize: 10, interval: 0, width: 58, overflow: 'break', lineHeight: 12 },
+    },
+    yAxis: {
+      type: 'value', name: 'ha', nameTextStyle: { color: '#8494a9' },
+      splitLine: { lineStyle: { color: '#e6edf4' } },
+      axisLabel: { color: '#5b6b82', fontSize: 10 },
+    },
+    series: [1, 2, 3].map((c) => ({
+      name: NAMES[c], type: 'bar', barMaxWidth: 20,
+      data: cols.map((col) => col[c - 1]),
+      itemStyle: { color: COLORS[c], borderRadius: [4, 4, 0, 0] },
+    })),
+  }, true);
+  methodGroups.resize();
+}
+
+/** 批次 E：阈值敏感性折线图。
+ *  payload: {base_threshold, sweep:[{t, scale, areas:[...], transition_pct}], computed_at}；
+ *  x 轴取各档 scale，tooltip 同时显示该档实际 T；左 y 轴增强 / 退化两条实线（ha），
+ *  右 y 轴过渡带占比一条灰色虚线（%）；scale===1.0 的基准点标注「基准 T」。
+ */
+export function renderSensitivityLine(el, payload) {
+  if (!el) return;
+  if (!sensitivityLine || sensitivityLine.isDisposed()) {
+    sensitivityLine = echarts.init(el, null, { renderer: 'canvas' });
+  }
+  const sweep = (payload && Array.isArray(payload.sweep)) ? payload.sweep : [];
+  const areaOf = (row, c) => {
+    const a = (row && Array.isArray(row.areas))
+      ? row.areas.find((x) => Number(x && x.change_class) === c) : null;
+    return Number((a && a.area_ha) || 0);
+  };
+  const xs = sweep.map((r) => Number(r.scale).toFixed(1) + '×');
+  const tVals = sweep.map((r) => Number(r.t));
+  const enhance = sweep.map((r) => Number(areaOf(r, 1).toFixed(2)));
+  const degrade = sweep.map((r) => Number(areaOf(r, 2).toFixed(2)));
+  const trans = sweep.map((r) => Number(Number(r.transition_pct || 0).toFixed(2)));
+  const baseIdx = sweep.findIndex((r) => Number(r.scale) === 1);
+  const markPoint = baseIdx >= 0 ? {
+    symbol: 'pin', symbolSize: 34,
+    itemStyle: { color: COLORS[1] },
+    label: { show: true, formatter: '基准 T', color: '#fff', fontSize: 9, fontWeight: 700 },
+    data: [{ coord: [xs[baseIdx], enhance[baseIdx]] }],
+  } : { data: [] };
+  sensitivityLine.setOption({
+    backgroundColor: 'transparent',
+    textStyle: { fontFamily: 'Segoe UI, Microsoft YaHei, sans-serif' },
+    title: { text: '阈值敏感性 · 三类面积随阈值变化', left: 'center', top: 2,
+      textStyle: { color: '#5b6b82', fontSize: 12, fontWeight: 600 } },
+    tooltip: {
+      trigger: 'axis',
+      backgroundColor: 'rgba(255,255,255,0.97)', borderColor: '#d8e2ee',
+      textStyle: { color: '#24344d', fontSize: 12 },
+      formatter: (ps) => {
+        const arr = Array.isArray(ps) ? ps : [ps];
+        if (!arr.length) return '';
+        const i = arr[0].dataIndex;
+        const head = '阈值 ' + String(xs[i]) + '　实际 T=' + tVals[i].toFixed(4);
+        return head + arr.map((p) => '<br/>' + p.marker + p.seriesName + '：'
+          + Number(p.value).toFixed(2) + (p.seriesName === '过渡带占比' ? '%' : ' ha')).join('');
+      },
+    },
+    legend: { bottom: 0, data: ['增强', '退化', '过渡带占比'],
+      textStyle: { color: '#5b6b82', fontSize: 11 }, itemWidth: 14, itemHeight: 10 },
+    grid: { left: 50, right: 48, top: 40, bottom: 36 },
+    xAxis: {
+      type: 'category', data: xs, boundaryGap: false,
+      axisLine: { lineStyle: { color: '#c3cfdd' } },
+      axisLabel: { color: '#5b6b82', fontSize: 10 },
+    },
+    yAxis: [
+      { type: 'value', name: 'ha', nameTextStyle: { color: '#8494a9' },
+        splitLine: { lineStyle: { color: '#e6edf4' } },
+        axisLabel: { color: '#5b6b82', fontSize: 10 } },
+      { type: 'value', name: '%', nameTextStyle: { color: '#8494a9' },
+        splitLine: { show: false },
+        axisLabel: { color: '#5b6b82', fontSize: 10, formatter: '{value}%' } },
+    ],
+    series: [
+      { name: '增强', type: 'line', yAxisIndex: 0, data: enhance,
+        lineStyle: { color: COLORS[1], width: 2 }, itemStyle: { color: COLORS[1] },
+        symbol: 'circle', symbolSize: 6, markPoint },
+      { name: '退化', type: 'line', yAxisIndex: 0, data: degrade,
+        lineStyle: { color: COLORS[2], width: 2 }, itemStyle: { color: COLORS[2] },
+        symbol: 'circle', symbolSize: 6 },
+      { name: '过渡带占比', type: 'line', yAxisIndex: 1, data: trans,
+        lineStyle: { color: '#8a94a3', width: 2, type: 'dashed' },
+        itemStyle: { color: '#8a94a3' }, symbol: 'circle', symbolSize: 6 },
+    ],
+  }, true);
+  sensitivityLine.resize();
+}
+
+/** 批次 E：切到 method / sensitivity 页签时单独重算两个新实例（隐藏容器宽度为 0 需重算）。 */
+export function resizeExperiments() {
+  if (methodGroups && !methodGroups.isDisposed()) methodGroups.resize();
+  if (sensitivityLine && !sensitivityLine.isDisposed()) sensitivityLine.resize();
+}
+
 export function resizeCharts() {
   if (pie && !pie.isDisposed()) pie.resize();
   if (bar && !bar.isDisposed()) bar.resize();
@@ -375,4 +525,7 @@ export function resizeCharts() {
   if (intensityBar && !intensityBar.isDisposed()) intensityBar.resize();
   if (sankey && !sankey.isDisposed()) sankey.resize();
   if (compareBar && !compareBar.isDisposed()) compareBar.resize();
+  // 批次 E：新实例一并纳入全局 resize（窗口 resize 时重算）
+  if (methodGroups && !methodGroups.isDisposed()) methodGroups.resize();
+  if (sensitivityLine && !sensitivityLine.isDisposed()) sensitivityLine.resize();
 }
