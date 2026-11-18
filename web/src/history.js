@@ -4,6 +4,7 @@
 // 三态：加载中 / 空态 / 错误态（带重试）；列表分页「加载更多」；点开详情 → 参数快照 + 产物 + 载入结果区。
 
 import * as api from './api.js';
+import { artifactObjectUrl, downloadArtifact } from './api.js';
 import { renderCompareBar } from './charts.js';
 
 const $ = (id) => document.getElementById(id);
@@ -237,14 +238,16 @@ function renderDetail(d) {
     const url = String(a.url || '');
     const isPng = /\.png$/i.test(name);
     const ext = (name.split('.').pop() || 'FILE').toUpperCase();
+    // 受保护产物端点不可直连（<img>/<a> 带不上 Authorization → 401）：
+    // 缩略图先占位、由下方 artifactObjectUrl 异步取 blob 填充；下载走 downloadArtifact(Blob)。
     const thumb = (isPng && /^\/api\//.test(url))
-      ? '<img class="hist-art-img" src="' + esc(url) + '" alt="' + esc(name) + '" loading="lazy" />'
+      ? '<img class="hist-art-img" data-art-url="' + esc(url) + '" alt="' + esc(name) + '" />'
       : '<span class="hist-art-icon">' + esc(ext) + '</span>';
     return `
       <div class="hist-art">
         <div class="hist-art-thumb">${thumb}</div>
         <div class="hist-art-name" title="${esc(name)}">${esc(name)}</div>
-        <a class="hist-art-dl" href="${esc(url)}" download="${esc(name)}" target="_blank" rel="noopener">下载</a>
+        <button type="button" class="hist-art-dl" data-url="${esc(url)}" data-name="${esc(name)}">下载</button>
       </div>`;
   }).join('') : '<div class="empty-state compact"><p>该运行暂无产物</p><p class="empty-sub">旧运行可能未完成检测，可重新运行后查看。</p></div>';
 
@@ -260,6 +263,23 @@ function renderDetail(d) {
     <div class="hist-artifacts">${artHtml}</div>
     <button type="button" class="btn btn-primary btn-block gap-top" id="hist-load" data-rid="${esc(rid)}">载入到结果区</button>
     <div class="ok-line" id="hist-load-note" hidden></div>`;
+
+  // 缩略图异步填充（blob 通道，与产物图/导出同一「受保护端点不可直连」口径）；
+  // 详情已切换到别的 run 时丢弃过期回调，防止串图。
+  const gen = rid;
+  const box = $('hist-detail');
+  box.querySelectorAll('img.hist-art-img[data-art-url]').forEach(async (img) => {
+    const objUrl = await artifactObjectUrl(img.dataset.artUrl);
+    if (H.expanded !== gen || !img.isConnected) return;
+    if (objUrl) {
+      img.src = objUrl;
+    } else {
+      const ph = document.createElement('span');
+      ph.className = 'hist-art-icon';
+      ph.textContent = '加载失败';
+      img.replaceWith(ph);
+    }
+  });
 }
 
 async function selectRun(rid) {
@@ -472,6 +492,19 @@ function bind() {
   $('hist-detail').addEventListener('click', (e) => {
     if (e.target.closest && e.target.closest('#hist-detail-close')) { closeDetail(); return; }
     if (e.target.closest && e.target.closest('#hist-detail-retry')) { selectRun(H.expanded); return; }
+    const dl = e.target.closest && e.target.closest('.hist-art-dl');
+    if (dl) {
+      e.preventDefault();
+      if (dl.disabled) return;
+      dl.disabled = true;
+      const original = dl.textContent;
+      dl.textContent = '下载中…';
+      downloadArtifact(dl.dataset.url, dl.dataset.name).then((ok) => {
+        dl.textContent = ok ? '已下载' : '下载失败';
+        window.setTimeout(() => { dl.textContent = original; dl.disabled = false; }, 1600);
+      });
+      return;
+    }
     const load = e.target.closest && e.target.closest('#hist-load');
     if (load) {
       const note = $('hist-load-note');
