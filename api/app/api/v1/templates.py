@@ -10,7 +10,8 @@
   GET    /api/v1/templates           本人模板列表（created_at 倒序）
   DELETE /api/v1/templates/{id}      仅本人可删；不存在或属他人 → TMPL-02 404
 口径参数 params 只接受白名单键（index/method/block_size/threshold），多余键丢弃；
-index/method/block_size 非法枚举按 EX1 口径报错（400，中文提示）。
+index 枚举为 VALID_INDEXES（NDVI / NDWI / NDBI / NDMI）；index/method/block_size
+非法枚举按 EX1 口径报错（400，中文提示）。
 """
 from __future__ import annotations
 

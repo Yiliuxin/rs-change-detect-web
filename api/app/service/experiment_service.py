@@ -47,7 +47,7 @@ from app.config.constants import (
     COMPARE_MAX_VARIANTS, ERROR_MESSAGES, EXPERIMENTS_CACHE_COMPARE_KEY,
     EXPERIMENTS_CACHE_FILE, EXPERIMENTS_CACHE_SENSITIVITY_KEY,
     EXPERIMENTS_CACHE_SIGNATURE_LEN, EXPERIMENTS_CACHE_VERSION,
-    INDEX_RASTER_T1, INDEX_RASTER_T2, MANUAL_THRESHOLD_RANGE,
+    INDEX_AUXILIARY, INDEX_RASTER_T1, INDEX_RASTER_T2, MANUAL_THRESHOLD_RANGE,
     METHOD_CVA, METHOD_OTSU, METHOD_REGRESSION, SENSITIVITY_SCALES,
     THRESHOLD_MODE_MANUAL, THRESHOLD_MODE_OTSU, VALID_CHANGE_METHODS,
     VALID_INDEXES, VALID_THRESHOLD_MODES,
@@ -69,9 +69,11 @@ __all__ = [
 class ExperimentContext:
     """一次只读实验的上下文（全部来自既有 run 的落盘产物与参数快照，NF9）。
 
-    ``index_t1`` / ``index_t2`` 的键为 ``"NDVI"`` / ``"NDWI"``，值为 2D float32
-    数组：由双波段 index raster 按基准 index 映射（band1=主指数 / band2=辅助指数），
-    因此「换指数」变体直接读另一个波段即可。``base_change`` 为落盘三类图或 None。
+    ``index_t1`` / ``index_t2`` 的键为 {基准 index, INDEX_AUXILIARY[基准 index]}
+    （历史 NDVI 基准即 "NDVI" / "NDWI"），值为 2D float32 数组：由双波段 index
+    raster 映射（band1=主指数 / band2=辅助指数），因此「换指数」变体只读已落盘的
+    这两个键之一；基准 run 未落盘的指数不可复算（recompute 抛中文 EX12）。
+    ``base_change`` 为落盘三类图或 None。
     """
 
     run_id: str
@@ -159,14 +161,16 @@ def _read_two_bands(path: Path, run_id: str) -> Tuple[np.ndarray, np.ndarray]:
 def load_context(run_id: str) -> ExperimentContext:
     """载入既有 run 的复算上下文（批次 E · 只读实验，REQ-14 / NF9）。
 
-    读 task / 参数快照 → 定位双时相双波段 index raster → 按基准 index 映射
-    NDVI/NDWI → 计算双时相有限像元交集 ``valid_mask`` → 读基准三类图（缺失置 None）。
+    读 task / 参数快照 → 定位双时相双波段 index raster → 按 INDEX_AUXILIARY 映射
+    还原 {基准 index, 辅助 index} 两键 → 计算双时相有限像元交集 ``valid_mask`` →
+    读基准三类图（缺失置 None）。
     全程只读：不产生新 run、不写 task 表、不落盘 GeoTIFF/GeoJSON/PNG/PDF 产物。
     缺 index raster → EX2(404，说明产物缺失)；双时相形状不一致 → SYS-01。
     """
     snapshot = _load_meta(run_id)
     base_index, base_method = _normalize_base(snapshot)
-    other_index = next(i for i in VALID_INDEXES if i != base_index)
+    # 辅助指数一律查 INDEX_AUXILIARY 映射（扩到 4 指数后「另一个」不再唯一）。
+    other_index = INDEX_AUXILIARY[base_index]
 
     try:
         base_threshold = float(snapshot.get("threshold") or 0.0)
@@ -252,6 +256,22 @@ def agreement_pct(base_change, variant_change, valid_mask=None) -> float:
     return float(agree) / float(denom) * 100.0
 
 
+def _require_index(ctx: ExperimentContext, idx: str) -> None:
+    """变体 / 辅助 index 必须存在于基准 run 已落盘的两个键里，否则中文 EX12。
+
+    4 指数扩展后 compare 变体可接受 NDBI / NDMI 等合法枚举，但基准 run 的双波段
+    index raster 只有 {base, aux} 两个波段；请求未落盘的 index 时明确以中文 EX12
+    拒绝并提示需以该指数重新检测，绝不让它退化成 KeyError → SYS-01(500)。
+    """
+    keys = sorted(ctx.index_t1.keys())
+    if idx not in ctx.index_t1 or idx not in ctx.index_t2:
+        raise ApiError(
+            "EX12", run_id=ctx.run_id,
+            message=(f"该基准 run 的双波段指数栅格仅包含 {'/'.join(keys)}，"
+                     f"不支持 {idx}，请先以 {idx} 为指数重新检测"),
+        )
+
+
 def recompute(ctx: ExperimentContext, index: str, method: str,
               threshold_mode: str = THRESHOLD_MODE_OTSU,
               threshold: Optional[float] = None,
@@ -263,8 +283,10 @@ def recompute(ctx: ExperimentContext, index: str, method: str,
     ``detect_change_cva`` 取双波段欧氏幅值（``signed_magnitude``）；随后统一走
     ``classify_change(|T|) → clean_change_map → change_stats → transition_band_*``，
     与 ``change_service.py`` 基准管线同口径。全部在内存完成，不落盘任何产物。
-    CVA 变体读同一 index raster 的两个波段（主指数 / 辅助指数），与
-    ``index`` 变体只换主指数波段正交，故批次 E 对比矩阵 3 方法 × 2 指数可复算。
+    CVA 变体读同一 index raster 的两个波段（主指数 / 按 INDEX_AUXILIARY 配对的
+    辅助指数），与 ``index`` 变体只换主指数波段正交；可复算的指数恒为基准 run
+    已落盘的 {基准, 辅助} 两键（NDVI 基准即 NDVI / NDWI），请求其它合法枚举
+    （如 NDBI / NDMI）由 ``_require_index`` 抛中文 EX12，不退化成 500。
 
     ``t_override`` 非空时直接把它当作阈值 T（敏感性五档），跳过 Otsu/manual
     求值，其余口径不变；``threshold_mode=otsu`` 时对 hist_src 自适应求阈值，
@@ -275,6 +297,8 @@ def recompute(ctx: ExperimentContext, index: str, method: str,
     idx = str(index).strip().upper()
     mth = str(method).strip().lower()
     mode = str(threshold_mode or THRESHOLD_MODE_OTSU).strip().lower()
+    # 变体 index 必须是基准 run 已落盘的两个键之一，否则中文 EX12（不退化成 500）。
+    _require_index(ctx, idx)
     t1 = ctx.index_t1[idx]
     t2 = ctx.index_t2[idx]
     valid = ctx.valid_mask
@@ -298,7 +322,10 @@ def recompute(ctx: ExperimentContext, index: str, method: str,
         # 批次 G：与 change_service 主管线同源的双波段 [主指数, 辅助指数] 输入；
         # 欧氏幅值做 Otsu（fixed_T 非空时为手动/敏感性档位幅值阈值）。
         # signed_magnitude 的 |·| 恒等于 CVA 幅值，过渡带口径 |CVA−T| ≤ 0.25T。
-        other = next(i for i in VALID_INDEXES if i != idx)
+        # 辅助指数按 INDEX_AUXILIARY 映射取（4 指数后「另一个」不再唯一），
+        # 且必须已落盘；缺波段一律中文 EX12，绝不 KeyError → 500。
+        other = INDEX_AUXILIARY.get(idx, "")
+        _require_index(ctx, other)
         cva = detect_change_cva(
             (ctx.index_t1[idx], ctx.index_t1[other]),
             (ctx.index_t2[idx], ctx.index_t2[other]),
@@ -359,7 +386,8 @@ def validate_variants(variants, meta: dict, run_id: str = "") -> List[dict]:
     """规范化 + 校验 compare 变体（批次 E，错误一律 ``ApiError``）。
 
     - 空 / 超过 ``COMPARE_MAX_VARIANTS``(4) → EX12(400)；
-    - index upper / method lower / threshold_mode lower 规范化，非法枚举 → EX12；
+    - index upper / method lower / threshold_mode lower 规范化，非法枚举 → EX12
+      （非法 index 文案由 ``' | '.join(VALID_INDEXES)`` 自动含 NDVI/NDWI/NDBI/NDMI）；
     - 缺省：index / method 取基准，threshold_mode 取 otsu；
     - manual 时 threshold 必填、有限、落在 ``MANUAL_THRESHOLD_RANGE`` 开区间 → 否则 EX12；
     - 所有变体 (index, method) 都与基准相同 → EX1(400，带具体中文提示)。
@@ -538,7 +566,8 @@ def _base_transition_pct(ctx: ExperimentContext, valid_count: int) -> float:
         reg = detect_change_regression(t1, t2, valid_mask=ctx.valid_mask, threshold=T)
         hist_src = reg["residual"]
     elif ctx.base_method == METHOD_CVA:
-        other = next(i for i in VALID_INDEXES if i != ctx.base_index)
+        # 辅助指数按 INDEX_AUXILIARY 映射取（与 load_context 建键同源）。
+        other = INDEX_AUXILIARY[ctx.base_index]
         cva = detect_change_cva(
             (ctx.index_t1[ctx.base_index], ctx.index_t1[other]),
             (ctx.index_t2[ctx.base_index], ctx.index_t2[other]),

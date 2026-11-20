@@ -86,7 +86,7 @@ def list_runs(
     limit: int = Query(run_service.DEFAULT_PAGE_LIMIT, description="每页条数，默认 20，1..100"),
     offset: int = Query(0, description="偏移量，默认 0"),
     q: Optional[str] = Query(None, description="模糊匹配 run_id 前缀与 params_snapshot 里的地名/组名文本"),
-    index: Optional[str] = Query(None, description="指数枚举过滤：NDVI / NDWI（非法 → EX12）"),
+    index: Optional[str] = Query(None, description="指数枚举过滤：NDVI / NDWI / NDBI / NDMI（非法 → EX12）"),
     days: Optional[int] = Query(None, description="最近 N 天（按 run 创建时间，1..3650，非法 → EX12）"),
 ) -> RunListResponse:
     """REQ-14：返回 run_id / AOI 名称与 bbox / 双时相日期与 source / created_at /

@@ -17,12 +17,22 @@ const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
 
 // 批次 E：中文配置标签（枚举 → 展示口径；提交仍用契约英文枚举）
 // 批次 G：方法枚举扩为 3 种，与后端 VALID_CHANGE_METHODS 同步；短标签用于图表图例。
+// 批次 D11：指数枚举扩为 4 项 NDVI / NDWI / NDBI / NDMI，与后端 VALID_INDEXES 同步；
+// configLabel / shortLabel 直接展示英文枚举，新增指数无需改写即正常显示。
 const METHOD_ZH = { otsu: '差值法', regression: '回归法', cva: '变化向量分析' };
 const METHOD_SHORT = { otsu: '差', regression: '回', cva: '向' };
 const MODE_ZH = { otsu: 'Otsu', manual: '手动' };
-const INDEX_ENUM = ['NDVI', 'NDWI'];
+const INDEX_ENUM = ['NDVI', 'NDWI', 'NDBI', 'NDMI'];
 const METHOD_ENUM = ['otsu', 'regression', 'cva'];
 const MAX_VARIANTS = 4;             // 后端 COMPARE_MAX_VARIANTS
+
+// 批次 D11：后端双波段指数栅格 band2 的辅助指数映射（constants.py INDEX_AUXILIARY 写死）。
+// 「方法对比」是只读实验，只加载 index_t1/t2.tif 的两个波段（band1=主指数、band2=辅助指数），
+// 因此只能复算基准 run 已落盘的这两个指数；其余指数需先以该指数重新检测生成对应 index raster。
+const INDEX_AUXILIARY = { NDVI: 'NDWI', NDWI: 'NDVI', NDBI: 'NDVI', NDMI: 'NDVI' };
+function recomputableIndexes(baseIndex) {
+  return [baseIndex, INDEX_AUXILIARY[baseIndex] || 'NDVI'];
+}
 
 // 批次 E：模块状态（两个独立请求态 + 当前弹层的候选变体）
 const E = {
@@ -56,34 +66,50 @@ function shortLabel(index, method) {
 }
 
 // ---------- 批次 E：基准配置（只读，来自 S.change.params_snapshot，缺失默认 NDVI / otsu） ----------
+// 批次 D11：按 4 项枚举判定，NDBI / NDMI 不再被吞成 NDVI。
 function baseConfig() {
   const ch = (DEPS.getBase && DEPS.getBase()) || {};
   const snap = ch.params_snapshot || ch || {};
   const idx = String(snap.index == null ? '' : snap.index).trim().toUpperCase();
   const method = String(snap.method == null ? '' : snap.method).trim().toLowerCase();
   return {
-    index: idx === 'NDWI' ? 'NDWI' : 'NDVI',
+    index: INDEX_ENUM.includes(idx) ? idx : 'NDVI',
     method: METHOD_ENUM.includes(method) ? method : 'otsu',
     threshold: snap.threshold != null ? Number(snap.threshold) : null,
     threshold_source: String(snap.threshold_source || 'otsu').toLowerCase(),
   };
 }
 
-// 批次 E / G：2 指数 × 3 方法 = 6 种组合，排除与基准 (index,method) 完全相同的
-// 那个 → 剩 5 个候选；默认勾选「同指数另一方法」与「另一指数同方法」两组
-// （与基准仅一项不同，恰好 3 个，不超过 MAX_VARIANTS=4）。
+// 批次 E / G / D11：4 指数 × 3 方法 = 12 种组合，排除与基准 (index,method) 完全相同的
+// 那个 → 剩 11 个候选。默认勾选「与基准仅一项不同」且指数属于基准 run 已落盘两个指数
+// （主指数 + 辅助指数）的候选，最多 MAX_VARIANTS=4 个：既保证至少一项与基准不同，
+// 又不超出后端 COMPARE_MAX_VARIANTS。其余指数候选在 label 旁标注「只读实验仅能复算
+// 基准 run 已落盘的两个指数」，提示用户需先以该指数重新检测。
 function buildCandidates(base) {
   const out = [];
+  const allowed = recomputableIndexes(base.index);
   INDEX_ENUM.forEach((index) => {
     METHOD_ENUM.forEach((method) => {
       if (index === base.index && method === base.method) return;
+      const recomputable = allowed.includes(index);
       out.push({
         index, method,
         key: index + '|' + method,
         label: index + ' · ' + METHOD_ZH[method],
-        defaultOn: index === base.index || method === base.method,
+        note: recomputable
+          ? ''
+          : '只读实验仅能复算基准 run 已落盘的两个指数（' + allowed.join(' / ')
+            + '），该指数需先以该指数重新检测',
+        oneDiff: index === base.index || method === base.method,
+        recomputable,
       });
     });
+  });
+  let picked = 0;
+  out.forEach((c) => {
+    const on = c.oneDiff && c.recomputable && picked < MAX_VARIANTS;
+    c.defaultOn = on;
+    if (on) picked += 1;
   });
   return out;
 }
@@ -95,6 +121,8 @@ function inlineText(r) {
   const code = r.code || 'SYS';
   // 与 templates.js 同款：优先后端原文（EX1 / EX12 在这两个接口的语义不同于 AOI 跨度，
   // 内置通用映射易误导），后端未给 message 时回退 errors.js 的按码内置映射。
+  // 批次 D11：后端缺 B11 时返回 EX11 + 「该影像对未包含 B11 短波红外，不支持 NDBI/NDMI」
+  // 原文，这里逐字展示后端 message，不臆造新错误码、不改 ERROR_MESSAGES。
   const zh = String(r.message || '').trim() || errorMessage({ code });
   return '[' + code + '] ' + zh;
 }
@@ -185,6 +213,7 @@ function renderVariantRows() {
     + '<div class="exp-variant-head"><label>'
     + '<input type="checkbox" class="exp-variant-chk"' + (c.defaultOn ? ' checked' : '') + ' />'
     + esc(c.label) + '</label></div>'
+    + (c.note ? '<div class="exp-variant-note">' + esc(c.note) + '</div>' : '')
     + '<div class="exp-variant-fields">'
     + '<select class="exp-variant-mode">'
     + '<option value="otsu">Otsu 自适应</option>'
@@ -256,7 +285,9 @@ function openCompareModal() {
   if (b) {
     const mode = base.threshold_source === 'manual' ? 'manual' : 'otsu';
     b.textContent = '基准（只读）：' + configLabel(base.index, base.method, mode)
-      + ' · T=' + fmtT(base.threshold);
+      + ' · T=' + fmtT(base.threshold)
+      + '　·　本 run 已落盘指数：' + recomputableIndexes(base.index).join(' / ')
+      + '（只读实验仅能复算这两个指数）';
   }
   renderVariantRows();
   modal.hidden = false;

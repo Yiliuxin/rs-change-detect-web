@@ -73,6 +73,10 @@ const ON = {
   terminal: '',          // '' | 'SUCCESS' | 'FAILED'
   fetchBbox: null,       // 取数受理时的 AOI 快照（全精度 [w,s,e,n]），成功后据此自动应用
   fetchDates: null,      // 所选候选的实际拍摄日 { t1, t2 }，成功后回填 A 卡时相下拉
+  // 批次 D11：本会话在线取数成功入库的组名（cog_path 为 pair_<name>，即 B 卡 pair.key）。
+  // 在线取数只下 B02/B03/B04/B08/SCL 五波段、不含 B11，故这些影像对不支持 NDBI/NDMI。
+  fetchedKeys: new Set(),
+  lastFetchName: '',     // 最近一次取数提交规范化后的组名，SUCCESS 后并入 fetchedKeys
 };
 
 let map = null;
@@ -363,6 +367,8 @@ function updatePlaceMarkers() {
 }
 
 function syncPresetMeta() {
+  // 批次 D11：A 卡预置地点 sensor 变化即同步 NDBI/NDMI 可用性（L8/L9 → 禁用，S2 → 恢复）
+  syncIndexAvailability();
   const p = selectedPreset();
   const badge = $('preset-sensor');
   if (!p) {
@@ -554,6 +560,8 @@ function autoSelectPair() {
 
 function selectPair(i) {
   S.selectedPair = S.pairs[i] || null;
+  // 批次 D11：切换影像对即按 sensor / source 同步 NDBI/NDMI 可用性（Landsat / 在线取数禁用）
+  syncIndexAvailability();
   renderPairs();
   renderCaliber();
   refreshGates();
@@ -678,6 +686,8 @@ function applyTemplateToPanel(p) {
     }
   }
 
+  // 批次 D11：模板回填可能把 NDBI/NDMI 写进被禁用的 radio，统一再校验一次 B11 可用性
+  syncIndexAvailability();
   syncRunAdvancedUi();   // 折叠区开关 / 滑块 / 阈值方式文案同步
   renderCaliber();       // 只读口径面板（含分块尺寸）随之刷新，回填有可见结果
   refreshGates();
@@ -699,18 +709,78 @@ function isUnsafeImageUrl(u) {
 // 开关关闭时 threshold 为 undefined：api.runChange 不会下发该字段，后端走 Otsu 自适应。
 // 4A（REQ-11）：method 与 index / threshold / 后台运行开关各自独立读取，互不改写对方状态。
 // 批次 G：第三种方法 cva（变化向量分析），与后端 VALID_CHANGE_METHODS 同步。
+// 批次 D11：指数枚举扩为 4 项，与 index.html #index-radios / 后端 VALID_INDEXES 同步。
 const METHOD_LABELS = { otsu: '差值法', regression: '回归法', cva: '变化向量分析' };
 const VALID_METHODS = ['otsu', 'regression', 'cva'];
+const INDEX_ENUM = ['NDVI', 'NDWI', 'NDBI', 'NDMI'];
 
 function runParams() {
+  // 批次 D11：4 项 radio 全部按 value 读取；被禁用（无 B11）的项不参与判定，避免模板回填
+  // 或程序化选中把 NDBI/NDMI 带进请求。缺省仍回退 NDVI，既有默认行为不变。
   const checked = document.querySelector('input[name="index-type"]:checked');
-  const index = (checked && String(checked.value).toUpperCase()) || 'NDVI';
+  const raw = String((checked && !checked.disabled && checked.value) || '').trim().toUpperCase();
+  const index = INDEX_ENUM.includes(raw) ? raw : 'NDVI';
   const manual = !!($('manual-threshold') && $('manual-threshold').checked);
   const threshold = manual ? Number($('threshold-slider').value) : undefined;
   const sel = $('change-method');
-  const raw = String((sel && sel.value) || 'otsu').trim().toLowerCase();
-  const method = VALID_METHODS.includes(raw) ? raw : 'otsu';
+  const mraw = String((sel && sel.value) || 'otsu').trim().toLowerCase();
+  const method = VALID_METHODS.includes(mraw) ? mraw : 'otsu';
   return { index, threshold, method };
+}
+
+// ===== 批次 D11（REQ-07 / EX11 前端拦截）：无 B11 影像对禁用 NDBI / NDMI =====
+// B11 是 Sentinel-2 短波红外（20m）：11 组 S2 预置影像对含 B11；Landsat C2 L2
+// （sensor L8/L9）组与在线取数（只下 B02/B03/B04/B08/SCL 五波段）不含 B11。
+// 这里只做前端可用性门控：不新增错误码、不改 ERROR_MESSAGES；若后端仍返回 EX11 +
+// 「该影像对未包含 B11 短波红外，不支持 NDBI/NDMI」，沿用既有 handleErr → showError
+// 展示后端原文（experiments.js 侧沿用 inlineText），不自行臆造错误语义。
+const B11_INDEXES = ['NDBI', 'NDMI'];
+const B11_HINT = '该影像对未包含 B11 短波红外，不支持 NDBI/NDMI';
+
+// 判断单组影像对是否含 B11：复用影像对卡片里的 sensor / source / key 信息。
+// Landsat 判别口径与 syncPresetMeta 的 /^L[89]$/ 完全一致。
+function pairHasB11(p) {
+  if (!p) return true;                       // 未选影像对：不误禁（保持 4 项可用）
+  const sc = p.scenes || {};
+  const s1 = String((sc.t1 && sc.t1.sensor) || '').trim().toUpperCase();
+  const s2 = String((sc.t2 && sc.t2.sensor) || '').trim().toUpperCase();
+  const source = String(p.source || '').trim();
+  const key = String(p.key || '');
+  if (/^L[89]$/.test(s1) || /^L[89]$/.test(s2)) return false;      // Landsat C2 L2
+  if (source === 'Landsat C2 L2' || /^landsat_/.test(key)) return false;
+  if (ON.fetchedKeys && ON.fetchedKeys.has(key)) return false;       // 在线取数五波段组
+  return true;                                                       // S2 预置组含 B11
+}
+
+// 当前选择是否可用 NDBI/NDMI：B 卡选中影像对（检测请求实际使用它的两景）与
+// A 卡预置地点（presetSensor / ^L[89]$）任一缺 B11 即禁用；切回 S2 组自动恢复。
+function indexB11Available() {
+  const pairOk = pairHasB11(S.selectedPair);
+  const preset = selectedPreset();
+  const presetOk = !preset || !/^L[89]$/.test(presetSensor(preset));
+  return pairOk && presetOk;
+}
+
+// 同步 4 项指数 radio 的可用态：无 B11 → NDBI/NDMI 置灰禁用 + 内联中文提示，
+// 若当前已选中这两项则回退 NDVI 并用既有 showToast 提示（不新增错误码）。
+function syncIndexAvailability(opts) {
+  const ok = indexB11Available();
+  let fellBack = false;
+  document.querySelectorAll('#index-radios input[name="index-type"]').forEach((el) => {
+    if (!B11_INDEXES.includes(String(el.value).toUpperCase())) return;
+    el.disabled = !ok;
+    const lab = el.closest ? el.closest('.chk') : null;
+    if (lab) lab.classList.toggle('is-disabled', !ok);
+    if (!ok && el.checked) { el.checked = false; fellBack = true; }
+  });
+  if (!ok && fellBack) {
+    const ndvi = document.querySelector('#index-radios input[name="index-type"][value="NDVI"]');
+    if (ndvi) ndvi.checked = true;
+  }
+  const note = $('index-b11-note');
+  if (note) { note.textContent = B11_HINT; note.hidden = ok; }
+  if (fellBack && !(opts && opts.notify === false)) showToast(B11_HINT, 'warn');
+  return ok;
 }
 
 // 折叠区实时态：开关控制滑块可用性，滑块拖动实时显值（step 0.01 / -0.5~0.5）
@@ -729,10 +799,13 @@ function syncRunAdvancedUi() {
   }
 }
 
-// 批次 A：图斑 polygon 层取 change.geojson（含 index/method 归档名兜底），
+// 批次 A / D11：图斑 polygon 层取 change.geojson（含 index/method 归档名兜底），
 // 仍走带 token 的 artifactObjectUrl → Blob 通道；产物缺失时详情卡自然收起。
+// 批次 D11 补 change_ndbi* / change_ndmi* 归档名，与后端 ARTIFACT_MEDIA_TYPES 白名单一致。
 const PATCH_GEOJSON_NAMES = [
-  'change.geojson', 'change_reg.geojson', 'change_ndvi.geojson', 'change_ndwi.geojson',
+  'change.geojson', 'change_reg.geojson',
+  'change_ndvi.geojson', 'change_ndwi.geojson', 'change_ndbi.geojson', 'change_ndmi.geojson',
+  'change_ndvi_reg.geojson', 'change_ndwi_reg.geojson', 'change_ndbi_reg.geojson', 'change_ndmi_reg.geojson',
 ];
 function firstArtifactUrl(arts, names) {
   for (const n of names) {
@@ -1076,6 +1149,11 @@ function renderChangeResult() {
   if (!d) return;
   renderValidRatio();
   const snap = d.params_snapshot || {};
+  // 批次 D11（REQ-07/11）：按 params_snapshot.index 动态显示 Δ<指数>，不再写死 ΔNDVI；
+  // NDBI / NDMI 的专题图 / 直方图 / 转移矩阵直接复用既有渲染与数值口径，不改结论数字。
+  const indexName = String(d.index || snap.index || 'NDVI').trim().toUpperCase();
+  const thrLabel = $('threshold-label');
+  if (thrLabel) thrLabel.textContent = '变化阈值 Δ' + indexName;
   // 批次 B3：结论复用既有字段通道（响应 / 参数快照），老 run 无字段整块隐藏
   const conclusion = String(d.conclusion || snap.conclusion || '').trim();
   const cbox = $('conclusion-box');
@@ -1115,7 +1193,11 @@ function renderChangeResult() {
   if (bnote) bnote.hidden = !band;
   C.renderPie($('chart-pie'), stats);
   C.renderBar($('chart-bar'), stats);
-  C.renderDeltaHistogram($('chart-delta-hist'), d.index_histogram || snap.index_histogram || null);
+  // 批次 D11：直方图标题按实际指数动态化（ΔNDBI / ΔNDMI 不再显示成 ΔNDVI）
+  const hist = d.index_histogram || snap.index_histogram || null;
+  C.renderDeltaHistogram($('chart-delta-hist'), hist, indexName);
+  const histNote = $('delta-hist-note');
+  if (histNote) histNote.hidden = !hist;
   renderIntensityAndPatches();
   renderTransition();
 }
@@ -1515,14 +1597,16 @@ function renderSnapshot() {
   };
   const commit = ps.commit || (S.exportResult && S.exportResult.commit) || '—';
   const formula = (ps.formula_id || 'S2_L2A_BOA') + (ps.formula_text ? ' · ' + ps.formula_text : '');
+  // 批次 D11：参数快照「变化阈值」标签按本轮 index 动态显示 Δ<指数>，不再写死 ΔNDVI
+  const snapIndex = fmt(ps.index, 'NDVI');
   const rows = [
     ['run_id', fmt((S.change && S.change.run_id) || (S.aoiResult && S.aoiResult.run_id), '—'), true],
     ['commit（代码版次）', fmt(commit, '—'), true],
     ['辐射定标公式', formula, true],
     ['处理基线版次', fmt(ps.proc_baseline, '—'), false],
-    ['变化阈值 ΔNDVI', fmt(ps.threshold, '—'), false],
+    ['变化阈值 Δ' + snapIndex, fmt(ps.threshold, '—'), false],
     ['分块尺寸 (px)', fmt(ps.block_size, '—'), false],
-    ['指数类型', fmt(ps.index, 'NDVI'), false],
+    ['指数类型', snapIndex, false],
     ['检测方法 method', fmt(ps.method || (S.change && S.change.method), 'otsu'), false],
   ];
   $('snapshot-table').innerHTML = '<tbody>' + rows.map(([k, v, code]) =>
@@ -1696,7 +1780,11 @@ function loadHistoryRun(d) {
     }
     return '';
   };
-  const png = artUrl(['change.png', 'change_ndvi.png', 'change_ndwi.png']);
+  // 批次 D11：历史回看专题图候选补 change_ndbi* / change_ndmi* 归档名（与后端白名单一致）
+  const png = artUrl([
+    'change.png', 'change_ndvi.png', 'change_ndwi.png', 'change_ndbi.png', 'change_ndmi.png',
+    'change_ndvi_reg.png', 'change_ndwi_reg.png', 'change_ndbi_reg.png', 'change_ndmi_reg.png',
+  ]);
   const artMap = {};
   arts.forEach((a) => { if (a && a.name) artMap[a.name] = String(a.url || ''); });
   // A1/A2：历史回看从 params_snapshot 取（后端三处透出的同源数据）
@@ -2304,6 +2392,9 @@ async function onlineFetchTerminal(status, data) {
   renderOnlineProgress(status, pg.done, pg.total);
   restoreOnlineFetchButton();
   if (status === 'SUCCESS') {
+    // 批次 D11：在线取数只下 5 波段、不含 B11 → 登记组名并即时同步指数可用性
+    if (ON.lastFetchName && ON.fetchedKeys) ON.fetchedKeys.add(ON.lastFetchName);
+    syncIndexAvailability();
     const ids = (data && data.scene_ids) || {};
     const ok = $('onl-success');
     ok.hidden = false;
@@ -2388,6 +2479,9 @@ async function onlineFetch() {
   $('onl-name').value = name;
   renderOnlineNamePreview();
   if (!ON_NAME_RE.test(name)) { errEl.textContent = '组名不合法：仅允许 [a-z0-9_]（1–40 位）。'; return; }
+  // 批次 D11：记录本次取数组名（cog_path = pair_<name>，即 B 卡 pair.key），
+  // 成功后并入 ON.fetchedKeys，供无 B11 影像对禁用 NDBI/NDMI 判定。
+  ON.lastFetchName = name;
 
   const phase = (p) => ({
     source_id: String((p && p.source_id) || ''),
@@ -2601,6 +2695,10 @@ function bindEvents() {
   $('threshold-slider').addEventListener('input', syncRunAdvancedUi);
   $('btn-export-csv').onclick = downloadAreaStatsCsv;
   $('btn-onl-auto-best').onclick = autoSelectBestOnlineCandidate;
+  // 批次 D11：指数 radio 变化时兜底校验 B11 可用性；启动即同步一次（默认 NDVI，不误禁）
+  const idxRadios = $('index-radios');
+  if (idxRadios) idxRadios.addEventListener('change', () => syncIndexAvailability());
+  syncIndexAvailability({ notify: false });
   syncRunAdvancedUi(); // 初始化开关/滑块/实时显值，不改变任何既有门控与离线路径
 
   // ===== 批次 D（NF9）：口径面板「参数模板」区（保存 / 回填 / 删除） =====

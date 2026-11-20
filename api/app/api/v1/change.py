@@ -135,7 +135,8 @@ def run_change(payload: ChangeRequest):
 
     EX5（0.10–0.50）为告警可继续档：返回 200，warning 置于 params_snapshot。
     index 非法 / threshold 越界由 service 抛 EX12（400）；缺省 index=NDVI、
-    threshold=None 时行为与历史版本一致（Otsu 自适应）。
+    threshold=None 时行为与历史版本一致（Otsu 自适应）。index 现支持
+    NDVI / NDWI / NDBI / NDMI：后两者需 B11 短波红外，缺失 → EX11 中文明确报错。
     async=true 时过并发闸门后立即返回 ``{run_id, task_id, status:PENDING}``，
     后台线程执行完整管线，进度由 ``GET /result/change/task/{task_id}`` 轮询。
     """

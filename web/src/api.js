@@ -286,9 +286,12 @@ export function matchScene(payload) {
 }
 
 // ---------- 4) REQ-05/08/10/11：变化检测主流程 ----------
-// 批次 1 扩展（REQ-07）+ 4A（REQ-11）：payload 可选携带 index / threshold / method。
+// 批次 1 扩展（REQ-07）+ 4A（REQ-11）+ 批次 D11（REQ-07）：payload 可选携带 index / threshold / method。
 // 签名与 {data, demo} 返回结构不变；threshold 未提供时**不下发该字段**，
 // 后端走 Otsu 自适应（threshold_source=otsu），缺省行为与历史版本一致。
+// index 统一 upper 规范化为 NDVI / NDWI / NDBI / NDMI 四项之一（由检测页 radio 给定），
+// 这里**不新增前端白名单**：index 合法性由后端 VALID_INDEXES 判定（非法 → EX12），
+// 避免前端擅自拦截后端 EX12 错误路径；NDBI/NDMI 缺 B11 时也由后端 EX11 明确报错。
 // method 仅接受后端白名单 constants.py VALID_CHANGE_METHODS（批次 G 起共 3 种：
 // otsu / regression / cva 变化向量分析）；缺省/非法一律 otsu，
 // 既不向后端提交非法值触发 EX12，也保证切回差值法时请求与旧行为等价。
@@ -530,7 +533,7 @@ export async function downloadArtifact(url, filename) {
 // GET /runs?limit=&offset=&q=&index=&days= → { total, limit, offset, items:[...] }（按 created_at 倒序）
 // 批次 D（REQ-14）：新增三个**可选**查询参数，缺省时请求与历史版本完全等价（老行为零变化）：
 //   q     关键词（≤100，模糊匹配 run_id 与快照文本里的地名/组名）；
-//   index NDVI / NDWI（后端大小写不敏感，这里统一大写下发）；
+//   index NDVI / NDWI / NDBI / NDMI（批次 D11 共 4 项；后端大小写不敏感，这里统一大写下发）；
 //   days  最近 N 天（1..3650）；非法枚举/越界由后端返回 400 EX12，前端不自行臆造校验。
 export function listRuns(params = {}) {
   const q = new URLSearchParams();

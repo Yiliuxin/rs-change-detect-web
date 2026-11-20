@@ -1,8 +1,14 @@
 # -*- coding: utf-8 -*-
-"""指数栅格值对象（HLD 模块3，REQ-06 / REQ-14）。
+"""指数栅格值对象（HLD 模块3，REQ-06 / REQ-07 / REQ-14）。
 
 把「指数数组 + 对应 profile + 参数快照」打包为不可变值对象，供 service 层与
 报告层复用；本身仍是纯函数（无 IO、无随机、无数据库）。
+
+``build_index_raster`` 按 4 个指数分派：NDVI / NDWI / NDBI / NDMI，
+band_a / band_b 语义与 ``change_service._INDEX_BANDS`` 一致：
+    NDVI=(red, nir)      NDWI=(green, nir)
+    NDBI=(swir, nir)     NDMI=(nir, swir)
+双波段 GeoTIFF 的实际落盘由 ``change_service`` + ``writers.write_index_raster`` 完成。
 """
 from __future__ import annotations
 
@@ -11,7 +17,8 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 
-from app.algorithm.index_calculator import clip_index, ndvi, ndwi
+from app.algorithm.index_calculator import clip_index, ndbi, ndmi, ndvi, ndwi
+from app.config.constants import VALID_INDEXES
 
 __all__ = ["IndexRaster", "build_index_raster"]
 
@@ -69,22 +76,29 @@ def build_index_raster(
     run_id: str = "",
     params_snapshot: Optional[dict] = None,
 ) -> IndexRaster:
-    """由反射率波段构建指数栅格。
+    """由反射率波段构建指数栅格（REQ-06/07，4 指数分派）。
 
     参数：
-        band_a / band_b：NDVI 时为 (red, nir)，NDWI 时为 (green, nir)
+        band_a / band_b：NDVI=(red,nir)，NDWI=(green,nir)，
+                         NDBI=(swir,nir)，NDMI=(nir,swir)
         profile         ：``cog_reader.read_aoi`` 返回的（已按窗口重算）profile
-        index           ："NDVI" / "NDWI"
+        index           ：NDVI / NDWI / NDBI / NDMI（VALID_INDEXES）
         clip            ：是否约束回物理定义域 [-1, 1]（默认 True，见 clip_index）
         run_id / params_snapshot：可复现三要素（REQ-14），只进入元数据
+
+    非法指数抛 ``ValueError``，枚举文案由 ``VALID_INDEXES`` 派生（自动含 4 项）。
     """
     key = str(index).strip().upper()
     if key == "NDVI":
         arr = ndvi(band_a, band_b, valid_mask=valid_mask)
     elif key == "NDWI":
         arr = ndwi(band_a, band_b, valid_mask=valid_mask)
+    elif key == "NDBI":
+        arr = ndbi(band_a, band_b, valid_mask=valid_mask)
+    elif key == "NDMI":
+        arr = ndmi(band_a, band_b, valid_mask=valid_mask)
     else:
-        raise ValueError(f"不支持的指数：{index!r}，仅支持 NDVI / NDWI")
+        raise ValueError(f"不支持的指数：{index!r}，仅支持 {' / '.join(VALID_INDEXES)}")
 
     if clip:
         arr = clip_index(arr)

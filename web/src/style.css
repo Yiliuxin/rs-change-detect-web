@@ -641,8 +641,18 @@ table.tbl td.diag { background: rgba(33, 160, 76, .1); font-weight: 800; }
 .onl-prog-foot .spinner { flex: 0 0 13px; }
 
 /* ===== 批次 1：指数切换 / 高级选项 / CSV 导出 / 自动选优（REQ-07/08/11/14） ===== */
-.index-radios { display: flex; align-items: center; gap: 12px; min-height: 35px; }
+/* 批次 D11：指数 4 项（含较长中文标签），允许换行避免左栏溢出 */
+.index-radios { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; min-height: 35px; }
 .index-radios .chk { white-space: nowrap; }
+/* 批次 D11：无 B11 影像对时 NDBI/NDMI 置灰禁用 + 内联中文提示 */
+.index-radios .chk.is-disabled { opacity: .45; cursor: not-allowed; }
+.index-radios input[type="radio"]:disabled { cursor: not-allowed; }
+.index-b11-note { margin-top: 5px; font-size: 10.5px; line-height: 1.55; color: var(--warn); font-weight: 600; }
+.onl-b11-note, .glossary-note {
+  margin-top: 8px; font-size: 10.5px; line-height: 1.6; color: var(--warn);
+  background: rgba(185, 126, 15, .07); border: 1px dashed rgba(185, 126, 15, .35);
+  border-radius: 8px; padding: 7px 9px;
+}
 /* 4A（REQ-11）：检测方法下拉与指数切换同格；独立控件，不影响高级选项 / 后台运行 */
 .method-label { margin-top: 10px; }
 
@@ -1062,3 +1072,5 @@ input[type="range"]:disabled { opacity: .45; cursor: not-allowed; }
   flex: 0 0 92px; width: 92px; font-size: 11px; padding: 5px 7px;
 }
 .exp-variant-row.is-off .exp-variant-fields { opacity: .5; }
+/* 批次 D11：只读实验只能复算基准 run 已落盘两个指数，其余指数候选的提示 */
+.exp-variant-note { margin-top: 5px; padding-left: 21px; font-size: 10px; line-height: 1.5; color: var(--warn); }

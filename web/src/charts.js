@@ -107,11 +107,13 @@ export function renderBar(el, stats) {
   bar.resize();
 }
 
-// ===== 批次 B1 · Δ 指数分布直方图：竖线标出置信度过渡带区间 =====
+// ===== 批次 B1 / D11 · Δ<指数> 分布直方图：竖线标出置信度过渡带区间 =====
 // 数据来自后端 params_snapshot.index_histogram（_index_histogram 的 32 bin），
 // 无数据整块隐藏、不伪造分布。4 条灰色竖线为 ±[band_low, band_high]，
 // 红色虚线为 ±T；过渡带是「证据不足」而非第四类变化。
-export function renderDeltaHistogram(el, hist) {
+// 批次 D11：标题 / x 轴名按实际指数动态化（NDVI / NDWI / NDBI / NDMI），
+// NDBI（建筑/不透水面）/ NDMI（植被水分）不再被显示成 NDVI；数值口径完全复用既有渲染。
+export function renderDeltaHistogram(el, hist, index) {
   if (!el) return;
   const counts = (hist && Array.isArray(hist.counts)) ? hist.counts : [];
   const edges = (hist && Array.isArray(hist.edges)) ? hist.edges : [];
@@ -120,6 +122,7 @@ export function renderDeltaHistogram(el, hist) {
     return;
   }
   el.hidden = false;
+  const deltaName = 'Δ' + (String(index || '').trim().toUpperCase() || '指数');
   if (!deltaHist || deltaHist.isDisposed()) {
     deltaHist = echarts.init(el, null, { renderer: 'canvas' });
   }
@@ -150,7 +153,7 @@ export function renderDeltaHistogram(el, hist) {
     backgroundColor: 'transparent',
     textStyle: { fontFamily: 'Segoe UI, Microsoft YaHei, sans-serif' },
     title: {
-      text: 'Δ 指数分布与置信度过渡带', left: 'center', top: 2,
+      text: deltaName + ' 分布与置信度过渡带', left: 'center', top: 2,
       textStyle: { color: '#5b6b82', fontSize: 12, fontWeight: 600 },
     },
     tooltip: {
@@ -160,7 +163,7 @@ export function renderDeltaHistogram(el, hist) {
     },
     grid: { left: 54, right: 16, top: 38, bottom: 26 },
     xAxis: {
-      type: 'value', name: 'Δ', nameTextStyle: { color: '#8494a9' },
+      type: 'value', name: deltaName, nameTextStyle: { color: '#8494a9' },
       splitLine: { lineStyle: { color: '#e6edf4' } },
       axisLabel: {
         color: '#5b6b82', fontSize: 10,

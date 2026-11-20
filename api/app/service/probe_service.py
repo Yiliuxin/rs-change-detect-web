@@ -20,7 +20,7 @@ from app.algorithm.intensity import intensity_grade
 from app.algorithm.landcover import classify_landcover_scalar
 from app.api.errors import ApiError
 from app.config.constants import (
-    INDEX_RASTER_T1, INDEX_RASTER_T2, INTENSITY_LABELS_ZH,
+    INDEX_AUXILIARY, INDEX_RASTER_T1, INDEX_RASTER_T2, INTENSITY_LABELS_ZH,
     LANDCOVER_LABELS_ZH, METHOD_CVA, METHOD_OTSU, METHOD_REGRESSION,
 )
 from app.repository import task_repo
@@ -99,13 +99,17 @@ def probe(run_id: str, lng: float, lat: float) -> Dict[str, object]:
 
     t1, aux1 = _band(raw1, 0), _band(raw1, 1)
     t2, aux2 = _band(raw2, 0), _band(raw2, 1)
-    # band1 = 主检测指数；band2 = 辅助指数（NDWI 场景辅助指数即 NDVI）
-    if index == "NDWI":
-        ndvi1, ndwi1 = aux1, t1
-        ndvi2, ndwi2 = aux2, t2
-    else:
-        ndvi1, ndwi1 = t1, aux1
-        ndvi2, ndwi2 = t2, aux2
+    # band1 = 主检测指数(index)，band2 = 按 INDEX_AUXILIARY 映射的辅助指数。
+    # NDVI 主 → (ndvi,ndwi)=(b1,b2)；NDWI 主 → (b2,b1)（既有行为逐字不变）；
+    # NDBI / NDMI 主 → band2 是 NDVI，取 ndvi=aux、ndwi=NaN（landcover 类别自然
+    # 为 0 / 无效，不臆造 NDWI 数值、不崩、不 500）。CVA 幅值仍用 t1/t2 原值不变。
+    aux_key = INDEX_AUXILIARY.get(index, "")
+    band_map = {index: (t1, t2), aux_key: (aux1, aux2)}
+    nan = float("nan")
+    ndvi1 = band_map["NDVI"][0] if "NDVI" in band_map else nan
+    ndwi1 = band_map["NDWI"][0] if "NDWI" in band_map else nan
+    ndvi2 = band_map["NDVI"][1] if "NDVI" in band_map else nan
+    ndwi2 = band_map["NDWI"][1] if "NDWI" in band_map else nan
 
     thr = _finite_or_none(snap.get("threshold"))
     thr = 0.0 if thr is None else abs(float(thr))

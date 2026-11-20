@@ -64,6 +64,21 @@ function fmt(v, fallback = '—') {
   return String(v);
 }
 
+// 批次 D11：指数按参数快照实际值展示（NDVI / NDWI / NDBI / NDMI 共 4 项）；
+// 缺失时不臆断为 NDVI，统一显示 —，避免把新指数显示成 NDVI。
+function showIndex(d) {
+  const snap = (d && d.params_snapshot) || {};
+  const v = snap.index || (d && d.index);
+  const s = String(v == null ? '' : v).trim().toUpperCase();
+  return s || '—';
+}
+
+// 批次 D11：运行详情「变化阈值」标签按实际指数动态化（Δ<指数>），无指数时退回中性标签。
+function detailThresholdLabel(d) {
+  const idx = showIndex(d);
+  return idx === '—' ? '变化阈值' : '变化阈值 Δ' + idx;
+}
+
 // ---------- 批次 D（REQ-14）：筛选条 ⇄ /runs 查询参数 ----------
 // 三个条件全部可选：缺省时不带该 query 参数，请求与历史版本完全一致。
 // 筛选状态以 H.filters 为准（输入防抖 300ms 后才写入），保证「加载更多」翻页时
@@ -227,11 +242,11 @@ function renderDetail(d) {
   const rows = [
     ['run_id', rid || '—', true],
     ['辐射定标公式', fmt(snap.formula || snap.formula_text || snap.formula_id), true],
-    ['变化阈值', fmt(snap.threshold != null ? snap.threshold : d.threshold), false],
+    [detailThresholdLabel(d), fmt(snap.threshold != null ? snap.threshold : d.threshold), false],
     ['threshold_source', fmt(snap.threshold_source || d.threshold_source), true],
     ['valid_ratio', snap.valid_ratio != null ? Number(snap.valid_ratio).toFixed(4) : '—', false],
     ['commit（代码版次）', fmt(snap.commit || snap.commit_hash), true],
-    ['指数 / 分块尺寸', fmt(snap.index || d.index, 'NDVI') + ' / ' + fmt(snap.block_size) + ' px', false],
+    ['指数 / 分块尺寸', showIndex(d) + ' / ' + fmt(snap.block_size) + ' px', false],
   ];
   const artHtml = arts.length ? arts.map((a) => {
     const name = String(a.name || '');
@@ -400,7 +415,7 @@ function compareFields(d) {
   return [
     ['变化阈值', fmt(snap.threshold != null ? snap.threshold : d.threshold)],
     ['检测方法', fmt(snap.method || d.method, 'otsu')],
-    ['指数', fmt(snap.index || d.index, 'NDVI')],
+    ['指数', showIndex(d)],
     ['分块尺寸 (px)', fmt(snap.block_size)],
     ['OA', num4(acc.overall_accuracy)],
     ['Kappa', num4(acc.kappa)],

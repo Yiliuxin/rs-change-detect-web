@@ -1,10 +1,14 @@
 # -*- coding: utf-8 -*-
-"""光谱指数计算（HLD 模块3 功能一，REQ-06）。
+"""光谱指数计算（HLD 模块3 功能一，REQ-06 / REQ-07）。
 
-纯函数：NDVI / NDWI，分块计算 + 分母零保护，不连数据库、不写路由。
+纯函数：NDVI / NDWI / NDBI / NDMI，分块计算 + 分母零保护，不连数据库、不写路由。
 
 要点：
-  * NDVI = (NIR - R) / (NIR + R)；分母 ``|NIR + R| < DENOM_EPS`` 判为无效（NaN）。
+  * NDVI = (NIR - R) / (NIR + R)；NDWI = (G - NIR) / (G + NIR)。
+  * NDBI = (SWIR - NIR) / (SWIR + NIR)（Zha 2003，建筑/不透水面，值越大越偏建成区）。
+  * NDMI = (NIR - SWIR) / (NIR + SWIR)（植被水分，值越大水分越高）；NDBI 与
+    NDMI 用同一对 (B11 短波红外, B08 近红外)，在相同波段取值下互为相反数。
+  * 分母 ``|den| < DENOM_EPS`` 判为无效（NaN）；四个指数一律走 ``_safe_ratio``。
   * 按常量 ``BLOCK_SIZE`` 分块逐块求商，避免整景同时入内存（NF3 / REQ-03）。
   * ``valid_mask`` 之外的像元一律置 NaN；输入中含 NaN 时自然传播。
   * ``clip_index`` 把指数约束回物理定义域 [-1, 1]：暗水体（BOA 反射率可为小负值）
@@ -19,9 +23,9 @@ import numpy as np
 from app.algorithm.block_iterator import iter_slices
 from app.config.constants import BLOCK_SIZE
 
-# 分母零判定的数值容差（数学量，非业务阈值；REQ-06 规定 |NIR+R| < 1e-6）
+# 分母零判定的数值容差（数学量，非业务阈值；REQ-06 规定 |den| < 1e-6）
 DENOM_EPS: float = 1e-6
-# NDVI / NDWI 的物理定义域（用于剔除近零分母造成的数值伪影）
+# NDVI / NDWI / NDBI / NDMI 的物理定义域（用于剔除近零分母造成的数值伪影）
 INDEX_DOMAIN: Tuple[float, float] = (-1.0, 1.0)
 
 __all__ = [
@@ -29,6 +33,8 @@ __all__ = [
     "INDEX_DOMAIN",
     "ndvi",
     "ndwi",
+    "ndbi",
+    "ndmi",
     "clip_index",
 ]
 
@@ -92,6 +98,32 @@ def ndwi(green, nir, valid_mask: Optional[np.ndarray] = None) -> np.ndarray:
     g = _as_f32(green)
     n = _as_f32(nir)
     result = clip_index(_safe_ratio(g - n, g + n))
+    return _apply_valid(result, valid_mask)
+
+
+def ndbi(swir, nir, valid_mask: Optional[np.ndarray] = None) -> np.ndarray:
+    """NDBI = (SWIR − NIR) / (SWIR + NIR)，返回 float32；无效像元为 NaN（REQ-06/07）。
+
+    Zha et al. 2003 归一化建筑指数：B11 短波红外减 B08 近红外，值越大越偏
+    建成区 / 不透水面。与 NDVI / NDWI 完全同口径：分母近零保护、分块
+    ``_safe_ratio``、``clip_index`` 物理定义域 [-1, 1] 裁剪、``valid_mask``
+    之外置 NaN。B11 为 DN 量级，调用方须先经 ``to_reflectance`` 定标（ρ=DN/10000）。
+    """
+    s = _as_f32(swir)
+    n = _as_f32(nir)
+    result = clip_index(_safe_ratio(s - n, s + n))
+    return _apply_valid(result, valid_mask)
+
+
+def ndmi(nir, swir, valid_mask: Optional[np.ndarray] = None) -> np.ndarray:
+    """NDMI = (NIR − SWIR) / (NIR + SWIR)，返回 float32；无效像元为 NaN（REQ-06/07）。
+
+    归一化差异水分指数：B08 近红外减 B11 短波红外，值越大植被水分越高。
+    与 :func:`ndbi` 用同一对波段且互为相反数；计算口径与 NDVI / NDWI 完全一致。
+    """
+    n = _as_f32(nir)
+    s = _as_f32(swir)
+    result = clip_index(_safe_ratio(n - s, n + s))
     return _apply_valid(result, valid_mask)
 
 

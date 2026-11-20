@@ -133,9 +133,10 @@ def write_geotiff(change, profile: dict, output_path,
 def write_index_raster(primary, auxiliary, profile: dict, output_path) -> str:
     """B2 探针前置：双波段 float32 GeoTIFF（nodata=NaN，deflate）。
 
-    band 1 = 主检测指数（NDVI 或 NDWI，与本轮 ``index`` 一致）；
-    band 2 = 辅助指数（另一指数），供 A3 地物联合判据在只读 1 个像元时
-    同时取得 NDVI 与 NDWI。无效像元恒为 NaN，与现有掩膜/定标口径一致。
+    band 1 = 主检测指数（NDVI / NDWI / NDBI / NDMI，与本轮 ``index`` 一致）；
+    band 2 = 按 ``constants.INDEX_AUXILIARY`` 映射的辅助指数（NDVI↔NDWI，
+    NDBI / NDMI → NDVI），供 A3 地物联合判据在只读 1 个像元时取得 NDVI / NDWI。
+    不改动 2 波段结构 / 文件名 / 编码；无效像元恒为 NaN，与现有掩膜/定标口径一致。
     """
     p = np.asarray(primary, dtype=INDEX_RASTER_DTYPE)
     a = np.asarray(auxiliary, dtype=INDEX_RASTER_DTYPE)

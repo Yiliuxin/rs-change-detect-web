@@ -29,7 +29,9 @@ logger = logging.getLogger(__name__)
 # 旧 run 若没有这些产物，raster 如实返回 null；_cog/ 下的是原始未裁切 COG，不作为来源。
 _RASTER_ARTIFACTS: tuple = (
     "change.tif", "change_ndvi.tif", "change_ndwi.tif",
+    "change_ndbi.tif", "change_ndmi.tif",
     "change_reg.tif", "change_ndvi_reg.tif", "change_ndwi_reg.tif",
+    "change_ndbi_reg.tif", "change_ndmi_reg.tif",
 )
 
 __all__ = [
@@ -166,7 +168,7 @@ def list_runs(limit: int = DEFAULT_PAGE_LIMIT, offset: int = 0,
 
     批次 D 可选过滤（全部缺省时行为与历史版本完全一致，老前端不受影响）：
       * q：模糊匹配 run_id 前缀与 params_snapshot 里的地名/组名文本；
-      * index：指数枚举过滤（NDVI/NDWI，非法 → EX12）；
+      * index：指数枚举过滤（NDVI / NDWI / NDBI / NDMI，非法 → EX12）；
       * days：最近 N 天（按 run 创建时间 aoi.created_at，1..3650，非法 → EX12）。
     total 按过滤后计数；分页语义不变（q/index/days 变化时前端归零 offset）。
     """

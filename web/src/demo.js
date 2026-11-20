@@ -116,10 +116,13 @@ export function demoSceneMatch(payload) {
 }
 
 // POST /api/v1/result/change 降级（三类面积统计 / 有效像元占比 / 参数快照）
+// 批次 D11：参数快照里的 index 跟随本次请求（NDVI/NDWI/NDBI/NDMI 4 项），
+// 避免离线演示时把新指数仍显示成 NDVI；三类面积等结论数字一个都不改。
 export function demoChange(payload) {
-  void payload;
+  const idx = String((payload && payload.index) || 'NDVI').toUpperCase();
   return {
     run_id: DEMO_RUN_ID,
+    index: idx,
     change_geotiff: 'demo://results/change_demo.tif',
     change_png: '', // 空 → 前端用本地 canvas 生成三类色带 dataURL
     threshold: 0.1,
@@ -138,7 +141,7 @@ export function demoChange(payload) {
       proc_baseline: '05.09',
       threshold: 0.1,
       block_size: 256,
-      index: 'NDVI',
+      index: idx,
       sensor: 'S2',
     },
   };

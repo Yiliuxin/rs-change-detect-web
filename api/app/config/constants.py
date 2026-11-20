@@ -36,8 +36,31 @@ VALID_RATIO_WARN: Final[float] = 0.50
 OTSU_FALLBACK_DNDVI: Final[float] = 0.1
 
 # REQ-07 扩展：允许的光谱指数（大小写不敏感，服务层统一 upper 规范化）与手动阈值定义域。
-# 指数决定 (band_a, band_b)：NDVI=(red,nir)，NDWI=(green,nir)；检测管线其余环节完全一致。
-VALID_INDEXES: Final[Tuple[str, ...]] = ("NDVI", "NDWI")
+# 指数决定 (band_a, band_b)：NDVI=(B04,B08 红/近红外)，NDWI=(B03,B08 绿/近红外)，
+# NDBI=(B11,B08 短波红外/近红外)，NDMI=(B08,B11 近红外/短波红外)。
+# NDBI / NDMI 需 B11 短波红外波段，按需读取（缺失 → EX11 中文明确报错）；
+# 检测管线其余环节（Δ / Otsu / 三类 / 形态学 / 面积统计）完全一致。
+VALID_INDEXES: Final[Tuple[str, ...]] = ("NDVI", "NDWI", "NDBI", "NDMI")
+
+# A3 地物转移矩阵 / B2 双波段指数栅格：band1 = 主检测指数，band2 = 辅助指数。
+# 4 指数扩展后「另一指数」不再是 VALID_INDEXES 里唯一的其它项，配对关系由本表
+# 唯一定义（批次 D11 写死）：NDVI↔NDWI 互为辅助；NDBI / NDMI 均固定以 NDVI 为辅助。
+# 所有「取辅助指数」处一律查本表，禁止再用 next(i for i in VALID_INDEXES if i != idx)。
+INDEX_AUXILIARY: Final[Dict[str, str]] = {
+    "NDVI": "NDWI",
+    "NDWI": "NDVI",
+    "NDBI": "NDVI",
+    "NDMI": "NDVI",
+}
+# 需要 B11 短波红外的主指数（由 VALID_INDEXES 派生，避免多处写死枚举）。
+_SWIR_INDEX_NAMES: Final[Tuple[str, ...]] = ("NDBI", "NDMI")
+SWIR_INDEXES: Final[Tuple[str, ...]] = tuple(
+    i for i in VALID_INDEXES if i in _SWIR_INDEX_NAMES
+)
+# B11 缺失时的 EX11 中文明确报错文案（枚举由 SWIR_INDEXES 派生，不写死）。
+B11_MISSING_MESSAGE: Final[str] = (
+    "该影像对未包含 B11 短波红外，不支持 " + "/".join(SWIR_INDEXES)
+)
 # 手动阈值开区间 (-1, 1)：越界 → EX12。对称阈值取 |T| 分类，负号不改变三类判别语义。
 MANUAL_THRESHOLD_RANGE: Final[Tuple[float, float]] = (-1.0, 1.0)
 
@@ -279,6 +302,9 @@ PATCH_PDF_TOP_N: Final[int] = 5
 # ---------------------------------------------------------------------------
 # A3 地物转移矩阵：NDVI / NDWI 联合判据（顺序判断，先命中先归类）
 # ---------------------------------------------------------------------------
+# 联合判据只认 NDVI / NDWI 两个量：主指数为 NDVI / NDWI 时由双波段栅格
+# band1(主) / band2(辅助) 直接还原；主指数为 NDBI / NDMI 时 band2 固定为 NDVI
+# （见 INDEX_AUXILIARY 映射表），NDWI 记 NaN → 类别自然为 0 / 无效，不臆造数值。
 # 编码 0 无效 / 1 水体 / 2 植被 / 3 裸土·建成 / 4 其他
 LANDCOVER_NODATA: Final[int] = 0
 LANDCOVER_CODES: Final[Tuple[int, ...]] = (1, 2, 3, 4)
@@ -324,8 +350,10 @@ PATCH_SHAPE_DEG_TO_M: Final[float] = 111320.0
 # ---------------------------------------------------------------------------
 INDEX_RASTER_T1: Final[str] = "index_t1.tif"
 INDEX_RASTER_T2: Final[str] = "index_t2.tif"
-# 2 波段：band1 = 主检测指数（NDVI 或 NDWI），band2 = 辅助指数（另一指数），
-# 供 landcover 联合判据在只读 1 个像元的前提下同时取得 NDVI 与 NDWI。
+# 2 波段：band1 = 主检测指数（NDVI / NDWI / NDBI / NDMI，与本轮 index 一致）；
+# band2 = 按 INDEX_AUXILIARY 映射的辅助指数（NDVI↔NDWI，NDBI / NDMI → NDVI）。
+# 供 landcover 联合判据在只读 1 个像元的前提下取得 NDVI / NDWI；主指数为
+# NDBI / NDMI 时 band2 即 NDVI，NDWI 记 NaN，不臆造数值。
 INDEX_RASTER_BANDS: Final[int] = 2
 INDEX_RASTER_DTYPE: Final[str] = "float32"
 INDEX_RASTER_NODATA: Final[float] = float("nan")
@@ -339,7 +367,8 @@ PROBE_THROTTLE_MS: Final[int] = 180
 # 批次 D 检测参数模板：口径面板参数白名单（模板保存/回填的唯一键集合）
 # ---------------------------------------------------------------------------
 # 键集合与 POST /result/change 口径面板提交链路（ChangeRequest）同源，前端回填用：
-#   index      : NDVI | NDWI                       （REQ-07，VALID_INDEXES）
+#   index      : NDVI | NDWI | NDBI | NDMI         （REQ-07，VALID_INDEXES；
+#                NDBI / NDMI 需 B11 短波红外，无 B11 影像对由服务端 EX11 拒绝）
 #   method     : otsu | regression | cva           （REQ-11，VALID_CHANGE_METHODS）
 #   block_size : 256 | 512                         （REQ-06，BLOCK_SIZE_OPTIONS）
 #   threshold  : (-1, 1) 开区间浮点数或 null        （REQ-07，MANUAL_THRESHOLD_RANGE；

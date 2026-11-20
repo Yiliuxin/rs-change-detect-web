@@ -20,7 +20,10 @@ const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
 }[c]));
 
 const NAME_MAX = 64;                 // 后端 TEMPLATE_NAME_MAX，与输入框 maxlength 一致
-const VALID_INDEX = ['NDVI', 'NDWI'];
+// 批次 D11：指数枚举扩为 4 项，与后端 VALID_INDEXES / 检测页 #index-radios 同步。
+// normalizeParams 只做大写规范化 + 枚举 membership 判定（回填/预览用），不新增前端
+// 白名单拦截：非法 index 仍由后端 EX12 判定，模板回填/参数校验链路不受影响。
+const VALID_INDEX = ['NDVI', 'NDWI', 'NDBI', 'NDMI'];
 const VALID_METHOD = ['otsu', 'regression', 'cva'];   // 批次 G：与后端 VALID_CHANGE_METHODS 同步
 const VALID_BLOCK = [256, 512];
 const METHOD_LABELS = { otsu: '差值法', regression: '回归法', cva: '变化向量分析' };
@@ -66,7 +69,8 @@ function codeText(r) {
 }
 
 // ---------- 口径参数规范化（与后端 normalize_params 同口径，仅用于回填/预览） ----------
-// index 大写、method 小写、block_size 整数、threshold 数字或 null（null = Otsu 自适应）。
+// index 大写且须 ∈ VALID_INDEX（4 项）、method 小写、block_size 整数、
+// threshold 数字或 null（null = Otsu 自适应）；批次 D11 起 NDBI / NDMI 也能正常回填。
 function normalizeParams(raw) {
   const p = raw && typeof raw === 'object' ? raw : {};
   const out = {};

@@ -124,7 +124,12 @@
                 <div class="index-radios" id="index-radios" role="group" aria-label="变化检测指数">
                   <label class="chk" title="归一化植被指数 =(NIR−R)/(NIR+R)，值越高植被越茂密，适合监测植被退化/恢复"><input type="radio" name="index-type" value="NDVI" checked /> <abbr class="term" title="Normalized Difference Vegetation Index，归一化植被指数：用近红外与红光波段计算，值越高植被越茂密">NDVI</abbr></label>
                   <label class="chk" title="归一化水体指数 =(G−NIR)/(G+NIR)，大于 0 大概率为水体，适合监测湖泊/水面变化"><input type="radio" name="index-type" value="NDWI" /> <abbr class="term" title="Normalized Difference Water Index，归一化水体指数：用绿光与近红外波段计算，大于 0 大概率为水体">NDWI</abbr></label>
+                  <!-- 批次 D11（REQ-07）：NDBI / NDMI 需要 B11 短波红外；无 B11 影像对由 main.js 禁用并回退 NDVI -->
+                  <label class="chk" title="归一化建筑指数 NDBI =(B11−B08)/(B11+B08)，用短波红外与近红外波段计算，值越大越偏建成区/不透水面；需要 B11 短波红外波段"><input type="radio" name="index-type" value="NDBI" /> <abbr class="term" title="Normalized Difference Built-up Index，归一化建筑指数：NDBI=(B11−B08)/(B11+B08)，值越大越偏建成区/不透水面（B11 为短波红外，值大表示建筑/不透水面增多）；依赖 B11 短波红外">NDBI 建筑/不透水面</abbr></label>
+                  <label class="chk" title="归一化水分指数 NDMI =(B08−B11)/(B08+B11)，用近红外与短波红外波段计算，值越大植被水分越高；需要 B11 短波红外波段"><input type="radio" name="index-type" value="NDMI" /> <abbr class="term" title="Normalized Difference Moisture Index，归一化水分指数：NDMI=(B08−B11)/(B08+B11)，值越大植被水分越高（B11 为短波红外，值大表示植被冠层含水量高）；依赖 B11 短波红外">NDMI 植被水分</abbr></label>
                 </div>
+                <!-- 无 B11 影像对（Landsat / 在线取数五波段组）时由 main.js 显示，文案与后端 EX11 一致 -->
+                <div class="index-b11-note" id="index-b11-note" hidden>该影像对未包含 B11 短波红外，不支持 NDBI/NDMI</div>
                 <!-- 4A（REQ-11）/ 批次 G：检测方法与 index / 手动阈值 / 后台运行各自独立，默认差值法，共 3 种 -->
                 <label class="fld method-label" for="change-method">检测方法 method</label>
                 <select id="change-method" title="差值法：两期指数直接相减后用 Otsu 自动找阈值，简单直接；回归法：先拟合两期关系剔除整体偏移（如薄云/光照差异），只看残差，抗干扰更强；变化向量分析（CVA）：把主指数与辅助指数的逐波段变化合成欧氏幅值，再对幅值做 Otsu，能同时反映两个维度的变化强度">
@@ -192,6 +197,8 @@
           <section class="card" id="card-online">
             <div class="card-title">在线取数（路径②）<span class="hint" id="onl-badge">可选 · 离线优先</span></div>
             <div class="path-hint">任意地点与时间区间：检索候选 → 下载入库 → 回到影像对列表选用。</div>
+            <!-- 批次 D11（REQ-02 在线分支 / REQ-07）：本卡只选地点与时相，不带指数下拉 -->
+            <div class="onl-b11-note" id="onl-b11-note">提示：在线取数仅下载 B02 / B03 / B04 / B08 / SCL 共 5 个波段，不含 B11 短波红外，取数得到的影像对不支持 NDBI / NDMI；检测页「指数类型」已包含这两项，会按当前影像对的可用性自动禁用并回退 NDVI。</div>
 
             <!-- 优雅降级：discover 返回 404（端点未启用）或网络失败时的置灰说明，不弹错误弹窗 -->
             <div class="onl-degraded" id="onl-degraded" hidden>
@@ -299,6 +306,8 @@
                 <option value="">全部指数</option>
                 <option value="NDVI">NDVI</option>
                 <option value="NDWI">NDWI</option>
+                <option value="NDBI">NDBI</option>
+                <option value="NDMI">NDMI</option>
               </select>
               <select id="hist-days" aria-label="按时间筛选">
                 <option value="">全部时间</option>
@@ -328,6 +337,12 @@
                 <dd>用近红外与红光波段按 (NIR−R)/(NIR+R) 计算，值 0.3–0.8 表示植被茂密。植被被砍伐、农田变化时 NDVI 明显下降，本平台默认用它监测植被类变化。</dd>
                 <dt>NDWI（归一化水体指数）</dt>
                 <dd>用绿光与近红外波段按 (G−NIR)/(G+NIR) 计算，大于 0 大概率是水体。适合监测湖泊退水、水面萎缩（如鄱阳湖枯水期）。</dd>
+                <dt>NDBI（归一化建筑指数 / 不透水面）</dt>
+                <dd>用短波红外与近红外波段按 (B11−B08)/(B11+B08) 计算，值越大越偏建成区 / 不透水面，适合监测城市扩张、裸土与硬化地表增多。需要 Sentinel-2 的 B11 短波红外波段（20m）。</dd>
+                <dt>NDMI（归一化水分指数）</dt>
+                <dd>用近红外与短波红外波段按 (B08−B11)/(B08+B11) 计算，值越大植被水分越高，适合监测植被含水量、干旱与灌溉变化。需要 Sentinel-2 的 B11 短波红外波段（20m）。</dd>
+                <dt>B11（短波红外）与影像对可用性</dt>
+                <dd>只有 11 组 Sentinel-2 预置影像对含 B11；在线取数与 Landsat 影像对不含 B11，不支持 NDBI / NDMI，检测页会按影像对可用性禁用这两项并回退 NDVI。</dd>
                 <dt>NIR / R / G</dt>
                 <dd>卫星传感器的三个波段：近红外（Sentinel-2 的 B08）、红光（B04）、绿光（B03）。不同地物在各波段的反射特性不同，是计算指数的原料。</dd>
                 <dt>双时相影像（t1 / t2）</dt>
@@ -448,10 +463,12 @@
               <div class="ratio-note" id="valid-note">等待检测结果…</div>
               <div class="alert-bar" id="ex5-bar" hidden></div>
               <div class="metric-row gap-top">
-                <div class="metric"><div class="k">变化阈值 ΔNDVI</div><div class="v" id="threshold-val">—</div></div>
+                <!-- 批次 D11：标签 Δ<指数> 由 main.js 按 params_snapshot.index 动态写入，不在页面写死 NDVI -->
+                <div class="metric"><div class="k" id="threshold-label" title="|Δ| 超过该阈值才判为变化；ΔNDBI 越大越偏建成区/不透水面，ΔNDMI 越大植被水分越高">变化阈值 Δ指数</div><div class="v" id="threshold-val">—</div></div>
                 <div class="metric"><div class="k">run_id</div><div class="v v-sm" id="runid-val">—</div></div>
                 <div class="metric"><div class="k">检测方法</div><div class="v" id="method-val">—</div></div>
               </div>
+              <div class="preset-hint" id="threshold-hint">Δ 指数物理含义：ΔNDVI 上升代表植被恢复、ΔNDWI 上升代表水体扩张；ΔNDBI 越大越偏建成区 / 不透水面，ΔNDMI 越大植被水分越高（NDBI / NDMI 依赖 B11 短波红外）。三类专题图、直方图与转移矩阵口径不随指数改变。</div>
               <div class="gap-top"><table class="tbl" id="stats-table"></table></div>
               <!-- 批次 B1：过渡带是「证据不足」，不是第四类变化 -->
               <div class="band-note" id="band-note" hidden>过渡带为 |Δ| 贴近阈值、判定证据不足的像元，不是第四类变化；仅在专题图与统计中单列，不计入三类面积。</div>
@@ -462,8 +479,10 @@
               </div>
               <div class="chart" id="chart-pie"></div>
               <div class="chart" id="chart-bar"></div>
-              <!-- 批次 B1：Δ 指数分布直方图，竖线标出置信度过渡带区间 -->
+              <!-- 批次 B1 / D11：Δ<指数> 分布直方图，竖线标出置信度过渡带区间；
+                   标题按 params_snapshot.index 动态显示，ΔNDBI 越大越偏建成区、ΔNDMI 越大植被水分越高 -->
               <div class="chart" id="chart-delta-hist" hidden></div>
+              <div class="preset-hint" id="delta-hist-note" hidden>Δ 指数分布：横轴为该指数的 t2−t1 差值；ΔNDVI 反映植被增减、ΔNDWI 反映水体消长，ΔNDBI 越大越偏建成区 / 不透水面、ΔNDMI 越大植被水分越高（NDBI / NDMI 依赖 B11 短波红外）。过渡带为证据不足标记，不并入三类面积。</div>
 
               <!-- A1 变化强度分级：五档表 + ECharts 横向条形图；无数据整块隐藏 -->
               <div class="inner-card" id="intensity-block" hidden>
@@ -519,7 +538,7 @@
             <div id="view-method" hidden>
               <div class="card-subtitle">方法对比<span class="readonly-badge">批次 E · 实验</span></div>
               <div class="exp-empty" id="exp-method-empty">
-                尚未运行对比实验。选择变体后，对比不同「指数 × 方法（差值法 / 回归法 / 变化向量分析）」组合下的三类面积、过渡带占比与一致率。
+                尚未运行对比实验。选择变体后，对比不同「4 种指数（NDVI / NDWI / NDBI / NDMI）× 3 种方法（差值法 / 回归法 / 变化向量分析）」组合下的三类面积、过渡带占比与一致率。只读实验仅能复算基准 run 已落盘的两个指数，其余指数需先以该指数重新检测。
               </div>
               <div class="btn-row gap-top">
                 <button type="button" class="btn btn-sm btn-primary" id="btn-exp-compare"
@@ -694,7 +713,7 @@
       <div class="exp-modal" id="exp-modal" hidden>
         <div class="exp-modal-card" role="dialog" aria-modal="true" aria-labelledby="exp-modal-title">
           <div class="card-title" id="exp-modal-title">运行对比实验 · 选择变体</div>
-          <div class="exp-modal-desc">3 种方法 × 2 种指数共 5 个候选，最多勾选 4 个变体；需至少一项配置与基准不同；结果缓存于 experiments.json（秒开 / 可复现）；预计耗时 10~60s。</div>
+          <div class="exp-modal-desc">3 种方法 × 4 种指数（NDVI / NDWI / NDBI / NDMI）共 12 种组合，排除基准后剩 11 个候选，最多勾选 4 个变体；需至少一项配置与基准不同；只读实验仅能复算基准 run 已落盘的两个指数（主指数 + 辅助指数），其余指数需先以该指数重新检测；结果缓存于 experiments.json（秒开 / 可复现）；预计耗时 10~60s。</div>
           <div class="exp-modal-base" id="exp-modal-base">基准：—</div>
           <div class="exp-variant-list" id="exp-variant-list"></div>
           <div class="err-line" id="exp-modal-err"></div>

@@ -37,7 +37,8 @@ def normalize_params(raw: Any) -> Dict[str, Any]:
     """口径参数白名单过滤 + 枚举校验（模板保存前的唯一入口）。
 
     - 只保留 ``TEMPLATE_PARAM_KEYS`` 内的键，多余键一律丢弃（不入库）；
-    - index：归一化大写，须 ∈ VALID_INDEXES（NDVI/NDWI），非法 → EX1 口径 400；
+    - index：归一化大写，须 ∈ VALID_INDEXES（NDVI / NDWI / NDBI / NDMI，
+      错误文案由 '/'.join(VALID_INDEXES) 自动派生），非法 → EX1 口径 400；
     - method：归一化小写，须 ∈ VALID_CHANGE_METHODS（otsu/regression/cva），非法 → EX1；
     - block_size：整数，须 ∈ BLOCK_SIZE_OPTIONS（256/512），非法 → EX1；
     - threshold：可空；给定时须为有限数且落在 MANUAL_THRESHOLD_RANGE 开区间，

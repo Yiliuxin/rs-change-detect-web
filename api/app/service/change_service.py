@@ -4,8 +4,11 @@
 照算法样板 ``app.algorithm._smoke.run_group`` 编排，去掉 print、返回结构化 dict：
   task 取 aoi/scenes → COG 解析(read_aoi) → 网格对齐(EX4) → 辐射口径(EX8/EX9) →
   掩膜 valid_ratio 四段判定(EX3/EX11 终止、EX5 告警可继续) → 先掩膜后缩放(NF4) →
-  NDVI / NDWI → Δ → Otsu(退化回退) 或手动阈值 → 三类分类 → 形态学 → 面积统计 →
+  NDVI / NDWI / NDBI / NDMI → Δ → Otsu(退化回退) 或手动阈值 → 三类分类 → 形态学 → 面积统计 →
   export_triplet 三件套 + 按 index 归档 + 双时相真彩合成 → 写 change_result/task 状态。
+
+  NDBI / NDMI 用 B11 短波红外：load_scene(need_b11=True) 按需读取并与 10m 参考网格
+  对齐，缺失 → EX11 中文明确报错；辅助指数一律查 constants.INDEX_AUXILIARY 映射。
 
 辐射定标铁律：一律 ``radiometric.to_reflectance(dn, sensor, proc_baseline)``，
 绝不写 (DN-1000)/10000；公式常量取 ``constants.S2_FORMULA``（rho=DN/10000）。
@@ -16,6 +19,7 @@ import inspect
 import json
 import math
 import shutil
+from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 import numpy as np
@@ -51,15 +55,16 @@ from app.algorithm.writers import (
 )
 from app.api.errors import ApiError, as_api_error
 from app.config.constants import (
-    BLOCK_SIZE, EXPORT_FORMATS, INDEX_RASTER_T1, INDEX_RASTER_T2,
+    B11_MISSING_MESSAGE, BLOCK_SIZE, EXPORT_FORMATS, INDEX_AUXILIARY,
+    INDEX_RASTER_T1, INDEX_RASTER_T2,
     LANDSAT_SENSORS, MANUAL_THRESHOLD_RANGE, METHOD_CVA, METHOD_OTSU,
     METHOD_REGRESSION,
     REGRESSION_MAX_ROUNDS, REGRESSION_SIGMA_FACTOR, radiometric_formula,
-    TRANSITION_BAND_RATIO, VALID_CHANGE_METHODS, VALID_INDEXES,
+    SWIR_INDEXES, TRANSITION_BAND_RATIO, VALID_CHANGE_METHODS, VALID_INDEXES,
     VALID_RATIO_MIN, VALID_RATIO_WARN,
 )
 from app.repository import aoi_repo, change_result_repo, scene_repo, task_repo
-from app.service.cog_source import resolve_bands
+from app.service.cog_source import resolve_bands, resolve_optional_bands
 from app.service.common import (
     artifact_manifest, artifact_url, index_artifact_names, index_raster_names,
     regression_archive_names, regression_artifact_names, run_dir, utc_now,
@@ -69,12 +74,37 @@ from app.service.concurrency import serial
 __all__ = ["load_scene", "run", "run_pipeline"]
 
 _BANDS_10M = ("B02", "B03", "B04", "B08")
-# REQ-06/07：指数 → (band_a, band_b)，NDVI=(R,NIR)，NDWI=(G,NIR)。
-# 仅波段对与所调用的 index_calculator 纯函数不同；后续 Δ/三类/统计口径完全一致。
+# REQ-06/07：指数 → (band_a, band_b)：NDVI=(B04,B08 红/近红外)，
+# NDWI=(B03,B08 绿/近红外)，NDBI=(B11,B08 短波红外/近红外)，
+# NDMI=(B08,B11 近红外/短波红外)。仅波段对与所调用的纯函数不同；
+# 后续 Δ / 三类 / 统计口径完全一致。B11 **不**并入 _BANDS_10M（按需读取）。
 _INDEX_BANDS: Dict[str, Tuple[str, str]] = {
     "NDVI": ("B04", "B08"),
     "NDWI": ("B03", "B08"),
+    "NDBI": ("B11", "B08"),
+    "NDMI": ("B08", "B11"),
 }
+# 4 指数 → index_calculator 纯函数分派（NDVI / NDWI 既有取值逐字不变）。
+_INDEX_CALCS = {
+    "NDVI": index_calculator.ndvi,
+    "NDWI": index_calculator.ndwi,
+    "NDBI": index_calculator.ndbi,
+    "NDMI": index_calculator.ndmi,
+}
+
+
+def _require_b11(cog_path: str, run_id: str, sensor: str) -> Path:
+    """按需解析 B11 短波红外；缺失 → EX11 中文明确报错（REQ-07）。
+
+    ``resolve_optional_bands`` 缺波段只返回空 dict、不抛 SYS-01，故此处统一转成
+    EX11 风格报错（不改 ``ERROR_MESSAGES["EX11"]``，用 message 覆写为中文明确文案）。
+    仅主指数为 NDBI / NDMI（SWIR_INDEXES）时调用，普通 NDVI / NDWI 链路不受牵连。
+    """
+    paths = resolve_optional_bands(str(cog_path), run_id, sensor, bands=("B11",))
+    b11 = paths.get("B11")
+    if b11 is None:
+        raise ApiError("EX11", message=B11_MISSING_MESSAGE, run_id=run_id)
+    return b11
 
 
 def _validate_index(index: str, run_id: str) -> str:
@@ -248,13 +278,14 @@ def _stage_progress(on_stage, name: str, done=None, total=None) -> None:
 
 def _build_index(key: str, rho_t: Dict, profile: dict, valid: np.ndarray,
                  run_id: str, snapshot: Dict) -> IndexRaster:
-    """REQ-06/07：NDVI 走 ``index_calculator.ndvi``，NDWI 走 ``index_calculator.ndwi``。
+    """REQ-06/07：按 key 分派 4 个 ``index_calculator`` 纯函数（NDVI/NDWI/NDBI/NDMI）。
 
-    两者共用 clip_index 物理定义域约束、有效掩膜与 IndexRaster 值对象；
-    变化检测的 Δ / Otsu / 三类判别 / 形态学 / 面积统计对两种指数完全一致。
+    band_a / band_b 由 ``_INDEX_BANDS`` 给定；四者共用 clip_index 物理定义域约束、
+    有效掩膜与 IndexRaster 值对象；后续 Δ / Otsu / 三类判别 / 形态学 / 面积统计
+    对所有指数完全一致（NDVI / NDWI 取值逐字不变）。
     """
     band_a, band_b = _INDEX_BANDS[key]
-    calc = index_calculator.ndvi if key == "NDVI" else index_calculator.ndwi
+    calc = _INDEX_CALCS[key]
     data = index_calculator.clip_index(
         calc(rho_t[band_a], rho_t[band_b], valid_mask=valid)
     )
@@ -267,16 +298,22 @@ def _build_index(key: str, rho_t: Dict, profile: dict, valid: np.ndarray,
 def _build_pair_indexes(key: str, rho_t: Dict, profile: dict,
                         valid: np.ndarray, run_id: str,
                         snapshot: Dict) -> Dict:
-    """A3/B2：一次算齐 NDVI + NDWI（与现有掩膜 / 定标 / clip 同口径）。
+    """A3/B2：按 INDEX_AUXILIARY 取主/辅助指数，并额外算齐 NDVI + NDWI。
 
-    NDWI 场景也得到 NDVI，反之亦然；主检测指数仍走 ``_build_index``，
-    保证 Δ / Otsu / 三类 / 统计口径逐字不变，额外的辅助指数只用于
-    地物联合判据与探针前置栅格。
+    primary = ``_build_index(key)``；aux = ``_build_index(INDEX_AUXILIARY[key]).data``；
+    NDVI / NDWI 主指数时 primary / aux 与既有值对象逐字一致（NDVI↔NDWI 互为辅助）。
+    NDBI / NDMI 主指数时 aux 固定为 NDVI（需 B11 的分支由 rho_t["B11"] 供给）。
+    ``ndvi`` / ``ndwi`` 数组仍恒返回，供 A3 ``classify_landcover`` 保持既有联合
+    判据语义与数字口径；额外的辅助指数只用于地物判据与探针前置双波段栅格。
     """
+    aux_key = INDEX_AUXILIARY[key]
+    # 一次算齐 NDVI + NDWI（A3 联合判据对所有主指数保持既有口径，不臆造数值）
     ndvi = _build_index("NDVI", rho_t, profile, valid, run_id, snapshot)
     ndwi = _build_index("NDWI", rho_t, profile, valid, run_id, snapshot)
-    primary = ndvi if key == "NDVI" else ndwi
-    aux = ndwi if key == "NDVI" else ndvi
+    caches = {"NDVI": ndvi, "NDWI": ndwi}
+    # 需要 B11 的 NDBI / NDMI 按需补算；NDVI / NDWI 直接复用上面的值对象
+    primary = caches.get(key) or _build_index(key, rho_t, profile, valid, run_id, snapshot)
+    aux = caches.get(aux_key) or _build_index(aux_key, rho_t, profile, valid, run_id, snapshot)
     return {
         "primary": primary, "aux": aux.data,
         "ndvi": ndvi.data, "ndwi": ndwi.data,
@@ -295,14 +332,24 @@ def _mask_then_scale(dn: np.ndarray, sensor: str, baseline: Optional[str],
 
 
 def load_scene(cog_path: str, sensor: str, baseline: Optional[str],
-               bbox: BBox, run_id: str, on_band=None) -> Dict:
+               bbox: BBox, run_id: str, on_band=None,
+               need_b11: bool = False) -> Dict:
     """读取单时相 COG：5 波段 → 同景网格对齐(EX4) → 掩膜流水线 → 结构化 dict。
 
     供 change_service 与 scene_service(POST 补 clip_window/valid_ratio) 复用。
     ``on_band(i)`` 为 B3 新增的可选回调（4 波段循环内回报阶段内进度），
     缺省 None 时既有调用签名 / 行为逐字不变。
+
+    ``need_b11`` 仅主指数为 NDBI / NDMI（SWIR_INDEXES）时置 True：在 4 波段
+    循环**之外**按需解析并读取 B11 短波红外，与 10m 参考网格做 EX4 几何对齐
+    （B11 已由 fetch_b11 重采样对齐，无需再重采样），并并入 ``dn["B11"]``。
+    B11 缺失 → EX11 中文明确报错（``_require_b11``）；``on_band`` 仍恒为
+    2 时相 × 4 波段 = 8 个进度单位，默认 False 时既有行为逐字不变。
     """
     check_baseline(sensor, baseline)  # EX9：基线缺失 / <04.00 / 非 C2 L2
+    # B11 按需解析（在 5 波段读取之前判定缺失）；默认 False 时本行完全跳过，
+    # 普通 NDVI / NDWI 与 scene_service 调用逐字不变，绝不受 B11 牵连。
+    b11_path = _require_b11(cog_path, run_id, sensor) if need_b11 else None
     # 按 scene 的 sensor 分派资产别名（L8/L9 → SR_B2..B5 / QA_PIXEL）
     paths = resolve_bands(cog_path, run_id, sensor)  # SYS-01：COG 5 波段解析失败
     is_landsat = str(sensor or "").strip().upper() in LANDSAT_SENSORS
@@ -320,6 +367,13 @@ def load_scene(cog_path: str, sensor: str, baseline: Optional[str],
     ref_profile = profiles["B04"]
     for band in ("B02", "B03", "B08"):
         assert_grid_aligned(ref_profile, profiles[band])  # EX4
+
+    if need_b11:
+        # B11 已在 10m 参考网格（原生 20m 经双线性重采样对齐），与 NDWI 的
+        # B03 / B08 同窗口裁切 + 几何对齐口径一致；循环外单独读，不进 on_band。
+        b11_arr, b11_profile, _b11_window = read_aoi(str(b11_path), bbox)
+        assert_grid_aligned(ref_profile, b11_profile)  # EX4：B11 与参考网格对齐
+        dn["B11"] = b11_arr
 
     if is_landsat:
         # Landsat C2 L2：SR 波段 DN=0 即 NODATA（不因 nodata 元信息缺失而漏掩）
@@ -383,7 +437,8 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
     ``name`` 的旧回调自动降级为单参数调用，行为完全向后兼容。
 
     参数扩展（向后兼容、缺省行为不变，且 index / threshold / method / async 正交）：
-      * ``index``：NDVI（缺省，红+近红外）/ NDWI（绿+近红外），非法 → EX12；
+      * ``index``：NDVI（缺省，红+近红外）/ NDWI（绿+近红外）/ NDBI（B11−B08，
+        建筑）/ NDMI（B08−B11，水分），非法 → EX12；后两者需 B11，缺失 → EX11；
       * ``threshold``：提供时跳过 Otsu 直接作对称阈值，须落在 (-1, 1)，越界 → EX12；
         ``params_snapshot`` 记录 ``threshold`` 与 ``threshold_source``("manual"/"otsu")；
       * ``method``：``otsu``（缺省，差值法）/ ``regression``（REQ-11 回归残差法）/
@@ -395,6 +450,8 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
     key = _validate_index(index, run_id)
     manual = _validate_threshold(threshold, run_id)
     method_key = _validate_method(method, run_id)
+    # REQ-07：主指数为 NDBI / NDMI（SWIR_INDEXES）时需要 B11 短波红外。
+    need_b11 = key in SWIR_INDEXES
     try:
         task = task_repo.get_task(run_id)
         if not task:
@@ -411,30 +468,42 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
         # REQ-04 / NF5 / EX8：双时相辐射口径一致
         sensor = assert_same_caliber(sc_t1["sensor"], sc_t2["sensor"])
 
+        # B11 缺失预检：仅 need_b11 时执行，放在 RUNNING 状态更新之前（与「非法
+        # 参数不误标 task 状态」既有风格一致）；NDVI / NDWI 链路完全不触发。
+        if need_b11:
+            for sc in (sc_t1, sc_t2):
+                _require_b11(str(sc["cog_path"]), run_id, sc["sensor"])
+
         task_repo.update_status(run_id, "RUNNING", started_at=utc_now())
 
-        # B3：读裁切阶段内进度 = 2 时相 × 4 波段 = 8 个单位
+        # B3：读裁切阶段内进度 = 2 时相 × 4 波段 = 8 个单位（B11 循环外读，不占单位）
         def _band_cb(offset: int):
             return lambda i: _stage_progress(on_stage, "read_clip", offset + i, 8)
 
         scenes = {
             "t1": load_scene(sc_t1["cog_path"], sc_t1["sensor"],
                              sc_t1.get("proc_baseline"), bbox, run_id,
-                             on_band=_band_cb(0)),
+                             on_band=_band_cb(0), need_b11=need_b11),
             "t2": load_scene(sc_t2["cog_path"], sc_t2["sensor"],
                              sc_t2.get("proc_baseline"), bbox, run_id,
-                             on_band=_band_cb(4)),
+                             on_band=_band_cb(4), need_b11=need_b11),
         }
         _stage_progress(on_stage, "read_clip", 8, 8)  # 阶段 1：读裁切
 
         # REQ-03 / EX4：双时相左上角/尺寸/CRS 一致
         assert_grid_aligned(scenes["t1"]["profile"], scenes["t2"]["profile"])
 
-        # 双时相有效掩膜交集 + 剔除 NODATA(=0)
+        # 双时相有效掩膜交集 + 剔除 NODATA(=0)。
+        # NDVI / NDWI 分支下面这段逐字不变；仅 need_b11（NDBI / NDMI）时把 B11
+        # 有效性并入，避免 B11 的 NaN / 0 参与 Otsu 直方图。
         valid = scenes["t1"]["masks"].valid & scenes["t2"]["masks"].valid
         for phase in ("t1", "t2"):
             for band in ("B04", "B08"):
                 valid &= scenes[phase]["dn"][band] > 0
+        if need_b11:
+            for phase in ("t1", "t2"):
+                valid &= (np.isfinite(scenes[phase]["dn"]["B11"])
+                          & (scenes[phase]["dn"]["B11"] > 0))
         _stage_progress(on_stage, "mask", 1, 3)
 
         valid_ratio = compute_valid_ratio(valid)
@@ -457,13 +526,16 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
         if verdict.warn:
             snapshot["warning"] = {"code": verdict.code, "message": verdict.message}
 
-        # NF4：先掩膜后缩放
+        # NF4：先掩膜后缩放。B11 与 10m 波段同走 _mask_then_scale → to_reflectance
+        # （ρ=DN/10000，B11 为 DN 量级，不额外缩放）；NDVI / NDWI 分支仍仅 4 波段、
+        # 逐字不变。need_b11 时 rho[phase] 额外含 "B11" 供 NDBI / NDMI 计算。
         rho = {}
+        rho_bands = _BANDS_10M + (("B11",) if need_b11 else ())
         for phase in ("t1", "t2"):
             baseline = scenes[phase]["baseline"]
             rho[phase] = {
                 band: _mask_then_scale(scenes[phase]["dn"][band], sensor, baseline, valid)
-                for band in _BANDS_10M
+                for band in rho_bands
             }
 
         # REQ-10：双时相真彩合成落盘 t1_composite.png / t2_composite.png
@@ -501,9 +573,10 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
             "artifacts": artifacts,
         })
 
-        # REQ-06/07：NDVI 走 ndvi(R,NIR)，NDWI 走 ndwi(G,NIR)；
-        # 后续 Δ / 阈值 / 三类判别 / 形态学 / 面积统计对两种指数完全一致。
-        # A3/B2：一次算齐 NDVI + NDWI（NDWI 场景也得到 NDVI），主检测指数口径不变。
+        # REQ-06/07：4 指数按 _INDEX_CALCS 分派（NDVI/NDWI/NDBI/NDMI）；
+        # 后续 Δ / 阈值 / 三类判别 / 形态学 / 面积统计对所有指数完全一致。
+        # A3/B2：主键走 _build_index(key)、辅助按 INDEX_AUXILIARY 取，且恒算齐
+        # NDVI + NDWI 供 A3 联合判据；NDVI / NDWI 主检测指数口径逐字不变。
         _stage_progress(on_stage, "index", 4, 6)
         pair_t1 = _build_pair_indexes(key, rho["t1"], profile, valid, run_id, snapshot)
         _stage_progress(on_stage, "index", 5, 6)
@@ -564,7 +637,7 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
             # NF9 可复现：幅值阈值与波段顺序入参数快照（不影响既有两法字段）。
             snapshot.update({
                 "cva_threshold": float(thr),
-                "cva_bands": [key, next(i for i in VALID_INDEXES if i != key)],
+                "cva_bands": [key, INDEX_AUXILIARY[key]],
             })
         else:
             d = delta_ndvi(idx_t2.data, idx_t1.data)
@@ -632,7 +705,8 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
         )
         _stage_progress(on_stage, "change_detect", 5, 6)
 
-        # A3 地物转移矩阵：NDVI/NDWI 联合判据（同一 valid 掩膜、同一像元面积）
+        # A3 地物转移矩阵：NDVI/NDWI 联合判据（同一 valid 掩膜、同一像元面积）；
+        # 对所有主指数（含 NDBI/NDMI）保持既有语义与数字口径，不改 landcover 算法。
         lc_t1 = classify_landcover(pair_t1["ndvi"], pair_t1["ndwi"], valid_mask=valid)
         lc_t2 = classify_landcover(pair_t2["ndvi"], pair_t2["ndwi"], valid_mask=valid)
         transition_summary = transition_matrix(
@@ -738,7 +812,7 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
             names=out_names, render_change=band_marked,
         )
         _stage_progress(on_stage, "render_export", 2, 3)
-        # 归档一份带 index 小写后缀的三件套副本：NDVI / NDWI 各自留存，互不覆盖；
+        # 归档一份带 index 小写后缀的三件套副本：4 指数各自留存，互不覆盖；
         # 回归法从 _reg 主名复制到 <index>_reg 归档名，差值法主名保持历史文件名。
         archive_names = (regression_archive_names(key)
                          if method_key == METHOD_REGRESSION

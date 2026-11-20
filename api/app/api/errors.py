@@ -41,7 +41,7 @@ class ApiError(Exception):
 
     ``message`` 可选覆写：EX*/SYS 文案原则上逐字取 ``ERROR_MESSAGES``；
     批次 D 模板参数校验按 EX1 口径报错（code=EX1），但文案需描述具体参数
-    （如「检测参数非法：index 须为 NDVI/NDWI」），故允许以中文覆写 message，
+    （如「检测参数非法：index 须为 NDVI / NDWI / NDBI / NDMI」），故允许以中文覆写 message，
     未传时行为与历史版本逐字一致。
     """
 

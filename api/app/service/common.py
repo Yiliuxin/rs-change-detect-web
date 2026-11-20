@@ -25,7 +25,8 @@ ARTIFACT_URL_PREFIX = "/api/v1/artifacts"
 # 产物文件名白名单 → Content-Type（REQ-10 / REQ-12 / REQ-14）。
 # 由 main.py 的静态端点（兼防穿越）与 run_service 的产物清单共用，避免两处漂移。
 # 主三件套保持历史文件名不变：NDVI 缺省行为、sample/report/e2e 链路均依赖它们。
-# 每个指数额外归档一份 ``<stem>_<index小写>.<ext>``，NDVI / NDWI 互不覆盖。
+# 每个指数额外归档一份 ``<stem>_<index小写>.<ext>``，4 指数（NDVI / NDWI /
+# NDBI / NDMI）各自留存、互不覆盖；白名单由 VALID_INDEXES 循环生成（逻辑不变）。
 # 双时相真彩合成固定名，供批次 2 卷帘对比消费。
 ARTIFACT_MEDIA_TYPES: Dict[str, str] = {
     "change.tif": "image/tiff",
@@ -146,7 +147,7 @@ def artifact_url(run_id: str, filename: str) -> str:
 
 
 def index_artifact_names(index: str) -> Dict[str, str]:
-    """主三件套名 → 带 index 小写后缀的归档名（NDVI / NDWI 互不覆盖）。"""
+    """主三件套名 → 带 index 小写后缀的归档名（4 指数互不覆盖，由 VALID_INDEXES 派生）。"""
     key = str(index).strip().upper()
     if key not in VALID_INDEXES:
         raise ValueError(f"不支持的指数：{index!r}，仅支持 {list(VALID_INDEXES)}")
