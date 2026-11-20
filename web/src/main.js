@@ -15,6 +15,7 @@ import * as C from './charts.js';
 import * as HIST from './history.js';
 import * as TMPL from './templates.js';
 import * as EXP from './experiments.js';
+import * as OV from './overview.js';
 import * as PATCH from './patch-card.js';
 import { ONLINE_PLACES } from './places.js';
 import { loadChinaPlaces, loadChinaProvinces, searchPlaces, boxAround, tierLabel } from './china-geo.js';
@@ -1866,9 +1867,9 @@ async function doExport(formats) {
 // 全部为新增状态与回调：离线 A~F、gate()、在线取数卡、既有 5 接口语义零变化。
 // ==========================================================================
 
-// 批次 E：结果卡页签白名单扩展到 5 个（thematic / swipe / sankey / method / sensitivity）
+// 结果卡页签白名单：批次 E 扩到 5 个，批次 H 再加 overview（默认 thematic 不变）
 function setResultView(view) {
-  const VIEWS = ['thematic', 'swipe', 'sankey', 'method', 'sensitivity'];
+  const VIEWS = ['thematic', 'swipe', 'sankey', 'method', 'sensitivity', 'overview'];
   const v = VIEWS.includes(view) ? view : 'thematic';
   document.querySelectorAll('#result-tabs .view-tab').forEach((b) => {
     const on = b.dataset.view === v;
@@ -1880,10 +1881,14 @@ function setResultView(view) {
   $('view-sankey').hidden = v !== 'sankey';
   $('view-method').hidden = v !== 'method';
   $('view-sensitivity').hidden = v !== 'sensitivity';
+  const ovView = $('view-overview');
+  if (ovView) ovView.hidden = v !== 'overview';
   if (v === 'thematic') C.resizeCharts();
   if (v === 'sankey') C.resizeSankey(); // 隐藏容器初始化时宽度为 0，切进来必须重算
   // 批次 E：两个实验页签的图表容器此前为 hidden（宽度 0），切进来必须重算
   if (v === 'method' || v === 'sensitivity') C.resizeExperiments();
+  // 批次 H：首次切到「总览」才异步加载接口数据，并重算两张图（隐藏容器宽度 0）
+  if (v === 'overview') OV.activateOverview();
 }
 
 // 本轮 /result/change 成功后同步卷帘图源（artifacts 为 {name:url} 清单）
@@ -2847,6 +2852,9 @@ function bindEvents() {
   document.querySelectorAll('#result-tabs .view-tab').forEach((b) => {
     b.onclick = () => setResultView(b.dataset.view);
   });
+  // 批次 H：历史面板顶部「总览」入口 → 切到右栏总览页签（数据懒加载由 setResultView 触发）
+  const histOverview = $('hist-overview-btn');
+  if (histOverview) histOverview.onclick = () => setResultView('overview');
   $('chk-pick-mode').addEventListener('change', (e) => togglePickMode(e.target.checked));
   SWIPE.initSwipe();
   HIST.initHistory({
@@ -2960,6 +2968,7 @@ function init() {
   window.addEventListener('resize', () => {
     try { if (map) map.resize(); } catch (_) { /* style 未就绪 */ }
     C.resizeCharts();
+    OV.resizeOverview(); // 批次 H：总览两张图随窗口重算，隐藏时无实例则空操作
   });
 }
 

@@ -296,6 +296,7 @@
               <button type="button" class="btn btn-sm btn-ghost" id="hist-refresh" title="从头重新加载历史运行列表">刷新列表</button>
               <button type="button" class="btn btn-sm btn-ghost" id="hist-retry" hidden title="加载失败后重试">重试</button>
               <button type="button" class="btn btn-sm btn-ghost" id="hist-compare-btn" title="选两个 run 对比面积与参数快照">对比</button>
+              <button type="button" class="btn btn-sm" id="hist-overview-btn" title="打开平台总览：run 总数、面积汇总、指数分布与最近运行摘要">总览</button>
             </div>
             <!-- 批次 D（REQ-14）：筛选条 —— 关键词（300ms 防抖）/ 指数 / 时间；
                  任一变化即 offset 归零重拉第一页，翻页沿用当前条件 -->
@@ -445,6 +446,7 @@
               <button type="button" class="view-tab" data-view="sankey" role="tab" aria-selected="false">转移流向</button>
               <button type="button" class="view-tab" data-view="method" role="tab" aria-selected="false">方法对比</button>
               <button type="button" class="view-tab" data-view="sensitivity" role="tab" aria-selected="false">敏感性</button>
+              <button type="button" class="view-tab" data-view="overview" role="tab" aria-selected="false">总览</button>
             </div>
             <div id="view-thematic">
             <div class="empty-state" id="result-empty">
@@ -607,6 +609,22 @@
                     title="请先运行敏感性分析再导出 CSV">导出 CSV</button>
                 </div>
                 <div class="err-line" id="exp-sens-csv-err"></div>
+              </div>
+            </div>
+
+            <!-- 批次 H · 平台总览仪表盘（GET /stats/overview，只读，首次点击才懒加载） -->
+            <div id="view-overview" hidden>
+              <div class="card-subtitle">平台总览<span class="readonly-badge">批次 H · 只读</span></div>
+              <div class="status-line" id="ov-status" hidden></div>
+              <div id="ov-body" hidden>
+                <div class="ov-cards" id="ov-cards"></div>
+                <div class="ov-skipped" id="ov-skipped" hidden></div>
+                <div class="card-subtitle">指数使用分布<span class="hint">按 run 数</span></div>
+                <div class="chart chart-ov" id="chart-ov-index"></div>
+                <div class="card-subtitle">最近运行 · 三类面积构成<span class="hint">增强 / 退化 / 稳定</span></div>
+                <div class="chart chart-ov" id="chart-ov-recent"></div>
+                <div class="card-subtitle">最近运行摘要<span class="hint" id="ov-recent-count">—</span></div>
+                <div class="ov-table-wrap"><table class="tbl ov-table" id="ov-table"></table></div>
               </div>
             </div>
           </section>

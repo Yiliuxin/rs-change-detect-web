@@ -1098,3 +1098,26 @@ input[type="range"]:disabled { opacity: .45; cursor: not-allowed; }
   font-size: 10px; color: var(--accent2); background: rgba(31, 122, 224, .08);
   font-variant-numeric: tabular-nums;
 }
+
+/* ===== 批次 H · 平台总览仪表盘（结果卡「总览」页签） ===== */
+/* 四张数据卡：2×2 网格，复用 .metric 卡片样式 */
+.ov-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.ov-cards .metric .v { font-size: 13px; }
+/* skipped > 0 的如实跳过提示（黄底，区别于红色错误态） */
+.ov-skipped {
+  margin-top: 8px; padding: 6px 9px; border-radius: 8px;
+  font-size: 10.5px; line-height: 1.6; color: #8a6308;
+  background: #fff8e6; border: 1px solid rgba(185, 126, 15, .35);
+}
+.ov-warn-mark {
+  display: inline-grid; place-items: center; width: 15px; height: 15px;
+  margin-right: 5px; border-radius: 50%; background: var(--warn); color: #fff;
+  font-size: 10px; font-weight: 800; vertical-align: 1px;
+}
+/* 总览两张图：略高于默认 .chart，保证堆积条形图类目标签可读 */
+.chart-ov { height: 240px; }
+/* 摘要表 8 列在窄栏下横向滚动，不挤压数字 */
+.ov-table-wrap { overflow-x: auto; }
+.ov-table { min-width: 560px; font-size: 10.5px; }
+.ov-table th, .ov-table td { padding: 4px 5px; }
+.ov-table code { font-size: 10px; color: var(--accent2); }

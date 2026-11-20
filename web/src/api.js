@@ -466,6 +466,16 @@ async function apiGet(path, asBlob = false) {
   return asBlob ? resp.blob() : resp.json();
 }
 
+// ==========================================================================
+// 批次 H：平台总览仪表盘 —— GET /api/v1/stats/overview（JWT 由 fetchWithTimeout 自动附带）。
+// 走既有 apiGet（与 listRuns / getRunDetail 同源），不新增请求通道、不改任何既有导出。
+// 该只读接口空数据返回零值结构；失败 / 超时由 apiGet 抛错，交由 overview.js 内联中文空态承接，
+// 绝不降级吞错、绝不污染既有 5 接口与演示降级层。
+// ==========================================================================
+export function getStatsOverview() {
+  return apiGet('/stats/overview');
+}
+
 // GET /report/area_stats/{run_id}.csv → Blob（含 UTF-8 BOM），由调用方 Blob URL 同源下载
 export function exportAreaStatsCsv(runId) {
   return apiGet('/report/area_stats/' + encodeURIComponent(runId) + '.csv', true);
