@@ -17,6 +17,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Request
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
 from app.api.deps import ensure_run_owner
@@ -25,7 +26,8 @@ from app.api.v1.schemas import ErrorResponse
 from app.config.constants import (
     COMPARE_MAX_VARIANTS, ERROR_MESSAGES, VALID_CHANGE_METHODS, VALID_INDEXES,
 )
-from app.service import experiment_service
+from app.repository import task_repo
+from app.service import experiment_service, run_service
 
 router = APIRouter(prefix="/result", tags=["Experiments"])
 
@@ -148,3 +150,77 @@ def sensitivity(request: Request, payload: SensitivityRequest) -> SensitivityRes
     ensure_experiment_owner(request, payload.run_id)
     data = experiment_service.sensitivity(payload.run_id, force=payload.force)
     return SensitivityResponse(**data)
+
+
+# --------------------------------------------------------------------------- #
+# 批次 F · 只读实验数据 CSV 导出（REQ-12/14）
+#
+# 严格只读：只从 experiments.json 缓存读，绝不调用 compare() / sensitivity()、
+# 绝不重算、绝不写缓存、绝不落盘。force 接受但**忽略**。
+# 他人 / 不存在 run → 404 EX2；缓存未命中 → 404 EX3（请先在页面执行实验）。
+# --------------------------------------------------------------------------- #
+@router.post(
+    "/compare/csv",
+    response_class=PlainTextResponse,
+    responses={
+        400: {"model": ErrorResponse,
+              "description": "EX1 / EX12 变体参数非法（同主接口签名口径）"},
+        404: {"model": ErrorResponse,
+              "description": "EX2 run 不存在 / 无权访问；EX3 缓存未命中（请先在页面执行实验）"},
+        500: {"model": ErrorResponse, "description": "SYS-*"},
+    },
+    summary="方法对比 CSV 导出（UTF-8 BOM，只读缓存，不触发重算）",
+)
+def compare_csv(request: Request, payload: CompareRequest) -> PlainTextResponse:
+    """POST /result/compare/csv（批次 F · REQ-12/14）。
+
+    入参与 ``/result/compare`` 完全相同（``force`` 接受但**忽略**）。以与主接口
+    完全相同的签名定位缓存；未命中 404 EX3，绝不悄悄复算。
+    """
+    ensure_experiment_owner(request, payload.run_id)
+    # AUTH_DISABLED=1 时 ensure_run_owner 直通且不查 run，必须显式判空 → EX2(404)
+    if not task_repo.get_task(payload.run_id):
+        raise ApiError("EX2", run_id=payload.run_id, message=ERROR_MESSAGES["EX2"])
+    cached = experiment_service.read_compare_cached(
+        payload.run_id, [v.model_dump() for v in payload.variants],
+    )
+    if cached is None:
+        raise ApiError("EX3", run_id=payload.run_id, http_status=404,
+                       message="请先在页面执行实验")
+    return PlainTextResponse(
+        content=run_service.CSV_BOM + experiment_service.compare_csv(cached),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition":
+                 f'attachment; filename="compare_{payload.run_id[:8]}.csv"'},
+    )
+
+
+@router.post(
+    "/sensitivity/csv",
+    response_class=PlainTextResponse,
+    responses={
+        404: {"model": ErrorResponse,
+              "description": "EX2 run 不存在 / 无权访问；EX3 缓存未命中（请先在页面执行实验）"},
+        500: {"model": ErrorResponse, "description": "SYS-*"},
+    },
+    summary="阈值敏感性 CSV 导出（UTF-8 BOM，只读缓存，不触发重算）",
+)
+def sensitivity_csv(request: Request, payload: SensitivityRequest) -> PlainTextResponse:
+    """POST /result/sensitivity/csv（批次 F · REQ-12/14）。
+
+    入参与 ``/result/sensitivity`` 相同（``force`` 接受但**忽略**）；只读缓存，
+    未命中 404 EX3，不调用 sensitivity()、不写缓存、不落盘。
+    """
+    ensure_experiment_owner(request, payload.run_id)
+    if not task_repo.get_task(payload.run_id):
+        raise ApiError("EX2", run_id=payload.run_id, message=ERROR_MESSAGES["EX2"])
+    cached = experiment_service.read_sensitivity_cached(payload.run_id)
+    if cached is None:
+        raise ApiError("EX3", run_id=payload.run_id, http_status=404,
+                       message="请先在页面执行实验")
+    return PlainTextResponse(
+        content=run_service.CSV_BOM + experiment_service.sensitivity_csv(cached),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition":
+                 f'attachment; filename="sensitivity_{payload.run_id[:8]}.csv"'},
+    )

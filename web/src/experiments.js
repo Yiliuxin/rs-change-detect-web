@@ -39,6 +39,11 @@ const E = {
   busyCompare: false,
   busySens: false,
   candidates: [],
+  // 批次 F：CSV 导出请求态 + 最近一次成功实验的签名入参（CSV 端点只读缓存，靠该签名命中）
+  busyCompareCsv: false,
+  busySensCsv: false,
+  lastCompare: null,   // { runId, variants } —— variants 与 compare 提交入参完全一致
+  sensRunId: '',       // 最近一次成功敏感性分析对应 run_id（CSV 只需 run_id）
 };
 const DEPS = { getRunId: null, getBase: null };
 
@@ -190,7 +195,8 @@ const SENS_STAGES = [
 
 // ---------- 批次 E：按钮门控（无 run 置灰 + title；请求期间置灰） ----------
 function syncButtons() {
-  const has = !!(DEPS.getRunId && DEPS.getRunId());
+  const runId = (DEPS.getRunId && DEPS.getRunId()) || '';
+  const has = !!runId;
   const noRun = '请先运行变化检测或载入历史运行';
   const bc = $('btn-exp-compare');
   if (bc) {
@@ -201,6 +207,25 @@ function syncButtons() {
   if (bs) {
     bs.disabled = !has || E.busySens;
     bs.title = has ? '运行敏感性分析：以基准 T 扫描五档阈值' : noRun;
+  }
+  // 批次 F：CSV 按钮 —— 结果区显示（最近一次成功实验）后才可用；无 run / 请求中禁用
+  const bcc = $('btn-exp-compare-csv');
+  if (bcc) {
+    const ready = !!E.lastCompare && E.lastCompare.runId === runId;
+    bcc.disabled = !has || !ready || E.busyCompare || E.busyCompareCsv;
+    bcc.title = ready
+      ? '导出方法对比 CSV（只读实验缓存，POST /result/compare/csv）'
+      : (has ? '请先运行对比实验再导出 CSV' : noRun);
+    if (!E.busyCompareCsv) bcc.textContent = '导出 CSV';
+  }
+  const bsc = $('btn-exp-sensitivity-csv');
+  if (bsc) {
+    const ready = !!has && E.sensRunId === runId;
+    bsc.disabled = !has || !ready || E.busySens || E.busySensCsv;
+    bsc.title = ready
+      ? '导出阈值敏感性 CSV（只读实验缓存，POST /result/sensitivity/csv）'
+      : (has ? '请先运行敏感性分析再导出 CSV' : noRun);
+    if (!E.busySensCsv) bsc.textContent = '导出 CSV';
   }
 }
 
@@ -331,6 +356,11 @@ function bind() {
   if (bc) bc.onclick = openCompareModal;
   const bs = $('btn-exp-sensitivity');
   if (bs) bs.onclick = runSensitivity;
+  // 批次 F：两个「导出 CSV」按钮绑定（结果区显示后才由 syncButtons 解除禁用）
+  const bcc = $('btn-exp-compare-csv');
+  if (bcc) bcc.onclick = onExportCompareCsv;
+  const bsc = $('btn-exp-sensitivity-csv');
+  if (bsc) bsc.onclick = onExportSensitivityCsv;
 
   const modal = $('exp-modal');
   if (modal) {
@@ -483,6 +513,8 @@ async function runCompare(variants) {
     if (r.ok) {
       if ((DEPS.getRunId && DEPS.getRunId()) !== runId) return; // run 已切换，丢弃过期结果
       renderCompareResult(r.data);
+      // 批次 F：记住本次成功实验的提交入参；CSV 端点按同一 variants 签名只读命中缓存
+      E.lastCompare = { runId, variants: variants.map((v) => ({ ...v })) };
     } else {
       showInlineError('exp-method-err', r);
     }
@@ -511,6 +543,8 @@ async function runSensitivity() {
     if (r.ok) {
       if ((DEPS.getRunId && DEPS.getRunId()) !== runId) return; // run 已切换，丢弃过期结果
       renderSensitivityResult(r.data);
+      // 批次 F：敏感性 CSV 只需 run_id；记录结果区显示所属 run，避免导出错 run
+      E.sensRunId = runId;
     } else {
       showInlineError('exp-sens-err', r);
     }
@@ -524,13 +558,85 @@ async function runSensitivity() {
   }
 }
 
+// ---------- 批次 F：实验结果 CSV 导出（只读缓存，POST /result/compare/csv · /result/sensitivity/csv） ----------
+// 文件名与后端 Content-Disposition 同名：compare_<run_id 前8位>.csv / sensitivity_<run_id 前8位>.csv。
+function csvFilename(prefix, runId) {
+  return prefix + '_' + String(runId || '').slice(0, 8) + '.csv';
+}
+
+// 方法对比：CSV 入参同 compare（variants 原样回传，缓存签名才能命中），force:false 固定下发。
+async function onExportCompareCsv() {
+  if (E.busyCompareCsv) return;
+  const runId = (DEPS.getRunId && DEPS.getRunId()) || '';
+  // 结果区显示且签名入参归属当前 run 才允许导出（避免导出错 run 的 CSV）
+  if (!runId || !E.lastCompare || E.lastCompare.runId !== runId) return;
+  const btn = $('btn-exp-compare-csv');
+  E.busyCompareCsv = true;
+  if (btn) { btn.disabled = true; btn.textContent = '导出中…'; }
+  const err = $('exp-method-csv-err');
+  if (err) err.textContent = '';
+  try {
+    const r = await api.exportCompareCsv({
+      run_id: runId,
+      variants: E.lastCompare.variants,
+      force: false,
+    });
+    if ((DEPS.getRunId && DEPS.getRunId()) !== runId) return; // run 已切换，丢弃过期结果
+    if (r.ok) {
+      // 复用 downloadArtifact 抽出的同一 Blob 下载通道，不另写一套下载逻辑
+      api.downloadBlob(r.blob, csvFilename('compare', runId));
+    } else {
+      // 后端中文提示内联展示（EX3 → 「请先在页面执行实验」），不臆造语义、不弹全局横幅
+      showInlineError('exp-method-csv-err', r);
+    }
+  } catch (e) {
+    // 判别式返回不应抛异常；兜底内联，绝不产生未捕获 JS 异常
+    showInlineError('exp-method-csv-err', { message: (e && e.message) || '' });
+  } finally {
+    E.busyCompareCsv = false;
+    syncButtons();
+  }
+}
+
+// 阈值敏感性：CSV 入参只需 run_id（+ force:false），结果区显示后才可用。
+async function onExportSensitivityCsv() {
+  if (E.busySensCsv) return;
+  const runId = (DEPS.getRunId && DEPS.getRunId()) || '';
+  if (!runId || E.sensRunId !== runId) return;
+  const btn = $('btn-exp-sensitivity-csv');
+  E.busySensCsv = true;
+  if (btn) { btn.disabled = true; btn.textContent = '导出中…'; }
+  const err = $('exp-sens-csv-err');
+  if (err) err.textContent = '';
+  try {
+    const r = await api.exportSensitivityCsv({ run_id: runId, force: false });
+    if ((DEPS.getRunId && DEPS.getRunId()) !== runId) return; // run 已切换，丢弃过期结果
+    if (r.ok) {
+      api.downloadBlob(r.blob, csvFilename('sensitivity', runId));
+    } else {
+      showInlineError('exp-sens-csv-err', r);
+    }
+  } catch (e) {
+    showInlineError('exp-sens-csv-err', { message: (e && e.message) || '' });
+  } finally {
+    E.busySensCsv = false;
+    syncButtons();
+  }
+}
+
 // ---------- 批次 E：run 变化时清空上一次实验结果，避免展示错 run 的数据 ----------
 export function onRunChanged() {
   ['exp-method-result', 'exp-sens-result'].forEach((id) => { const el = $(id); if (el) el.hidden = true; });
   ['exp-method-empty', 'exp-sens-empty'].forEach((id) => { const el = $(id); if (el) el.hidden = false; });
-  ['exp-method-err', 'exp-sens-err', 'exp-method-meta', 'exp-sens-meta', 'exp-sens-conclusion']
+  ['exp-method-err', 'exp-sens-err', 'exp-method-meta', 'exp-sens-meta', 'exp-sens-conclusion',
+    'exp-method-csv-err', 'exp-sens-csv-err']
     .forEach((id) => { const el = $(id); if (el) el.textContent = ''; });
   ['exp-method-table', 'exp-sens-table'].forEach((id) => { const el = $(id); if (el) el.innerHTML = ''; });
+  // 批次 F：清空最近一次成功实验的签名入参与 CSV 请求态，避免导出错 run 的 CSV
+  E.lastCompare = null;
+  E.sensRunId = '';
+  E.busyCompareCsv = false;
+  E.busySensCsv = false;
   syncButtons();
 }
 

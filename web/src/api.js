@@ -505,6 +505,22 @@ export async function artifactObjectUrl(url) {
 // 「无法下载 - 需要授权」。方案：先 fetch（带 Bearer）取成 Blob，再用 blob: URL 触发下载，
 // 与 artifactObjectUrl 同一口径；下载完即回收 objectURL，不进复用缓存。
 // ==========================================================================
+// 批次 F：把「Blob → <a download> → 4s 后回收 objectURL」的落盘动作抽成公共通道，
+// 供 GET 产物下载（downloadArtifact）与实验结果 CSV 下载（experiments.js 直接传 Blob）共用，
+// 不另写第二套下载逻辑。downloadArtifact 的 GET 行为（含 4s revoke、返回 true）完全不变。
+export function downloadBlob(blob, filename) {
+  if (!blob) return false;
+  const objUrl = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = objUrl;
+  a.download = filename || 'download';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.setTimeout(() => URL.revokeObjectURL(objUrl), 4000);
+  return true;
+}
+
 export async function downloadArtifact(url, filename) {
   const u = String(url || '');
   if (!u) return false;
@@ -519,15 +535,7 @@ export async function downloadArtifact(url, filename) {
     if (err) throw err;
     throw new Error('下载失败（HTTP ' + resp.status + '）');
   }
-  const objUrl = URL.createObjectURL(await resp.blob());
-  const a = document.createElement('a');
-  a.href = objUrl;
-  a.download = filename || 'download';
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  window.setTimeout(() => URL.revokeObjectURL(objUrl), 4000);
-  return true;
+  return downloadBlob(await resp.blob(), filename);
 }
 
 // GET /runs?limit=&offset=&q=&index=&days= → { total, limit, offset, items:[...] }（按 created_at 倒序）
@@ -741,4 +749,48 @@ export function compareVariants(payload) {
 // POST /result/sensitivity：{run_id, force}
 export function thresholdSensitivity(payload) {
   return onlineCall('/result/sensitivity', jsonOptions(payload), EXPERIMENT_TIMEOUT_MS, false);
+}
+
+// ==========================================================================
+// 批次 F（实验结果 CSV 导出）：POST /result/compare/csv · POST /result/sensitivity/csv
+//   - 两个端点只读 experiments.json 缓存、不触发重算；body 与 compare / sensitivity 完全相同，
+//     force:false 固定下发（后端接受但忽略），variants 原样回传才能命中缓存签名。
+//   - 只读缓存很快，走 fetchWithTimeout（TIMEOUT_MS、注入 Bearer + 401 跳登录）即可，
+//     不需要批次 E 那套 90s 长超时通道。
+//   - 判别式返回（绝不抛未捕获异常、绝不做演示降级、绝不弹全局横幅，由 experiments.js 内联展示）：
+//       { ok:true,  blob }                                成功（text/csv，UTF-8 BOM）
+//       { ok:false, code, message, run_id, status }      后端业务错误体（EX2 run 不存在 / EX3 缓存未命中）
+//       { ok:false, unavailable:true, status }           网络失败 / 超时 / 裸错误页
+// ==========================================================================
+async function experimentCsv(path, payload) {
+  let resp;
+  try {
+    resp = await fetchWithTimeout(BASE + path, jsonOptions(payload || {}));
+  } catch (_) {
+    return { ok: false, unavailable: true, status: 0 };
+  }
+  if (resp.ok) {
+    try {
+      return { ok: true, blob: await resp.blob() };
+    } catch (_) {
+      return { ok: false, unavailable: true, status: resp.status };
+    }
+  }
+  const err = await safeError(resp);
+  if (err) {
+    return { ok: false, code: err.code, message: err.message, run_id: err.run_id, status: resp.status };
+  }
+  return { ok: false, unavailable: true, status: resp.status };
+}
+
+// POST /result/compare/csv：{run_id, variants:[{index,method,threshold_mode,threshold}], force:false}
+// → text/csv（UTF-8 BOM），后端 Content-Disposition 文件名 compare_<run_id 前8位>.csv。
+export function exportCompareCsv(payload) {
+  return experimentCsv('/result/compare/csv', payload);
+}
+
+// POST /result/sensitivity/csv：{run_id, force:false} → text/csv（UTF-8 BOM），
+// 后端 Content-Disposition 文件名 sensitivity_<run_id 前8位>.csv。
+export function exportSensitivityCsv(payload) {
+  return experimentCsv('/result/sensitivity/csv', payload);
 }

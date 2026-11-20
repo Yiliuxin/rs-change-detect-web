@@ -554,6 +554,12 @@
                 <div class="exp-note" id="exp-method-meta"></div>
                 <div class="chart exp-chart" id="chart-method"></div>
                 <div class="exp-table-wrap"><table class="tbl exp-table" id="exp-method-table"></table></div>
+                <!-- 批次 F：方法对比 CSV 导出（POST /result/compare/csv，只读实验缓存、不触发重算） -->
+                <div class="btn-row gap-top">
+                  <button type="button" class="btn btn-sm" id="btn-exp-compare-csv"
+                    title="请先运行对比实验再导出 CSV">导出 CSV</button>
+                </div>
+                <div class="err-line" id="exp-method-csv-err"></div>
               </div>
             </div>
 
@@ -579,6 +585,12 @@
                 <div class="exp-conclusion" id="exp-sens-conclusion"></div>
                 <div class="exp-table-wrap"><table class="tbl exp-table" id="exp-sens-table"></table></div>
                 <div class="exp-note exp-note-strong">敏感性只扫人工可调的阈值维度；Otsu 自适应阈值场景以 Otsu 值为基准 T 进行扫描。过渡带为证据不足标记，不并入三类面积。</div>
+                <!-- 批次 F：阈值敏感性 CSV 导出（POST /result/sensitivity/csv，只读实验缓存、不触发重算） -->
+                <div class="btn-row gap-top">
+                  <button type="button" class="btn btn-sm" id="btn-exp-sensitivity-csv"
+                    title="请先运行敏感性分析再导出 CSV">导出 CSV</button>
+                </div>
+                <div class="err-line" id="exp-sens-csv-err"></div>
               </div>
             </div>
           </section>

@@ -24,12 +24,14 @@ from app.algorithm.writers import (
 )
 from app.api.errors import ApiError, as_api_error
 from app.config.constants import (
+    EXPERIMENTS_CACHE_COMPARE_KEY, EXPERIMENTS_CACHE_SENSITIVITY_KEY,
     EXPORT_FORMATS, METHOD_OTSU, METHOD_REGRESSION, RESULT_BUCKET,
 )
 from app.config.storage import (
     StorageSettings, ensure_buckets, get_client, upload_file,
 )
 from app.repository import task_repo
+from app.service import experiment_service
 from app.service.common import (
     artifact_url, export_zip_name, git_short_commit,
     regression_artifact_names, run_dir,
@@ -58,9 +60,31 @@ _FORMAT_FILE_REG = {
     "geojson": regression_artifact_names()["geojson"],
 }
 
-__all__ = ["export"]
+__all__ = ["export", "experiment_sections_from_cache"]
 
 logger = logging.getLogger(__name__)
+
+
+def experiment_sections_from_cache(run_id: str) -> Dict[str, Optional[dict]]:
+    """批次 F · 只读：取 PDF「实验分析」章节数据（REQ-12/14）。
+
+    导出时**只读**一次 ``experiment_service.read_cache(run_id)``：绝不写缓存、
+    绝不触发 compare() / sensitivity() 复算、绝不产生新 run。``compare`` 是
+    「签名 → 响应」字典，可能多条，**如实取 computed_at 最大的一条**（不编造、
+    不改缓存）；``sensitivity`` 为响应 dict 或 None。两者皆无时返回两个 None，
+    writers 会整段不输出该章节。
+    """
+    cache = experiment_service.read_cache(run_id)
+    compare_map = cache.get(EXPERIMENTS_CACHE_COMPARE_KEY)
+    candidates = [v for v in (compare_map.values() if isinstance(compare_map, dict) else [])
+                  if isinstance(v, dict)]
+    latest = (max(candidates, key=lambda item: str(item.get("computed_at") or ""))
+              if candidates else None)
+    sens = cache.get(EXPERIMENTS_CACHE_SENSITIVITY_KEY)
+    return {
+        "compare": latest,
+        "sensitivity": sens if isinstance(sens, dict) else None,
+    }
 
 
 def _files_for(method: str) -> Dict[str, str]:
@@ -107,6 +131,10 @@ def export(run_id: str, formats: List[str]) -> dict:
                 raise ApiError("SYS-01", run_id=run_id,
                                detail="结果产物不存在，请先执行 /result/change")
             report: Dict = json.loads(meta_path.read_text(encoding="utf-8"))
+            # 批次 F：导出时只读一次实验复算缓存 → 注入 PDF「实验分析」章节数据。
+            # 只注入内存 report（export_triplet 的 enriched=dict(report) 原样带给 write_pdf）；
+            # 绝不写缓存、绝不触发复算、绝不产生新 run。
+            report["experiments"] = experiment_sections_from_cache(run_id)
             snapshot: Optional[dict] = report.get("params_snapshot")
             # 回归法 run 只有 _reg 三件套：按快照的 method 选文件名，绝不误读/覆盖差值法主名
             method = str((snapshot or {}).get("method") or report.get("method") or METHOD_OTSU)

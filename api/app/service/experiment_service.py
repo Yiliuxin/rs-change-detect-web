@@ -62,6 +62,13 @@ __all__ = [
     "ExperimentContext", "load_context", "agreement_pct", "recompute",
     "validate_variants", "compare", "sensitivity",
     "cache_path", "read_cache", "write_cache",
+    # 批次 F：只读实验数据出报告 / CSV（REQ-12/14）
+    "sensitivity_best_interval", "sensitivity_conclusion",
+    "compare_rows", "sensitivity_rows", "compare_csv", "sensitivity_csv",
+    "read_compare_cached", "read_sensitivity_cached",
+    "COMPARE_CSV_HEADER", "SENSITIVITY_CSV_HEADER",
+    "COMPARE_COLUMNS_ZH", "COMPARE_COLUMNS_EN",
+    "SENSITIVITY_COLUMNS_ZH", "SENSITIVITY_COLUMNS_EN",
 ]
 
 
@@ -694,3 +701,259 @@ def sensitivity(run_id: str, force: bool = False) -> dict:
     cache[EXPERIMENTS_CACHE_SENSITIVITY_KEY] = response
     write_cache(run_id, cache)
     return response
+
+
+# --------------------------------------------------------------------------- #
+# 批次 F · 只读实验数据出报告 / CSV（REQ-12/14 / EX3）
+#
+# 严格只读：以下函数一律基于 read_cache 的命中结果做**格式化 / 结论文案**，
+# 绝不调用 compare() / sensitivity()、绝不重算、绝不写缓存、绝不落盘产物。
+# 缓存缺字段一律标「—」，不补算、不补零、不臆造。
+# CSV 文本一律不含 BOM（BOM 由路由层加），行尾 ``\r\n``，与 run_service 同款。
+# --------------------------------------------------------------------------- #
+_DASH: str = "—"
+# 面积 ha / 占比 % / 阈值 T / 倍数的小数位：CSV 与 PDF 共用同一口径（统一小数位）
+_EXP_AREA_DIGITS: int = 2
+_EXP_PCT_DIGITS: int = 2
+_EXP_T_DIGITS: int = 4
+_EXP_SCALE_DIGITS: int = 1
+
+COMPARE_CSV_HEADER: str = (
+    "类型,指数,方法,阈值方式,阈值T,增强_ha,退化_ha,稳定_ha,过渡带占比_%,一致率_%"
+)
+SENSITIVITY_CSV_HEADER: str = "倍数,阈值T,增强_ha,退化_ha,稳定_ha,过渡带占比_%"
+# PDF 表头（中文 / 英文退化）；与 CSV 列名同源，逐字对齐批次 F 契约
+COMPARE_COLUMNS_ZH: Tuple[str, ...] = (
+    "指数", "方法", "阈值方式", "阈值T", "增强_ha", "退化_ha", "稳定_ha",
+    "过渡带占比_%", "一致率_%",
+)
+COMPARE_COLUMNS_EN: Tuple[str, ...] = (
+    "INDEX", "METHOD", "MODE", "THRESHOLD T", "ENHANCED ha", "DEGRADED ha",
+    "STABLE ha", "TRANSITION %", "AGREEMENT %",
+)
+SENSITIVITY_COLUMNS_ZH: Tuple[str, ...] = (
+    "倍数", "阈值T", "增强_ha", "退化_ha", "稳定_ha", "过渡带占比_%",
+)
+SENSITIVITY_COLUMNS_EN: Tuple[str, ...] = (
+    "SCALE", "THRESHOLD T", "ENHANCED ha", "DEGRADED ha", "STABLE ha",
+    "TRANSITION %",
+)
+
+
+def _text_or_dash(value) -> str:
+    """缓存缺字段（None / 空串）一律标「—」，绝不补算。"""
+    if value is None:
+        return _DASH
+    text = str(value).strip()
+    return text if text else _DASH
+
+
+def _num_or_dash(value, digits: int) -> str:
+    """数值按统一小数位格式化；缺失 / 非数 / 非有限 → 「—」（不补零、不补算）。"""
+    if value is None or value == "":
+        return _DASH
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return _DASH
+    if not math.isfinite(num):
+        return _DASH
+    return f"{num:.{digits}f}"
+
+
+def _areas_ha(areas) -> Tuple[str, str, str]:
+    """按 change_class 1/2/3 取 area_ha（增强 / 退化 / 稳定）；缺类或缺值 → 「—」。"""
+    by_class: Dict[int, object] = {}
+    if isinstance(areas, (list, tuple)):
+        for item in areas:
+            if not isinstance(item, dict):
+                continue
+            try:
+                code = int(item.get("change_class"))
+            except (TypeError, ValueError):
+                continue
+            by_class[code] = item.get("area_ha")
+    return tuple(  # type: ignore[return-value]
+        _num_or_dash(by_class.get(int(code)), _EXP_AREA_DIGITS)
+        for code in CHANGE_CODES
+    )
+
+
+def _areas_map(areas) -> Dict[int, float]:
+    """逐字移植前端 ``areasMap``：按 change_class 1/2/3 累加 area_ha 并各自保留 2 位。"""
+    acc = {1: 0.0, 2: 0.0, 3: 0.0}
+    if isinstance(areas, (list, tuple)):
+        for item in areas:
+            if not isinstance(item, dict):
+                continue
+            try:
+                code = int(item.get("change_class"))
+            except (TypeError, ValueError):
+                continue
+            if code in (1, 2, 3):
+                try:
+                    value = float(item.get("area_ha") or 0)
+                except (TypeError, ValueError):
+                    value = 0.0
+                acc[code] += value
+    return {code: round(acc[code], _EXP_AREA_DIGITS) for code in (1, 2, 3)}
+
+
+def _scale_value(value) -> float:
+    """scale → float（缺字段兜底 0.0，仅用于排序 / 相邻档偏差，不进任何响应）。"""
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return num if math.isfinite(num) else 0.0
+
+
+def _sorted_sweep(sweep) -> List[dict]:
+    """按 scale 升序返回**新的** list（不改动缓存对象本身）。"""
+    items = [r for r in (sweep if isinstance(sweep, (list, tuple)) else [])
+             if isinstance(r, dict)]
+    return sorted(items, key=lambda r: _scale_value(r.get("scale")))
+
+
+def sensitivity_best_interval(sweep) -> Optional[dict]:
+    """相邻档「增强+退化面积合计」变化绝对值最大的一档（逐字移植前端 sensConclusion）。
+
+    返回 ``{"delta", "from", "to", "dev"}`` 或 None（无可比较相邻档）。
+    只做只读结构化，绝不重算、绝不写缓存、绝不改 sensitivity() 响应结构。
+    """
+    items = _sorted_sweep(sweep)
+    best: Optional[dict] = None
+    for i in range(1, len(items)):
+        frm, to = items[i - 1], items[i]
+        a_frm, a_to = _areas_map(frm.get("areas")), _areas_map(to.get("areas"))
+        sum_frm = round(a_frm[1] + a_frm[2], _EXP_AREA_DIGITS)
+        sum_to = round(a_to[1] + a_to[2], _EXP_AREA_DIGITS)
+        delta = abs(sum_to - sum_frm)
+        f_scale = _scale_value(frm.get("scale"))
+        t_scale = _scale_value(to.get("scale"))
+        dev = max(abs(f_scale - 1), abs(t_scale - 1))
+        if best is None or delta > best["delta"]:
+            best = {"delta": delta, "from": f_scale, "to": t_scale, "dev": dev}
+    return best
+
+
+def sensitivity_conclusion(sweep) -> str:
+    """敏感性自动结论文案（文案与算法逐字移植前端 sensConclusion，不重新措辞）。
+
+    供 PDF「实验分析」章节使用；**不改 sensitivity() 响应结构、不往缓存塞 conclusion**。
+    """
+    best = sensitivity_best_interval(sweep)
+    if best is None:
+        return "本次扫描未返回可比较的相邻档，无法给出敏感区间（如实说明，不作定性结论）。"
+    x = int(math.floor(best["dev"] * 100 + 0.5))          # JS Math.round（dev ≥ 0）
+    d = f"{round(best['delta'], _EXP_AREA_DIGITS):.{_EXP_AREA_DIGITS}f}"
+    frm = f"{best['from']:.{_EXP_SCALE_DIGITS}f}×"         # JS fmtScale：一位小数 + ×
+    to = f"{best['to']:.{_EXP_SCALE_DIGITS}f}×"
+    return (
+        f"结果对阈值敏感区间在 ±{x}%：最陡档 {frm}→{to}"
+        f"，增强＋退化面积合计变化 {d} ha（数字全部取自本次五档实测扫描）。"
+    )
+
+
+def compare_rows(response) -> List[List[str]]:
+    """方法对比 9 列纯文本行（基准行 + 每个变体行），CSV 与 PDF 共用同一口径。
+
+    列：指数 / 方法 / 阈值方式 / 阈值T / 增强_ha / 退化_ha / 稳定_ha /
+    过渡带占比_% / 一致率_%。基准行一致率恒为「—」，缺字段一律「—」，绝不补算。
+    """
+    data = response if isinstance(response, dict) else {}
+    rows: List[List[str]] = []
+    base = data.get("base")
+    if isinstance(base, dict):
+        mode = base.get("threshold_source")
+        if mode is None:
+            mode = base.get("threshold_mode")
+        a1, a2, a3 = _areas_ha(base.get("areas"))
+        rows.append([
+            _text_or_dash(base.get("index")),
+            _text_or_dash(base.get("method")),
+            _text_or_dash(mode),
+            _num_or_dash(base.get("threshold"), _EXP_T_DIGITS),
+            a1, a2, a3,
+            _num_or_dash(base.get("transition_pct"), _EXP_PCT_DIGITS),
+            _DASH,  # 基准行一致率
+        ])
+    variants = data.get("variants")
+    for item in (variants if isinstance(variants, (list, tuple)) else []):
+        if not isinstance(item, dict):
+            continue
+        cfg = item.get("config") if isinstance(item.get("config"), dict) else {}
+        a1, a2, a3 = _areas_ha(item.get("areas"))
+        rows.append([
+            _text_or_dash(cfg.get("index")),
+            _text_or_dash(cfg.get("method")),
+            _text_or_dash(cfg.get("threshold_mode")),
+            _num_or_dash(item.get("threshold"), _EXP_T_DIGITS),
+            a1, a2, a3,
+            _num_or_dash(item.get("transition_pct"), _EXP_PCT_DIGITS),
+            _num_or_dash(item.get("agreement_pct"), _EXP_PCT_DIGITS),
+        ])
+    return rows
+
+
+def sensitivity_rows(response) -> List[List[str]]:
+    """敏感性 6 列纯文本行（按 scale 升序，一档一行），CSV 与 PDF 共用同一口径。"""
+    data = response if isinstance(response, dict) else {}
+    rows: List[List[str]] = []
+    for item in _sorted_sweep(data.get("sweep")):
+        a1, a2, a3 = _areas_ha(item.get("areas"))
+        scale_text = _num_or_dash(item.get("scale"), _EXP_SCALE_DIGITS)
+        scale_cell = _DASH if scale_text == _DASH else scale_text + "×"
+        rows.append([
+            scale_cell,
+            _num_or_dash(item.get("t"), _EXP_T_DIGITS),
+            a1, a2, a3,
+            _num_or_dash(item.get("transition_pct"), _EXP_PCT_DIGITS),
+        ])
+    return rows
+
+
+def compare_csv(response) -> str:
+    """方法对比 CSV 文本（**不含 BOM**，BOM 由路由加）；表头 + 基准行 + 每个变体行。"""
+    data = response if isinstance(response, dict) else {}
+    has_base = isinstance(data.get("base"), dict)
+    lines = [COMPARE_CSV_HEADER]
+    for idx, row in enumerate(compare_rows(response)):
+        kind = "基准" if (has_base and idx == 0) else "变体"
+        lines.append(",".join([kind, *row]))
+    return "\r\n".join(lines) + "\r\n"
+
+
+def sensitivity_csv(response) -> str:
+    """敏感性 CSV 文本（**不含 BOM**）；表头 + 按 scale 升序每档一行。"""
+    lines = [SENSITIVITY_CSV_HEADER]
+    for row in sensitivity_rows(response):
+        lines.append(",".join(row))
+    return "\r\n".join(lines) + "\r\n"
+
+
+def read_compare_cached(run_id: str, variants) -> Optional[dict]:
+    """批次 F · 只读：以与 :func:`compare` **完全相同**的签名定位缓存条目。
+
+    链：``_load_meta → validate_variants → _signature → read_cache()[compare][signature]``。
+    未命中返回 None；绝不调用 compare()、绝不重算、绝不写缓存、绝不落盘产物。
+    task 不存在 → EX2(404)；变体非法 → EX12 / EX1（与主接口同口径）。
+    """
+    meta = _load_meta(run_id)
+    normalized = validate_variants(variants, meta, run_id=run_id)
+    signature = _signature(normalized)
+    cache = read_cache(run_id)
+    compare_map = cache.get(EXPERIMENTS_CACHE_COMPARE_KEY)
+    if isinstance(compare_map, dict):
+        hit = compare_map.get(signature)
+        if isinstance(hit, dict):
+            return hit
+    return None
+
+
+def read_sensitivity_cached(run_id: str) -> Optional[dict]:
+    """批次 F · 只读：取 sensitivity 缓存条目；未命中返回 None，不调用 sensitivity()。"""
+    _load_meta(run_id)  # 与 sensitivity() 一样先兜底判 task 存在 → EX2(404)
+    cache = read_cache(run_id)
+    cached = cache.get(EXPERIMENTS_CACHE_SENSITIVITY_KEY)
+    return cached if isinstance(cached, dict) else None

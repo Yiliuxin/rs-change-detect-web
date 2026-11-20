@@ -780,6 +780,122 @@ def write_pdf(report: dict, output_path, font_path: str = DEFAULT_FONT_PATH) -> 
               color=(150, 30, 30))
         _ascii_line(LANDCOVER_NOTE_EN, gap=14)
 
+    # —— 批次 F：实验分析（只读实验复算缓存；compare / sensitivity 两者皆无则整段不输出，REQ-12/14）——
+    # 章节渲染只做 Table / 纯 ASCII 检索行：行数据、结论文案的唯一业务源在
+    # app.service.experiment_service（PDF 渲染时延迟 import，避免 algorithm 顶层依赖 service 层）。
+    experiments = report.get("experiments")
+    exp_compare = experiments.get("compare") if isinstance(experiments, dict) else None
+    exp_sens = experiments.get("sensitivity") if isinstance(experiments, dict) else None
+    exp_compare = exp_compare if isinstance(exp_compare, dict) else None
+    exp_sens = exp_sens if isinstance(exp_sens, dict) else None
+    experiments_section = False
+    experiments_compare_rows = 0
+    experiments_sensitivity_rows = 0
+    experiments_conclusion = ""
+    experiments_sources: List[str] = []
+
+    if exp_compare is not None or exp_sens is not None:
+        from app.service import experiment_service as _exp_service
+
+        experiments_section = True
+        _ensure(200)
+        _line(L("实验分析 / EXPERIMENT ANALYSIS", "EXPERIMENT ANALYSIS"),
+              size=11.5, gap=20, color=(0, 60, 130))
+        # 纯 ASCII 章节标识：章节不存在时整段（连标题）都不输出，字节里无此串
+        _ascii_line("EXPERIMENT ANALYSIS: READ-ONLY EXPERIMENTS CACHE", gap=15)
+
+        def _source_note(payload: dict) -> str:
+            """「数据来源：只读实验复算缓存，computed_at <时间>」，缺字段如实标「—」。"""
+            when = payload.get("computed_at")
+            when_text = str(when).strip() if when not in (None, "") else "—"
+            return L("数据来源：只读实验复算缓存，computed_at " + when_text,
+                     "SOURCE: READ-ONLY EXPERIMENTS CACHE, computed_at " + when_text)
+
+        # ---- 方法对比：基准行 + 每个变体行（9 列，缓存缺字段一律「—」，绝不补算）----
+        if exp_compare is not None:
+            exp_cmp_rows = _exp_service.compare_rows(exp_compare)
+            experiments_compare_rows = len(exp_cmp_rows)
+            cmp_when = str(exp_compare.get("computed_at") or "—")
+            experiments_sources.append("compare computed_at=" + cmp_when)
+            _ensure(160 + 14 * len(exp_cmp_rows))
+            _line(L("方法对比实验 / METHOD COMPARISON", "METHOD COMPARISON"),
+                  size=10, gap=16)
+            _line(_source_note(exp_compare), size=8.5, gap=14, color=(90, 90, 90))
+            _ascii_line("EXPERIMENT ANALYSIS SOURCE COMPARE computed_at=" +
+                        ("NA" if cmp_when == "—" else cmp_when), gap=14)
+            exp_cmp_data = [[L(zh, en) for zh, en in zip(
+                _exp_service.COMPARE_COLUMNS_ZH, _exp_service.COMPARE_COLUMNS_EN)]]
+            exp_cmp_data.extend(exp_cmp_rows)
+            exp_cmp_table = Table(exp_cmp_data,
+                                  colWidths=[46, 46, 58, 58, 55, 55, 55, 68, 68])
+            exp_cmp_table.setStyle(TableStyle([
+                ("FONTNAME", (0, 0), (-1, -1), font_name),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#DCE6F1")),
+                ("ALIGN", (1, 0), (-1, -1), "CENTER"),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ]))
+            _, exp_cmp_h = exp_cmp_table.wrap(page_w - 2 * left, page_h)
+            exp_cmp_table.drawOn(pdf, left, y - exp_cmp_h)
+            y -= exp_cmp_h + 14
+            _ascii_line(f"EXPERIMENT ANALYSIS COMPARE ROWS={len(exp_cmp_rows)}", gap=15)
+
+        # ---- 阈值敏感性：五档表（按 scale 升序）+ 自动结论文案 ----
+        if exp_sens is not None:
+            exp_sens_rows = _exp_service.sensitivity_rows(exp_sens)
+            experiments_sensitivity_rows = len(exp_sens_rows)
+            sens_when = str(exp_sens.get("computed_at") or "—")
+            experiments_sources.append("sensitivity computed_at=" + sens_when)
+            experiments_conclusion = _exp_service.sensitivity_conclusion(
+                exp_sens.get("sweep"))
+            _ensure(190 + 14 * len(exp_sens_rows))
+            _line(L("阈值敏感性实验 / THRESHOLD SENSITIVITY", "THRESHOLD SENSITIVITY"),
+                  size=10, gap=16)
+            _line(_source_note(exp_sens), size=8.5, gap=14, color=(90, 90, 90))
+            _ascii_line("EXPERIMENT ANALYSIS SOURCE SENSITIVITY computed_at=" +
+                        ("NA" if sens_when == "—" else sens_when), gap=14)
+            exp_sens_data = [[L(zh, en) for zh, en in zip(
+                _exp_service.SENSITIVITY_COLUMNS_ZH,
+                _exp_service.SENSITIVITY_COLUMNS_EN)]]
+            exp_sens_data.extend(exp_sens_rows)
+            exp_sens_table = Table(exp_sens_data,
+                                   colWidths=[68, 84, 84, 84, 84, 102])
+            exp_sens_table.setStyle(TableStyle([
+                ("FONTNAME", (0, 0), (-1, -1), font_name),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#DCE6F1")),
+                ("ALIGN", (1, 0), (-1, -1), "CENTER"),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ]))
+            _, exp_sens_h = exp_sens_table.wrap(page_w - 2 * left, page_h)
+            exp_sens_table.drawOn(pdf, left, y - exp_sens_h)
+            y -= exp_sens_h + 12
+            _ascii_line(f"EXPERIMENT ANALYSIS SENSITIVITY ROWS={len(exp_sens_rows)}",
+                        gap=14)
+            # 自动结论文案（中文，按 46 个全角字符保守折行；英文退化字体下不绘制中文，
+            # 关键数字由下方纯 ASCII 检索行覆盖，结论原文仍在返回 dict 里可断言）
+            if cn_ok:
+                for seg in (experiments_conclusion[i:i + 46]
+                            for i in range(0, len(experiments_conclusion), 46)):
+                    _line(seg, size=9, gap=13, color=(70, 70, 70))
+            # 关键数值另给纯 ASCII 检索行（TTFont 中文字形会被编码）
+            best = _exp_service.sensitivity_best_interval(exp_sens.get("sweep"))
+            if best is None:
+                _ascii_line("EXPERIMENT ANALYSIS CONCLUSION: NO COMPARABLE ADJACENT SCALES",
+                            gap=15)
+            else:
+                _ascii_line(
+                    "EXPERIMENT ANALYSIS CONCLUSION: PLUSMINUS="
+                    f"{int(math.floor(best['dev'] * 100 + 0.5))}% "
+                    f"FROM={best['from']:.1f}X TO={best['to']:.1f}X "
+                    f"DELTA_HA={round(best['delta'], 2):.2f}", gap=15)
+
     # —— 独立数据署名页（REQ-15 / NF6 / NF7）：逐字复用常量源文案 ——
     _new_page()
     _line(L("数据署名 / DATA ATTRIBUTION", "DATA ATTRIBUTION"), size=15, gap=26)
@@ -825,6 +941,12 @@ def write_pdf(report: dict, output_path, font_path: str = DEFAULT_FONT_PATH) -> 
         # 批次 B3：便于测试 / 验收直接取回写入 PDF 的结论原文（老 run 为空串）
         "conclusion": conclusion,
         "conclusion_ascii": str(report.get("conclusion_ascii") or ""),
+        # 批次 F：实验分析章节的渲染结果（便于 pytest / 验收直接断言，不改动既有字段）
+        "experiments_section": experiments_section,
+        "experiments_compare_rows": experiments_compare_rows,
+        "experiments_sensitivity_rows": experiments_sensitivity_rows,
+        "experiments_conclusion": experiments_conclusion,
+        "experiments_sources": experiments_sources,
     }
 
 
