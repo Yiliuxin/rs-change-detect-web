@@ -430,6 +430,11 @@ THRESHOLD_MODE_MANUAL: Final[str] = "manual"
 VALID_THRESHOLD_MODES: Final[Tuple[str, ...]] = (THRESHOLD_MODE_OTSU, THRESHOLD_MODE_MANUAL)
 # 阈值敏感性 5 档倍率（相对基准 T = |params_snapshot["threshold"]|）；档位与上限取自常量源。
 SENSITIVITY_SCALES: Final[Tuple[float, ...]] = (0.8, 0.9, 1.0, 1.1, 1.2)
+# 批次 K · 阈值滑块实时预览：单倍数范围与步进（前端 slider 写死同款值，越界 → EX12/400）。
+# 注意：扩展这里不影响 SENSITIVITY_SCALES 五档与 sensitivity 缓存签名。
+RECLASS_SCALE_MIN: Final[float] = 0.6
+RECLASS_SCALE_MAX: Final[float] = 1.4
+RECLASS_SCALE_STEP: Final[float] = 0.05
 # 只读实验缓存文件（位于 runs/<run_id>/，受 .gitignore 保护）与缓存结构版次。
 EXPERIMENTS_CACHE_FILE: Final[str] = "experiments.json"
 EXPERIMENTS_CACHE_VERSION: Final[int] = 1

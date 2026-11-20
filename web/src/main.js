@@ -47,6 +47,11 @@ const S = {
   sceneMatch: null, sceneKey: '', sceneBusy: false,
   change: null, changePngUrl: null, changeBusy: false,
   opacity: 0.85,
+  // 批次 K：阈值滑块只读预览（内存态，刷新即回基准；绝不写 run / experiments.json）
+  reclass: {
+    scale: 1, baseThreshold: null, basePngUrl: null,
+    busy: false, seq: 0, timer: null, preview: null, note: '',
+  },
   samples: [], sampleSeq: 0, curClass: 1, accuracy: null, accBusy: false,
   exportResult: null, exportBusy: false,
   csvBusy: false,
@@ -822,6 +827,8 @@ function fallbackPatchUrl(runId) {
 // 结果卡 / 参数快照 / 卷帘 / 导出 / 图上点选 run 标签，保证两条路径渲染口径完全一致。
 function applyChangeResult(data) {
   S.change = data;
+  // 批次 K：新 run → 阈值预览复位到基准 1.0×（纯内存，不写 run / 缓存）
+  resetReclassState(data);
   const arts = (data && typeof data.artifacts === 'object' && data.artifacts) || {};
   // 产物图受 JWT 保护，必须走带 token 的 fetch → blob URL（否则地图 401 无颜色）
   const loadImage = async (raw) => {
@@ -835,6 +842,7 @@ function applyChangeResult(data) {
     const png = await loadImage(rawPng);
     if (!png) return;      // 取图失败（缺产物 / 会话过期）→ 不覆盖地图，静默保留上一张
     S.changePngUrl = png;
+    if (!S.reclass.preview) S.reclass.basePngUrl = png;  // 批次 K：「还原」用的基准图
     if (S.aoi) {
       M.setImage(map, png, S.aoi);
       M.setImageOpacity(map, S.opacity);
@@ -1161,11 +1169,14 @@ function renderChangeResult() {
     cbox.hidden = !conclusion;
     $('conclusion-text').textContent = conclusion;
   }
-  $('threshold-val').textContent = d.threshold != null ? Number(d.threshold).toFixed(3) : '—';
+  // 批次 K：预览态用复算阈值（4 位小数，与批次 E 敏感性表口径一致），基准态沿用同精度
+  const pv = S.reclass.preview;
+  const shownThreshold = pv ? pv.threshold : d.threshold;
+  $('threshold-val').textContent = shownThreshold != null ? Number(shownThreshold).toFixed(4) : '—';
   $('runid-val').textContent = d.run_id || '—';
   const method = String(d.method || snap.method || 'otsu').toLowerCase();
   $('method-val').textContent = METHOD_LABELS[method] || method || '—';
-  const stats = d.stats || [];
+  const stats = (pv && pv.stats) || d.stats || [];
   const totalPx = stats.reduce((a, s) => a + Number(s.pixel_count || 0), 0);
   const names = { 1: '增强', 2: '退化', 3: '稳定', 4: '过渡带（不确定）' };
   const colors = { 1: '#21a04c', 2: '#d94c3d', 3: '#5b7a99', 4: '#969696' };
@@ -1175,11 +1186,11 @@ function renderChangeResult() {
     const pct = totalPx ? (Number(s.pixel_count || 0) / totalPx * 100).toFixed(1) + '%' : '—';
     html += `<tr data-change-class="${c}"><td><span class="sw-sm" style="background:${colors[c] || '#999'}"></span>${c} ${esc(names[c] || '—')}</td>`
       + `<td>${esc(s.pixel_count != null ? Number(s.pixel_count).toLocaleString() : '—')}</td>`
-      + `<td>${esc(s.area_ha != null ? Number(s.area_ha).toFixed(1) : '—')}</td>`
+      + `<td>${esc(s.area_ha != null ? Number(s.area_ha).toFixed(2) : '—')}</td>`
       + `<td>${pct}</td></tr>`;
   }
   // 批次 B1：过渡带单列展示（证据不足，不是第四类变化，不并入三类 stats / 饼图）
-  const band = d.transition_band || snap.transition_band || null;
+  const band = (pv && pv.transition_band) || d.transition_band || snap.transition_band || null;
   if (band && band.pixel_count != null) {
     const bpct = band.ratio != null ? (Number(band.ratio) * 100).toFixed(1) + '%' : '—';
     html += `<tr data-change-class="4" class="band-row"><td><span class="sw-sm" style="background:${colors[4]}"></span>4 ${esc(names[4])}</td>`
@@ -1194,12 +1205,131 @@ function renderChangeResult() {
   C.renderPie($('chart-pie'), stats);
   C.renderBar($('chart-bar'), stats);
   // 批次 D11：直方图标题按实际指数动态化（ΔNDBI / ΔNDMI 不再显示成 ΔNDVI）
-  const hist = d.index_histogram || snap.index_histogram || null;
+  const hist = (pv && pv.index_histogram) || d.index_histogram || snap.index_histogram || null;
   C.renderDeltaHistogram($('chart-delta-hist'), hist, indexName);
   const histNote = $('delta-hist-note');
   if (histNote) histNote.hidden = !hist;
   renderIntensityAndPatches();
   renderTransition();
+}
+
+// ===== 批次 K · 阈值滑块实时预览（只读复算；刷新回基准，绝不写 run / experiments.json） =====
+function resetReclassState(data) {
+  const st = S.reclass;
+  if (st.timer) { clearTimeout(st.timer); st.timer = null; }
+  st.seq += 1;                       // 作废在途请求，避免旧 run 的预览结果覆盖新 run
+  st.scale = 1;
+  const snap = (data && data.params_snapshot) || {};
+  const base = data && data.threshold != null ? data.threshold : snap.threshold;
+  st.baseThreshold = base != null && Number.isFinite(Number(base)) ? Number(base) : null;
+  st.basePngUrl = null;
+  st.busy = false;
+  st.preview = null;
+  st.note = '';
+  const slider = $('reclass-slider');
+  if (slider) slider.value = '1';
+  updateReclassUi();
+}
+
+function updateReclassUi() {
+  const bar = $('reclass-bar');
+  if (!bar) return;
+  const st = S.reclass;
+  bar.hidden = !(S.change && S.change.run_id);
+  const scale = Number(st.scale);
+  const base = Number(st.baseThreshold);
+  const target = Number.isFinite(base) && Number.isFinite(scale) ? base * scale : NaN;
+  const sv = $('reclass-scale-val');
+  if (sv) sv.textContent = Number.isFinite(scale) ? scale.toFixed(2) + '×' : '—';
+  const tv = $('reclass-thr-val');
+  if (tv) tv.textContent = Number.isFinite(target) ? target.toFixed(4) : '—';
+  const state = $('reclass-state');
+  if (state) state.textContent = st.note || (st.busy ? '重算中…' : '');
+  const reset = $('btn-reclass-reset');
+  if (reset) reset.disabled = !st.preview && Math.abs(scale - 1) < 1e-9;
+  const legend = $('reclass-legend-scale');
+  if (legend) {
+    legend.textContent = st.preview
+      ? `色带：预览 ${scale.toFixed(2)}× · T=${Number(st.preview.threshold).toFixed(4)}`
+      : `色带：基准 ${scale.toFixed(2)}×`;
+  }
+}
+
+function applyReclassResult(rv) {
+  const st = S.reclass;
+  st.preview = rv;
+  if (rv && rv.change_png_data && S.aoi) {
+    S.changePngUrl = rv.change_png_data;
+    M.setImage(map, rv.change_png_data, S.aoi);   // 保持原 bounds，地图不跳动
+    M.setImageOpacity(map, S.opacity);
+  }
+  renderChangeResult();   // 三类面积/过渡带/直方图/图例联动；不触发 EXP.onRunChanged()
+  updateReclassUi();
+}
+
+async function doReclass(scale) {
+  const st = S.reclass;
+  const runId = S.change && S.change.run_id;
+  if (!runId || !Number.isFinite(Number(scale))) return;
+  const seq = ++st.seq;
+  st.busy = true;
+  st.note = '';
+  updateReclassUi();                              // 请求期间地图保持当前渲染 + 「重算中…」
+  try {
+    const r = await api.reclass({ run_id: runId, scale });
+    if (seq !== st.seq) return;                    // 快速拖动：丢弃过期响应
+    if (r.demo || !r.data) {
+      st.note = '重算超时，请稍后重试（已保留原渲染）';
+      return;
+    }
+    const rv = r.data;
+    if (Math.abs(Number(rv.scale) - Number(scale)) > 1e-6) return;
+    applyReclassResult(rv);
+  } catch (e) {
+    if (seq !== st.seq) return;
+    st.note = '重算失败，已保留原渲染';
+    handleErr(e);                                  // {code,message,run_id} → 中文提示
+  } finally {
+    if (seq === st.seq) { st.busy = false; updateReclassUi(); }
+  }
+}
+
+function onReclassSliderInput() {
+  const slider = $('reclass-slider');
+  if (!slider) return;
+  const scale = Number(slider.value);
+  S.reclass.scale = scale;
+  S.reclass.note = '';
+  updateReclassUi();                              // 倍数 / 换算阈值即时反馈
+  if (S.reclass.timer) clearTimeout(S.reclass.timer);
+  S.reclass.timer = setTimeout(() => doReclass(scale), 300);   // 300ms debounce
+}
+
+function resetReclass() {
+  const st = S.reclass;
+  if (st.timer) { clearTimeout(st.timer); st.timer = null; }
+  st.seq += 1;                                    // 作废在途请求
+  st.busy = false;
+  st.scale = 1;
+  st.preview = null;
+  st.note = '';
+  const slider = $('reclass-slider');
+  if (slider) slider.value = '1';
+  if (st.basePngUrl && S.aoi) {
+    S.changePngUrl = st.basePngUrl;
+    M.setImage(map, st.basePngUrl, S.aoi);
+    M.setImageOpacity(map, S.opacity);
+  }
+  renderChangeResult();
+  updateReclassUi();
+}
+
+function bindReclass() {
+  const slider = $('reclass-slider');
+  if (slider) slider.addEventListener('input', onReclassSliderInput);
+  const reset = $('btn-reclass-reset');
+  if (reset) reset.addEventListener('click', resetReclass);
+  updateReclassUi();
 }
 
 // ===== A1 五档强度表 / A2 图斑统计（无数据整块隐藏；历史 run 从 params_snapshot 取） =====
@@ -1806,6 +1936,8 @@ function loadHistoryRun(d) {
     index_histogram: snap.index_histogram || null,
     artifacts: artMap, // 图斑详情卡的 t1/t2 合成图缩略同源
   };
+  // 批次 K：历史回看同样复位到基准 T，绝不把上一张图的预览态带到别的 run
+  resetReclassState(S.change);
   PATCH.loadPatches(map, firstArtifactUrl(artMap, PATCH_GEOJSON_NAMES)
     || fallbackPatchUrl(d.run_id));
   S.changePngUrl = png;
@@ -1826,6 +1958,7 @@ function loadHistoryRun(d) {
         if (t2Url) M.setLayerImage(map, 't2', t2Url, b);
         if (pngUrl) {
           S.changePngUrl = pngUrl;
+          if (!S.reclass.preview) S.reclass.basePngUrl = pngUrl;  // 批次 K：还原用
           M.setImage(map, pngUrl, b);   // 用该 run 的 bbox 定位专题图，不覆盖用户当前 AOI 输入
           M.setImageOpacity(map, S.opacity);
           M.fitBounds(map, b, 90);
@@ -2613,6 +2746,7 @@ function bindEvents() {
     if (label) label.textContent = v + '%';
   });
   bindLayerPanel();
+  bindReclass();   // 批次 K：阈值滑块实时预览
 
   document.querySelectorAll('.mode-btn').forEach((b) => {
     b.onclick = () => {

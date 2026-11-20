@@ -1074,3 +1074,27 @@ input[type="range"]:disabled { opacity: .45; cursor: not-allowed; }
 .exp-variant-row.is-off .exp-variant-fields { opacity: .5; }
 /* 批次 D11：只读实验只能复算基准 run 已落盘两个指数，其余指数候选的提示 */
 .exp-variant-note { margin-top: 5px; padding-left: 21px; font-size: 10px; line-height: 1.5; color: var(--warn); }
+
+/* ===== 批次 K：阈值滑块实时预览（专题图所见即所得） ===== */
+.reclass-bar {
+  margin-top: 8px; padding: 8px 10px; border-radius: 9px;
+  border: 1px solid rgba(31, 122, 224, .28); background: var(--accent-soft);
+}
+.reclass-head {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px;
+  font-size: 11px; color: var(--muted);
+}
+.reclass-title { font-weight: 700; color: var(--accent2); }
+.reclass-scale { font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums; }
+.reclass-thr b { color: var(--txt); font-variant-numeric: tabular-nums; }
+.reclass-state { color: var(--warn); min-height: 14px; }
+.reclass-bar input[type="range"] { width: 100%; margin: 6px 0 2px; accent-color: var(--accent); }
+.reclass-ticks {
+  display: flex; justify-content: space-between;
+  font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums;
+}
+.legend-scale {
+  margin: 0 0 6px; padding: 3px 6px; border-radius: 6px;
+  font-size: 10px; color: var(--accent2); background: rgba(31, 122, 224, .08);
+  font-variant-numeric: tabular-nums;
+}

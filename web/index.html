@@ -382,6 +382,8 @@
           <!-- B1 图层面板：三层显隐 + 各自透明度 + 三类色块图例（REQ-10） -->
           <div id="map-legend" class="map-legend layer-panel">
             <h4>图层控制 · 变化色带</h4>
+            <!-- 批次 K：图例随阈值预览倍数联动（色板不变，倍数/阈值文字同步） -->
+            <div class="legend-scale" id="reclass-legend-scale">色带：基准 1.00×</div>
             <div class="layer-row">
               <label class="chk layer-chk"><input type="checkbox" id="layer-t1" checked /> t1 真彩</label>
               <input type="range" id="layer-t1-opacity" min="0" max="100" value="100" aria-label="t1 真彩不透明度" />
@@ -467,6 +469,20 @@
                 <div class="metric"><div class="k" id="threshold-label" title="|Δ| 超过该阈值才判为变化；ΔNDBI 越大越偏建成区/不透水面，ΔNDMI 越大植被水分越高">变化阈值 Δ指数</div><div class="v" id="threshold-val">—</div></div>
                 <div class="metric"><div class="k">run_id</div><div class="v v-sm" id="runid-val">—</div></div>
                 <div class="metric"><div class="k">检测方法</div><div class="v" id="method-val">—</div></div>
+              </div>
+              <!-- 批次 K：阈值实时预览（0.6×~1.4× / 步进 0.05；只读复算，刷新回基准） -->
+              <div class="reclass-bar" id="reclass-bar" hidden>
+                <div class="reclass-head">
+                  <span class="reclass-title">阈值实时预览</span>
+                  <span class="reclass-scale" id="reclass-scale-val">1.00×</span>
+                  <span class="reclass-thr">换算阈值 T=<b id="reclass-thr-val">—</b></span>
+                  <span class="reclass-state" id="reclass-state"></span>
+                  <button type="button" class="btn btn-sm" id="btn-reclass-reset"
+                    title="还原到基准 1.00×（页面刷新亦回到基准）" disabled>还原</button>
+                </div>
+                <input type="range" id="reclass-slider" min="0.6" max="1.4" step="0.05"
+                  value="1" aria-label="阈值倍数实时预览" />
+                <div class="reclass-ticks"><span>0.6×</span><span>1.0×</span><span>1.4×</span></div>
               </div>
               <div class="preset-hint" id="threshold-hint">Δ 指数物理含义：ΔNDVI 上升代表植被恢复、ΔNDWI 上升代表水体扩张；ΔNDBI 越大越偏建成区 / 不透水面，ΔNDMI 越大植被水分越高（NDBI / NDMI 依赖 B11 短波红外）。三类专题图、直方图与转移矩阵口径不随指数改变。</div>
               <div class="gap-top"><table class="tbl" id="stats-table"></table></div>

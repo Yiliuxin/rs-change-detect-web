@@ -21,11 +21,13 @@
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import math
 import os
 import tempfile
+import warnings
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,22 +35,26 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import rasterio
+from rasterio.errors import NotGeoreferencedWarning
+from rasterio.io import MemoryFile
 
 from app.algorithm.change_detector import (
-    CHANGE_CODES, CHANGE_NODATA, M2_PER_HA, change_stats, classify_change,
-    delta_ndvi, transition_band_mask, transition_band_stats,
+    CHANGE_CODES, CHANGE_NODATA, CHANGE_TRANSITION, M2_PER_HA, change_stats,
+    classify_change, delta_ndvi, transition_band_mask, transition_band_stats,
 )
 from app.algorithm.cva_detector import detect_change_cva
 from app.algorithm.morphology import clean_change_map
 from app.algorithm.otsu import otsu_threshold
 from app.algorithm.regression_detector import detect_change_regression
+from app.algorithm.renderer import build_change_canvas
 from app.api.errors import ApiError
 from app.config.constants import (
     COMPARE_MAX_VARIANTS, ERROR_MESSAGES, EXPERIMENTS_CACHE_COMPARE_KEY,
     EXPERIMENTS_CACHE_FILE, EXPERIMENTS_CACHE_SENSITIVITY_KEY,
     EXPERIMENTS_CACHE_SIGNATURE_LEN, EXPERIMENTS_CACHE_VERSION,
     INDEX_AUXILIARY, INDEX_RASTER_T1, INDEX_RASTER_T2, MANUAL_THRESHOLD_RANGE,
-    METHOD_CVA, METHOD_OTSU, METHOD_REGRESSION, SENSITIVITY_SCALES,
+    METHOD_CVA, METHOD_OTSU, METHOD_REGRESSION, RECLASS_SCALE_MAX,
+    RECLASS_SCALE_MIN, RECLASS_SCALE_STEP, SENSITIVITY_SCALES,
     THRESHOLD_MODE_MANUAL, THRESHOLD_MODE_OTSU, VALID_CHANGE_METHODS,
     VALID_INDEXES, VALID_THRESHOLD_MODES,
 )
@@ -60,7 +66,7 @@ _BASE_CHANGE_DIFF = "change.tif"
 
 __all__ = [
     "ExperimentContext", "load_context", "agreement_pct", "recompute",
-    "validate_variants", "compare", "sensitivity",
+    "validate_variants", "compare", "sensitivity", "reclass",
     "cache_path", "read_cache", "write_cache",
     # 批次 F：只读实验数据出报告 / CSV（REQ-12/14）
     "sensitivity_best_interval", "sensitivity_conclusion",
@@ -299,7 +305,8 @@ def recompute(ctx: ExperimentContext, index: str, method: str,
     求值，其余口径不变；``threshold_mode=otsu`` 时对 hist_src 自适应求阈值，
     ``manual`` 时用给定阈值。阈值一律取 ``abs(float(T))`` 传给 ``classify_change``。
     返回 dict 含 config / threshold / areas(恒 3 项) / transition_pct /
-    change / valid / valid_count（后三者仅供内存计算 agreement，不进响应缓存）。
+    change / valid / valid_count / band_mask（后四者仅供内存计算 agreement
+    与批次 K 的只读预览渲染，不进响应缓存）。
     """
     idx = str(index).strip().upper()
     mth = str(method).strip().lower()
@@ -383,6 +390,7 @@ def recompute(ctx: ExperimentContext, index: str, method: str,
         "change": change,
         "valid": valid,
         "valid_count": valid_count,
+        "band_mask": band_mask,
     }
 
 
@@ -701,6 +709,105 @@ def sensitivity(run_id: str, force: bool = False) -> dict:
     cache[EXPERIMENTS_CACHE_SENSITIVITY_KEY] = response
     write_cache(run_id, cache)
     return response
+
+
+# --------------------------------------------------------------------------- #
+# 批次 K · 阈值滑块实时预览（单倍数、严格只读）
+#
+# 与批次 E 共用同一 recompute 管线（detect → classify → clean → stats →
+# transition_band），因此 0.8× / 1.2× 的数字与 sensitivity 对应档**完全同口径**。
+# 差异仅在编排：不扫五档、不读不写 experiments.json、不落盘任何产物、不改
+# run 的基准参数；专题图 PNG 在内存渲染后以 data URL 随响应返回。
+# --------------------------------------------------------------------------- #
+def _validate_reclass_scale(scale, run_id: str) -> float:
+    """倍数校验：有限数 / [0.6, 1.4] / 0.05 网格，越界一律中文 EX12(400)。"""
+    try:
+        s = float(scale)
+    except (TypeError, ValueError):
+        raise ApiError(
+            "EX12", run_id=run_id,
+            message=(f"倍数需为 {RECLASS_SCALE_MIN:.1f}×~{RECLASS_SCALE_MAX:.1f}× "
+                     "之间的有限数"),
+        ) from None
+    if not math.isfinite(s) or not (RECLASS_SCALE_MIN <= s <= RECLASS_SCALE_MAX):
+        raise ApiError(
+            "EX12", run_id=run_id,
+            message=(f"倍数需落在 {RECLASS_SCALE_MIN:.1f}×~{RECLASS_SCALE_MAX:.1f}×"
+                     f"（步进 {RECLASS_SCALE_STEP:.2f}）"),
+        )
+    grid = round(s / RECLASS_SCALE_STEP) * RECLASS_SCALE_STEP
+    if abs(s - grid) > 1e-6:
+        raise ApiError(
+            "EX12", run_id=run_id,
+            message=f"倍数需为 {RECLASS_SCALE_STEP:.2f} 的整数倍",
+        )
+    return float(s)
+
+
+def _canvas_png_data_url(canvas: np.ndarray) -> str:
+    """内存 PNG → data URL（rasterio PNG，绝不落盘）。"""
+    arr = np.ascontiguousarray(canvas)
+    bands = np.moveaxis(arr, -1, 0)
+    with MemoryFile() as mem:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", NotGeoreferencedWarning)
+            with mem.open(driver="PNG", width=int(arr.shape[1]),
+                          height=int(arr.shape[0]), count=3, dtype="uint8") as dst:
+                dst.write(bands)
+        raw = mem.read()
+    return "data:image/png;base64," + base64.b64encode(raw).decode("ascii")
+
+
+def reclass(run_id: str, scale) -> dict:
+    """POST /result/reclass 编排（批次 K · 单倍数只读复算）。
+
+    ``t = scale * |base_threshold|``，用基准 index/method 走 ``recompute``
+    （``t_override=t``）——与 ``sensitivity`` 同档数字逐项一致。只做只读
+    上下文加载 + 内存渲染：不读缓存、不写 experiments.json、不产生新 run、
+    不落盘 GeoTIFF/PNG/GeoJSON/PDF，也不改 task.params_snapshot。
+    页面刷新后前端回到基准 1.0×；服务端不保存任何预览状态。
+    """
+    s = _validate_reclass_scale(scale, run_id)
+    ctx = load_context(run_id)          # 内含 _load_meta：不存在 run → EX2(404)
+    base_t = abs(float(ctx.base_threshold))
+    t = s * base_t
+    r = recompute(ctx, ctx.base_index, ctx.base_method, t_override=t)
+
+    # 内存渲染三类着色 + 过渡带旁路标记，与检测时专题图口径一致（不落盘）
+    marked = np.asarray(r["change"]).copy()
+    band_mask = np.asarray(r["band_mask"], dtype=bool)
+    marked[band_mask] = CHANGE_TRANSITION
+    valid = np.asarray(r["valid"], dtype=bool)
+    valid_ratio = (float(r["valid_count"]) / float(valid.size)) if valid.size else 0.0
+    canvas, _info = build_change_canvas(
+        marked, valid_ratio, run_id=run_id,
+        params_snapshot=ctx.snapshot, otsu_threshold=float(r["threshold"]),
+    )
+    png_data = _canvas_png_data_url(canvas)
+
+    # 过渡带与直方图阈值线：沿用同一 band 常量，只换阈值 T，分布本身不变
+    band_summary = transition_band_stats(
+        band_mask, int(r["valid_count"]), float(ctx.pixel_area_m2),
+        float(r["threshold"]),
+    )
+    hist = dict(ctx.snapshot.get("index_histogram") or {})
+    if hist:
+        hist["threshold"] = float(r["threshold"])
+        hist["band_low"] = float(band_summary["band_low"])
+        hist["band_high"] = float(band_summary["band_high"])
+
+    return {
+        "run_id": run_id,
+        "scale": float(s),
+        "base_threshold": float(base_t),
+        "threshold": float(r["threshold"]),
+        "stats": r["areas"],
+        "transition_pct": float(r["transition_pct"]),
+        "transition_band": band_summary,
+        "index_histogram": hist,
+        "change_png_data": png_data,
+        "computed_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 # --------------------------------------------------------------------------- #

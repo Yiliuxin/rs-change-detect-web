@@ -311,6 +311,17 @@ export function runChange(payload) {
   );
 }
 
+// ---------- 批次 K：阈值滑块实时预览（单倍数只读复算，不产生新 run） ----------
+// 后端 0.1~0.2s 内返回；网络/超时时 call 走 demo 降级，由结果卡显示兜底文案。
+export function reclass(payload) {
+  return call(
+    '/result/reclass',
+    { run_id: String((payload && payload.run_id) || ''), scale: Number(payload && payload.scale) },
+    (d) => !d || !Array.isArray(d.stats) || !d.stats.length || !d.change_png_data,
+    () => null,
+  );
+}
+
 // ---------- 5) REQ-09：样本精度评价 ----------
 export function submitSamples(payload) {
   return call(

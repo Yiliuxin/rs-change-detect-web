@@ -3,6 +3,7 @@
 
   POST /api/v1/result/compare      方法对比（指数 / 检测方法 / 阈值方式变体）
   POST /api/v1/result/sensitivity  阈值敏感性（5 档 ``scale * T``）
+  POST /api/v1/result/reclass      批次 K 阈值滑块：单倍数只读复算 + 内存专题图
 
 薄封装：Pydantic 校验 + 归属校验 + 调 ``experiment_service`` + 统一异常封装
 ``{code, message, run_id}``。枚举/上限校验在 service 的 ``validate_variants``
@@ -150,6 +151,54 @@ def sensitivity(request: Request, payload: SensitivityRequest) -> SensitivityRes
     ensure_experiment_owner(request, payload.run_id)
     data = experiment_service.sensitivity(payload.run_id, force=payload.force)
     return SensitivityResponse(**data)
+
+
+class ReclassRequest(BaseModel):
+    """阈值滑块单倍数请求（批次 K · 只读预览）。
+
+    scale 故意不设 Pydantic 约束：越界 / 非数值由 service 抛 EX12(400)，
+    避免默认 422 破坏 ``{code,message,run_id}`` 错误契约。
+    """
+
+    run_id: str = Field(..., description="已有运行标识（REQ-14）")
+    scale: Any = Field(None, description="相对基准 T 的倍数：0.6~1.4，步进 0.05")
+
+
+class ReclassResponse(BaseModel):
+    """阈值滑块预览响应：阈值 / 三类面积 / 过渡带 / 渲染数据（Dict 承载避免漂移）。"""
+
+    run_id: str = Field("", description="原 run_id（不产生新 run）")
+    scale: float = Field(1.0, description="本次倍数")
+    base_threshold: float = Field(0.0, description="基准阈值 T=|threshold|")
+    threshold: float = Field(0.0, description="换算后阈值 scale*T（保留 4 位小数展示）")
+    stats: List[Dict[str, Any]] = Field(default_factory=list, description="三类面积（恒 3 项）")
+    transition_pct: float = Field(0.0, description="过渡带占比（0~100 百分数）")
+    transition_band: Dict[str, Any] = Field(default_factory=dict, description="过渡带完整摘要")
+    index_histogram: Dict[str, Any] = Field(default_factory=dict, description="直方图（阈值线/过渡带区间已更新）")
+    change_png_data: str = Field("", description="内存渲染专题图 data:image/png;base64,...（不落盘）")
+    computed_at: str = Field("", description="UTC ISO8601 带时区")
+
+
+@router.post(
+    "/reclass",
+    response_model=ReclassResponse,
+    responses={
+        400: {"model": ErrorResponse, "description": "EX12 倍数越界 / 非 0.05 网格 / 非有限数"},
+        404: {"model": ErrorResponse,
+              "description": "EX2 run 不存在 / 无权访问 / 双时相指数栅格产物缺失"},
+        500: {"model": ErrorResponse, "description": "SYS-01 面积口径不可判定 / 渲染失败"},
+    },
+    summary="阈值滑块预览：单倍数只读复算三类面积/过渡带/专题图（不落盘、不产生新 run）",
+)
+def reclass(request: Request, payload: ReclassRequest) -> ReclassResponse:
+    """POST /result/reclass（批次 K · NF9 同口径）。
+
+    先归属校验（他人/不存在 run → 404 EX2），再交 service 复用 ``recompute``
+    单倍数复算；不读写 experiments.json 缓存、不改基准参数、不落盘新产物，
+    页面刷新即回到基准 T。
+    """
+    ensure_experiment_owner(request, payload.run_id)
+    return ReclassResponse(**experiment_service.reclass(payload.run_id, payload.scale))
 
 
 # --------------------------------------------------------------------------- #
