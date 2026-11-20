@@ -21,7 +21,7 @@ from app.algorithm.regression_detector import (
     detect_change_regression, fit_robust_regression, residual_map,
 )
 from app.config.constants import (
-    METHOD_OTSU, METHOD_REGRESSION, REGRESSION_MAX_ROUNDS,
+    METHOD_CVA, METHOD_OTSU, METHOD_REGRESSION, REGRESSION_MAX_ROUNDS,
     REGRESSION_SIGMA_FACTOR, VALID_CHANGE_METHODS,
 )
 from app.repository.db import db_cursor
@@ -168,7 +168,9 @@ def reg_flow(client):
 @pytest.mark.req("REQ-11")
 def test_method_constants_and_whitelist():
     assert METHOD_OTSU == "otsu" and METHOD_REGRESSION == "regression"
-    assert set(VALID_CHANGE_METHODS) == {"otsu", "regression"}
+    # 批次 G：新增 cva，既有两法的常量取值与数值口径不变。
+    assert METHOD_CVA == "cva"
+    assert tuple(VALID_CHANGE_METHODS) == ("otsu", "regression", "cva")
     assert REGRESSION_MAX_ROUNDS == 3 and REGRESSION_SIGMA_FACTOR == 2.0
 
 

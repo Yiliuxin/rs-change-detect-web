@@ -289,9 +289,10 @@ export function matchScene(payload) {
 // 批次 1 扩展（REQ-07）+ 4A（REQ-11）：payload 可选携带 index / threshold / method。
 // 签名与 {data, demo} 返回结构不变；threshold 未提供时**不下发该字段**，
 // 后端走 Otsu 自适应（threshold_source=otsu），缺省行为与历史版本一致。
-// method 仅接受后端白名单 constants.py VALID_CHANGE_METHODS；缺省/非法一律 otsu，
+// method 仅接受后端白名单 constants.py VALID_CHANGE_METHODS（批次 G 起共 3 种：
+// otsu / regression / cva 变化向量分析）；缺省/非法一律 otsu，
 // 既不向后端提交非法值触发 EX12，也保证切回差值法时请求与旧行为等价。
-const VALID_CHANGE_METHODS = ['otsu', 'regression'];
+const VALID_CHANGE_METHODS = ['otsu', 'regression', 'cva'];
 export function runChange(payload) {
   const body = { ...(payload || {}) };
   body.index = String(body.index || 'NDVI').toUpperCase();

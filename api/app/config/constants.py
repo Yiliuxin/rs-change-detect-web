@@ -42,14 +42,20 @@ VALID_INDEXES: Final[Tuple[str, ...]] = ("NDVI", "NDWI")
 MANUAL_THRESHOLD_RANGE: Final[Tuple[float, float]] = (-1.0, 1.0)
 
 # ---------------------------------------------------------------------------
-# REQ-11（提前实现）变化检测方法：差值法 Otsu / 回归残差法
+# REQ-11（提前实现）变化检测方法：差值法 Otsu / 回归残差法 / 变化向量分析 CVA
 # ---------------------------------------------------------------------------
 # 方法白名单（大小写不敏感，服务层统一 lower 规范化）；非法 → EX12。
 # "otsu"      = 既有差值法：Δ = index(t2) − index(t1)，Otsu 或手动阈值；
 # "regression"= 回归法：稳健拟合 index(t2) = a·index(t1) + b，对残差 r 做 Otsu。
+# "cva"       = 变化向量分析：与既有检测同源的双波段指数栅格 [主指数, 辅助指数]，
+#               逐波段差分取欧氏幅值 sqrt(Σ_b (t2_b − t1_b)²) 后做 Otsu（幅值阈值）；
+#               仅新增「幅值计算」，分类/清理/统计/过渡带/转移矩阵全部复用既有管线。
 METHOD_OTSU: Final[str] = "otsu"
 METHOD_REGRESSION: Final[str] = "regression"
-VALID_CHANGE_METHODS: Final[Tuple[str, ...]] = (METHOD_OTSU, METHOD_REGRESSION)
+METHOD_CVA: Final[str] = "cva"
+VALID_CHANGE_METHODS: Final[Tuple[str, ...]] = (
+    METHOD_OTSU, METHOD_REGRESSION, METHOD_CVA,
+)
 # 回归法迭代稳健拟合：每轮剔除 |残差| > sigma_factor·σ 的像元后重拟合，最多 max_rounds 轮。
 # 来源：任务书「回归法定义（已拍板）」；数值口径集中在常量源，算法模块不写死。
 REGRESSION_MAX_ROUNDS: Final[int] = 3
@@ -334,7 +340,7 @@ PROBE_THROTTLE_MS: Final[int] = 180
 # ---------------------------------------------------------------------------
 # 键集合与 POST /result/change 口径面板提交链路（ChangeRequest）同源，前端回填用：
 #   index      : NDVI | NDWI                       （REQ-07，VALID_INDEXES）
-#   method     : otsu | regression                 （REQ-11，VALID_CHANGE_METHODS）
+#   method     : otsu | regression | cva           （REQ-11，VALID_CHANGE_METHODS）
 #   block_size : 256 | 512                         （REQ-06，BLOCK_SIZE_OPTIONS）
 #   threshold  : (-1, 1) 开区间浮点数或 null        （REQ-07，MANUAL_THRESHOLD_RANGE；
 #                null = Otsu 自适应，阈值方式 otsu/manual 由该键是否为空派生）

@@ -125,11 +125,12 @@
                   <label class="chk" title="归一化植被指数 =(NIR−R)/(NIR+R)，值越高植被越茂密，适合监测植被退化/恢复"><input type="radio" name="index-type" value="NDVI" checked /> <abbr class="term" title="Normalized Difference Vegetation Index，归一化植被指数：用近红外与红光波段计算，值越高植被越茂密">NDVI</abbr></label>
                   <label class="chk" title="归一化水体指数 =(G−NIR)/(G+NIR)，大于 0 大概率为水体，适合监测湖泊/水面变化"><input type="radio" name="index-type" value="NDWI" /> <abbr class="term" title="Normalized Difference Water Index，归一化水体指数：用绿光与近红外波段计算，大于 0 大概率为水体">NDWI</abbr></label>
                 </div>
-                <!-- 4A（REQ-11）：检测方法与 index / 手动阈值 / 后台运行各自独立，默认差值法 -->
+                <!-- 4A（REQ-11）/ 批次 G：检测方法与 index / 手动阈值 / 后台运行各自独立，默认差值法，共 3 种 -->
                 <label class="fld method-label" for="change-method">检测方法 method</label>
-                <select id="change-method" title="差值法：两期指数直接相减后用 Otsu 自动找阈值，简单直接；回归法：先拟合两期关系剔除整体偏移（如薄云/光照差异），只看残差，抗干扰更强">
+                <select id="change-method" title="差值法：两期指数直接相减后用 Otsu 自动找阈值，简单直接；回归法：先拟合两期关系剔除整体偏移（如薄云/光照差异），只看残差，抗干扰更强；变化向量分析（CVA）：把主指数与辅助指数的逐波段变化合成欧氏幅值，再对幅值做 Otsu，能同时反映两个维度的变化强度">
                   <option value="otsu" selected>差值法（<abbr class="term" title="Otsu：一种自动寻找最佳分割阈值的经典算法，无需手动设定阈值">Otsu</abbr>）</option>
                   <option value="regression">回归法（回归残差）</option>
+                  <option value="cva">变化向量分析（CVA）</option>
                 </select>
               </div>
             </div>
@@ -335,8 +336,8 @@
                 <dd>t2 的指数值减去 t1 的指数值。Δ &gt; 0 指数上升（如植被恢复），Δ &lt; 0 指数下降（如植被退化）。</dd>
                 <dt>Otsu（大津法）</dt>
                 <dd>一种自动寻找最佳分割阈值的经典算法：对差值 Δ 的直方图自动算出阈值 T，无需人工设定。平台默认用它，也可在「高级选项」手动覆盖。</dd>
-                <dt>差值法 / 回归法</dt>
-                <dd>两种检测策略。差值法直接用 Δ 找阈值，简单直接；回归法先拟合两期指数的整体关系、剔除光照或薄云造成的整体偏移，只把「偏离正常规律的残差」当变化，抗干扰更强。</dd>
+                <dt>差值法 / 回归法 / 变化向量分析（CVA）</dt>
+                <dd>三种检测策略。差值法直接用 Δ 找阈值，简单直接；回归法先拟合两期指数的整体关系、剔除光照或薄云造成的整体偏移，只把「偏离正常规律的残差」当变化，抗干扰更强；变化向量分析把主指数与辅助指数的逐波段变化合成欧氏幅值，再对幅值做 Otsu，手动阈值对 CVA 即「幅值阈值」。</dd>
                 <dt>增强 / 退化 / 稳定（编码 1 / 2 / 3）</dt>
                 <dd>像元级的三类判定结果：指数显著上升、显著下降、变化在阈值以内基本不变。0 表示 nodata（无效像元，如云、范围外），不参与统计。</dd>
                 <dt>变化强度五档</dt>
@@ -518,7 +519,7 @@
             <div id="view-method" hidden>
               <div class="card-subtitle">方法对比<span class="readonly-badge">批次 E · 实验</span></div>
               <div class="exp-empty" id="exp-method-empty">
-                尚未运行对比实验。选择变体后，对比不同「指数 × 方法」组合下的三类面积、过渡带占比与一致率。
+                尚未运行对比实验。选择变体后，对比不同「指数 × 方法（差值法 / 回归法 / 变化向量分析）」组合下的三类面积、过渡带占比与一致率。
               </div>
               <div class="btn-row gap-top">
                 <button type="button" class="btn btn-sm btn-primary" id="btn-exp-compare"
@@ -693,7 +694,7 @@
       <div class="exp-modal" id="exp-modal" hidden>
         <div class="exp-modal-card" role="dialog" aria-modal="true" aria-labelledby="exp-modal-title">
           <div class="card-title" id="exp-modal-title">运行对比实验 · 选择变体</div>
-          <div class="exp-modal-desc">最多 4 个变体；需至少一项配置与基准不同；结果缓存于 experiments.json（秒开 / 可复现）；预计耗时 10~60s。</div>
+          <div class="exp-modal-desc">3 种方法 × 2 种指数共 5 个候选，最多勾选 4 个变体；需至少一项配置与基准不同；结果缓存于 experiments.json（秒开 / 可复现）；预计耗时 10~60s。</div>
           <div class="exp-modal-base" id="exp-modal-base">基准：—</div>
           <div class="exp-variant-list" id="exp-variant-list"></div>
           <div class="err-line" id="exp-modal-err"></div>

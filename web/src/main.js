@@ -698,8 +698,9 @@ function isUnsafeImageUrl(u) {
 // ===== 批次 1（REQ-07）：C 卡指数切换 + 「高级选项」手动阈值 =====
 // 开关关闭时 threshold 为 undefined：api.runChange 不会下发该字段，后端走 Otsu 自适应。
 // 4A（REQ-11）：method 与 index / threshold / 后台运行开关各自独立读取，互不改写对方状态。
-const METHOD_LABELS = { otsu: '差值法', regression: '回归法' };
-const VALID_METHODS = ['otsu', 'regression'];
+// 批次 G：第三种方法 cva（变化向量分析），与后端 VALID_CHANGE_METHODS 同步。
+const METHOD_LABELS = { otsu: '差值法', regression: '回归法', cva: '变化向量分析' };
+const VALID_METHODS = ['otsu', 'regression', 'cva'];
 
 function runParams() {
   const checked = document.querySelector('input[name="index-type"]:checked');
@@ -797,7 +798,8 @@ async function runChangeDetection() {
   btn.textContent = '运行中…';
   $('run-progress').hidden = false;
   const { index, threshold, method } = runParams();
-  $('run-status').textContent = '正在运行变化检测（' + METHOD_LABELS[method] + ' · 读取 COG → 掩膜 → Δ' + index
+  $('run-status').textContent = '正在运行变化检测（' + METHOD_LABELS[method] + ' · 读取 COG → 掩膜 → '
+    + (method === 'cva' ? 'CVA 幅值' : 'Δ' + index)
     + (threshold === undefined ? ' → Otsu 自适应阈值' : ' → 手动阈值 T=' + threshold.toFixed(2))
     + ' → 渲染专题图）…';
   $('run-done').hidden = true;

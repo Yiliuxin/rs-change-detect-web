@@ -21,7 +21,7 @@ from app.algorithm.landcover import classify_landcover_scalar
 from app.api.errors import ApiError
 from app.config.constants import (
     INDEX_RASTER_T1, INDEX_RASTER_T2, INTENSITY_LABELS_ZH,
-    LANDCOVER_LABELS_ZH, METHOD_OTSU, METHOD_REGRESSION,
+    LANDCOVER_LABELS_ZH, METHOD_CVA, METHOD_OTSU, METHOD_REGRESSION,
 )
 from app.repository import task_repo
 from app.service.common import (
@@ -113,6 +113,11 @@ def probe(run_id: str, lng: float, lat: float) -> Dict[str, object]:
         a = _finite_or_none(snap.get("a")) or 0.0
         b = _finite_or_none(snap.get("b")) or 0.0
         delta = t2 - (float(a) * t1 + float(b))  # 回归残差，与 A1 同口径
+    elif method == METHOD_CVA:
+        # 批次 G：双波段欧氏幅值 × 主指数差方向，与 change_service 的
+        # signed_magnitude 同口径（|delta| 即该像元的 CVA 幅值）。
+        mag = math.hypot(t2 - t1, aux2 - aux1)
+        delta = mag if (t2 - t1) >= 0.0 else -mag
     else:
         delta = t2 - t1
 

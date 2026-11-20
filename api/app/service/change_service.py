@@ -44,6 +44,7 @@ from app.algorithm.patches import patch_stats
 from app.algorithm.radiometric import (
     assert_same_caliber, check_baseline, to_reflectance,
 )
+from app.algorithm.cva_detector import detect_change_cva
 from app.algorithm.regression_detector import detect_change_regression
 from app.algorithm.writers import (
     attribution_lines, export_triplet, write_index_raster,
@@ -51,7 +52,8 @@ from app.algorithm.writers import (
 from app.api.errors import ApiError, as_api_error
 from app.config.constants import (
     BLOCK_SIZE, EXPORT_FORMATS, INDEX_RASTER_T1, INDEX_RASTER_T2,
-    LANDSAT_SENSORS, MANUAL_THRESHOLD_RANGE, METHOD_OTSU, METHOD_REGRESSION,
+    LANDSAT_SENSORS, MANUAL_THRESHOLD_RANGE, METHOD_CVA, METHOD_OTSU,
+    METHOD_REGRESSION,
     REGRESSION_MAX_ROUNDS, REGRESSION_SIGMA_FACTOR, radiometric_formula,
     TRANSITION_BAND_RATIO, VALID_CHANGE_METHODS, VALID_INDEXES,
     VALID_RATIO_MIN, VALID_RATIO_WARN,
@@ -104,7 +106,8 @@ def _validate_method(method: str, run_id: str) -> str:
     """method 归一化为小写并校验白名单；非法 → EX12（REQ-11 提前实现）。
 
     大小写不敏感（与 index 的 upper 规范化同风格）；缺省 ``otsu`` 时既有差值法
-    行为逐字不变。非法值在 task 状态更新之前抛出，不会把 task 误标为 FAILED。
+    行为逐字不变。``cva`` 为批次 G 新增的第三种方法，与既有两法共用同一白名单校验，
+    非法值在 task 状态更新之前抛出，不会把 task 误标为 FAILED。
     """
     key = str(method or "").strip().lower()
     if key not in VALID_CHANGE_METHODS:
@@ -184,7 +187,12 @@ def _build_conclusion(report: dict) -> Tuple[str, str]:
         dominant_zh = (f"主导转移方向为 {d0.get('from_label', '—')} → "
                        f"{d0.get('to_label', '—')}（{float(d0.get('area_ha', 0.0)):.2f} ha）")
     method = str(report.get("method") or "otsu").lower()
-    method_zh = "回归残差法" if method == METHOD_REGRESSION else "Otsu 差值法"
+    if method == METHOD_REGRESSION:
+        method_zh = "回归残差法"
+    elif method == METHOD_CVA:
+        method_zh = "变化向量分析"
+    else:
+        method_zh = "Otsu 差值法"
     thr = float(report.get("threshold") or 0.0)
     src = str(report.get("threshold_source") or "")
     band = report.get("transition_band") or {}
@@ -378,8 +386,10 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
       * ``index``：NDVI（缺省，红+近红外）/ NDWI（绿+近红外），非法 → EX12；
       * ``threshold``：提供时跳过 Otsu 直接作对称阈值，须落在 (-1, 1)，越界 → EX12；
         ``params_snapshot`` 记录 ``threshold`` 与 ``threshold_source``("manual"/"otsu")；
-      * ``method``：``otsu``（缺省，差值法）/ ``regression``（REQ-11 回归残差法）；
-        非法 → EX12，回归法产物带 ``_reg`` 后缀，不覆盖差值法三件套。
+      * ``method``：``otsu``（缺省，差值法）/ ``regression``（REQ-11 回归残差法）/
+        ``cva``（批次 G 变化向量分析，双波段欧氏幅值）；非法 → EX12，
+        回归法产物带 ``_reg`` 后缀，不覆盖差值法三件套；CVA 沿用主名，
+        只替换「幅值计算」这一步，其余管线与两法完全同口径。
     """
     # 参数校验：非法参数不应把 task 误标为 FAILED
     key = _validate_index(index, run_id)
@@ -537,6 +547,25 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
                 base_change, profile=profile, valid_mask=valid,
                 run_id=run_id, params_snapshot=snapshot,
             )["stats"]
+        elif method_key == METHOD_CVA:
+            # 批次 G：与回归法同源的 t1/t2 指数栅格（主指数 + 辅助指数双波段），
+            # 逐波段差分取欧氏幅值 → Otsu / 手动幅值阈值；只新增「幅值计算」这一步。
+            cva = detect_change_cva(
+                (idx_t1.data, pair_t1["aux"]),
+                (idx_t2.data, pair_t2["aux"]),
+                valid_mask=valid, threshold=manual,
+            )
+            thr = float(cva["threshold"])
+            threshold_source = str(cva["threshold_source"])
+            otsu_fallback = bool(cva["otsu_fallback"])
+            otsu_reason = str(cva["otsu_reason"])
+            change_raw = cva["change_raw"]
+            cva_hist = cva["signed_magnitude"]
+            # NF9 可复现：幅值阈值与波段顺序入参数快照（不影响既有两法字段）。
+            snapshot.update({
+                "cva_threshold": float(thr),
+                "cva_bands": [key, next(i for i in VALID_INDEXES if i != key)],
+            })
         else:
             d = delta_ndvi(idx_t2.data, idx_t1.data)
             if manual is None:
@@ -559,12 +588,16 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
         stats = summary["stats"]
         _stage_progress(on_stage, "change_detect", 4, 6)
 
-        # REQ-12 扩展：指数差值 / 回归残差分布直方图（PDF 内嵌，佐证阈值合理性）。
-        # 回归法残差 = index_t2 − (a·index_t1 + b)；差值法 = index_t2 − index_t1。
+        # REQ-12 扩展：指数差值 / 回归残差 / CVA 幅值分布直方图（PDF 内嵌，佐证阈值合理性）。
+        # 回归法残差 = index_t2 − (a·index_t1 + b)；差值法 = index_t2 − index_t1；
+        # CVA = 定向欧氏幅值（|hist_src| 恒等于 CVA 幅值，过渡带口径 |CVA−T| ≤ 0.25T）。
         if method_key == METHOD_REGRESSION:
             hist_name = f"regression residual ({key})"
             hist_src = (idx_t2.data
                         - (float(reg["a"]) * idx_t1.data + float(reg["b"])))
+        elif method_key == METHOD_CVA:
+            hist_name = f"cva magnitude ({key})"
+            hist_src = cva_hist
         else:
             hist_name = f"delta {key}"
             hist_src = d

@@ -38,6 +38,7 @@ from app.algorithm.change_detector import (
     CHANGE_CODES, CHANGE_NODATA, M2_PER_HA, change_stats, classify_change,
     delta_ndvi, transition_band_mask, transition_band_stats,
 )
+from app.algorithm.cva_detector import detect_change_cva
 from app.algorithm.morphology import clean_change_map
 from app.algorithm.otsu import otsu_threshold
 from app.algorithm.regression_detector import detect_change_regression
@@ -47,7 +48,7 @@ from app.config.constants import (
     EXPERIMENTS_CACHE_FILE, EXPERIMENTS_CACHE_SENSITIVITY_KEY,
     EXPERIMENTS_CACHE_SIGNATURE_LEN, EXPERIMENTS_CACHE_VERSION,
     INDEX_RASTER_T1, INDEX_RASTER_T2, MANUAL_THRESHOLD_RANGE,
-    METHOD_OTSU, METHOD_REGRESSION, SENSITIVITY_SCALES,
+    METHOD_CVA, METHOD_OTSU, METHOD_REGRESSION, SENSITIVITY_SCALES,
     THRESHOLD_MODE_MANUAL, THRESHOLD_MODE_OTSU, VALID_CHANGE_METHODS,
     VALID_INDEXES, VALID_THRESHOLD_MODES,
 )
@@ -257,10 +258,13 @@ def recompute(ctx: ExperimentContext, index: str, method: str,
               t_override: Optional[float] = None) -> dict:
     """唯一复算入口（批次 E · 只读实验）：compare 与 sensitivity 都必须经此函数。
 
-    不复制粘贴两份检测调用链：差值法用 ``delta_ndvi`` + ``otsu_threshold``，
-    回归法用 ``detect_change_regression`` 取 ``residual``；随后统一走
+    不复制粘贴检测调用链：差值法用 ``delta_ndvi`` + ``otsu_threshold``，
+    回归法用 ``detect_change_regression`` 取 ``residual``，CVA 用
+    ``detect_change_cva`` 取双波段欧氏幅值（``signed_magnitude``）；随后统一走
     ``classify_change(|T|) → clean_change_map → change_stats → transition_band_*``，
     与 ``change_service.py`` 基准管线同口径。全部在内存完成，不落盘任何产物。
+    CVA 变体读同一 index raster 的两个波段（主指数 / 辅助指数），与
+    ``index`` 变体只换主指数波段正交，故批次 E 对比矩阵 3 方法 × 2 指数可复算。
 
     ``t_override`` 非空时直接把它当作阈值 T（敏感性五档），跳过 Otsu/manual
     求值，其余口径不变；``threshold_mode=otsu`` 时对 hist_src 自适应求阈值，
@@ -290,6 +294,18 @@ def recompute(ctx: ExperimentContext, index: str, method: str,
         reg = detect_change_regression(t1, t2, valid_mask=valid, threshold=fixed_T)
         hist_src = reg["residual"]
         T = abs(float(reg["threshold"]))
+    elif mth == METHOD_CVA:
+        # 批次 G：与 change_service 主管线同源的双波段 [主指数, 辅助指数] 输入；
+        # 欧氏幅值做 Otsu（fixed_T 非空时为手动/敏感性档位幅值阈值）。
+        # signed_magnitude 的 |·| 恒等于 CVA 幅值，过渡带口径 |CVA−T| ≤ 0.25T。
+        other = next(i for i in VALID_INDEXES if i != idx)
+        cva = detect_change_cva(
+            (ctx.index_t1[idx], ctx.index_t1[other]),
+            (ctx.index_t2[idx], ctx.index_t2[other]),
+            valid_mask=valid, threshold=fixed_T,
+        )
+        hist_src = cva["signed_magnitude"]
+        T = abs(float(cva["threshold"]))
     else:
         # 差值法：Δ = index(t2) − index(t1)
         hist_src = delta_ndvi(t2, t1)
@@ -521,6 +537,14 @@ def _base_transition_pct(ctx: ExperimentContext, valid_count: int) -> float:
     if ctx.base_method == METHOD_REGRESSION:
         reg = detect_change_regression(t1, t2, valid_mask=ctx.valid_mask, threshold=T)
         hist_src = reg["residual"]
+    elif ctx.base_method == METHOD_CVA:
+        other = next(i for i in VALID_INDEXES if i != ctx.base_index)
+        cva = detect_change_cva(
+            (ctx.index_t1[ctx.base_index], ctx.index_t1[other]),
+            (ctx.index_t2[ctx.base_index], ctx.index_t2[other]),
+            valid_mask=ctx.valid_mask, threshold=T,
+        )
+        hist_src = cva["signed_magnitude"]
     else:
         hist_src = delta_ndvi(t2, t1)
     band_mask = transition_band_mask(hist_src, T, valid_mask=ctx.valid_mask)

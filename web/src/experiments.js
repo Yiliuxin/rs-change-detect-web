@@ -16,10 +16,13 @@ const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
 }[c]));
 
 // 批次 E：中文配置标签（枚举 → 展示口径；提交仍用契约英文枚举）
-const METHOD_ZH = { otsu: '差值法', regression: '回归法' };
+// 批次 G：方法枚举扩为 3 种，与后端 VALID_CHANGE_METHODS 同步；短标签用于图表图例。
+const METHOD_ZH = { otsu: '差值法', regression: '回归法', cva: '变化向量分析' };
+const METHOD_SHORT = { otsu: '差', regression: '回', cva: '向' };
 const MODE_ZH = { otsu: 'Otsu', manual: '手动' };
 const INDEX_ENUM = ['NDVI', 'NDWI'];
-const METHOD_ENUM = ['otsu', 'regression'];
+const METHOD_ENUM = ['otsu', 'regression', 'cva'];
+const MAX_VARIANTS = 4;             // 后端 COMPARE_MAX_VARIANTS
 
 // 批次 E：模块状态（两个独立请求态 + 当前弹层的候选变体）
 const E = {
@@ -49,7 +52,7 @@ function configLabel(index, method, mode) {
     + ' · ' + (mode === 'manual' ? MODE_ZH.manual : MODE_ZH.otsu);
 }
 function shortLabel(index, method) {
-  return String(index || '—') + '·' + (method === 'regression' ? '回' : '差');
+  return String(index || '—') + '·' + (METHOD_SHORT[method] || '差');
 }
 
 // ---------- 批次 E：基准配置（只读，来自 S.change.params_snapshot，缺失默认 NDVI / otsu） ----------
@@ -60,14 +63,15 @@ function baseConfig() {
   const method = String(snap.method == null ? '' : snap.method).trim().toLowerCase();
   return {
     index: idx === 'NDWI' ? 'NDWI' : 'NDVI',
-    method: method === 'regression' ? 'regression' : 'otsu',
+    method: METHOD_ENUM.includes(method) ? method : 'otsu',
     threshold: snap.threshold != null ? Number(snap.threshold) : null,
     threshold_source: String(snap.threshold_source || 'otsu').toLowerCase(),
   };
 }
 
-// 批次 E：4 种组合排除与基准 (index,method) 完全相同的那个 → 剩 3 个候选；
-// 默认勾选「同指数另一方法」与「另一指数同方法」两组（与基准仅一项不同）。
+// 批次 E / G：2 指数 × 3 方法 = 6 种组合，排除与基准 (index,method) 完全相同的
+// 那个 → 剩 5 个候选；默认勾选「同指数另一方法」与「另一指数同方法」两组
+// （与基准仅一项不同，恰好 3 个，不超过 MAX_VARIANTS=4）。
 function buildCandidates(base) {
   const out = [];
   INDEX_ENUM.forEach((index) => {
@@ -203,6 +207,7 @@ function syncModalSubmit() {
   });
   let msg = '';
   if (!chosen.length) msg = '请至少勾选 1 个变体';
+  else if (chosen.length > MAX_VARIANTS) msg = '最多勾选 ' + MAX_VARIANTS + ' 个变体';
   else {
     for (const r of chosen) {
       if (rowMode(r) === 'manual') {

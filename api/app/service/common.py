@@ -89,10 +89,12 @@ __all__ = ["REPO_ROOT", "RUNS_ROOT", "DATA_ROOT", "ARTIFACT_URL_PREFIX",
 
 
 def index_raster_names(method: str = METHOD_OTSU) -> Dict[str, str]:
-    """B2 探针前置产物名：差值法 ``index_t1.tif`` / ``index_t2.tif``；
+    """B2 探针前置产物名：差值法 / CVA 用 ``index_t1.tif`` / ``index_t2.tif``；
     回归法按 ``REGRESSION_ARTIFACT_SUFFIX`` 隔离为 ``index_t1_reg.tif`` 等。
 
-    返回 ``{基准名: 本轮实际文件名}``；两法互不覆盖，便于历史 run 回看。
+    返回 ``{基准名: 本轮实际文件名}``；回归法与其它方法互不覆盖，便于历史 run 回看。
+    批次 G 的 CVA 与差值法共用同一份双波段指数栅格（主/辅助指数），
+    不新增文件名，故批次 E 的 ``load_context`` 对 CVA 基准 run 无需改动。
     """
     normalized = str(method or METHOD_OTSU).strip().lower()
     sfx = REGRESSION_ARTIFACT_SUFFIX if normalized == METHOD_REGRESSION else ""

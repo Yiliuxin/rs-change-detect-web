@@ -21,9 +21,9 @@ const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
 
 const NAME_MAX = 64;                 // 后端 TEMPLATE_NAME_MAX，与输入框 maxlength 一致
 const VALID_INDEX = ['NDVI', 'NDWI'];
-const VALID_METHOD = ['otsu', 'regression'];
+const VALID_METHOD = ['otsu', 'regression', 'cva'];   // 批次 G：与后端 VALID_CHANGE_METHODS 同步
 const VALID_BLOCK = [256, 512];
-const METHOD_LABELS = { otsu: '差值法', regression: '回归法' };
+const METHOD_LABELS = { otsu: '差值法', regression: '回归法', cva: '变化向量分析' };
 
 // 模块内状态：模板列表 / 当前选中 / 请求中 / 是否已降级 / 面板读写回调（由 main.js 注入）
 const T = {

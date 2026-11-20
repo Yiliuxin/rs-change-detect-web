@@ -37,7 +37,7 @@ class ChangeRequest(BaseModel):
     method: str = Field(
         METHOD_OTSU,
         description=(f"检测方法：{' | '.join(VALID_CHANGE_METHODS)}（REQ-11，缺省 otsu 差值法；"
-                     "regression=NDVI 回归残差法，非法 → EX12）"),
+                     "regression=NDVI 回归残差法；cva=双波段变化向量分析幅值，非法 → EX12）"),
     )
     block_size: int = Field(BLOCK_SIZE, description="分块尺寸，取常量源 BLOCK_SIZE（REQ-06）")
     threshold: Optional[float] = Field(
@@ -63,7 +63,7 @@ class ChangeResponse(BaseModel):
     stats: List[StatItem] = Field(default_factory=list, description="三类像元数 / 面积")
     params_snapshot: Dict[str, Any] = Field(default_factory=dict, description="参数快照（REQ-14）")
     index: str = Field("NDVI", description="本次使用的指数（REQ-07）")
-    method: str = Field(METHOD_OTSU, description="本次使用的检测方法：otsu / regression（REQ-11）")
+    method: str = Field(METHOD_OTSU, description="本次使用的检测方法：otsu / regression / cva（REQ-11）")
     threshold_source: str = Field("otsu", description="阈值来源：otsu / manual（REQ-07/14）")
     artifacts: Dict[str, str] = Field(default_factory=dict,
                                       description="全部产物下载 URL 清单（REQ-10/12/14）")
