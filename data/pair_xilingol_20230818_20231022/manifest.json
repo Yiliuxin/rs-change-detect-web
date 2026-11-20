@@ -25,7 +25,8 @@
         "t1_B03.tif",
         "t1_B04.tif",
         "t1_B08.tif",
-        "t1_SCL.tif"
+        "t1_SCL.tif",
+        "t1_B11.tif"
       ]
     },
     "t2": {
@@ -39,7 +40,8 @@
         "t2_B03.tif",
         "t2_B04.tif",
         "t2_B08.tif",
-        "t2_SCL.tif"
+        "t2_SCL.tif",
+        "t2_B11.tif"
       ]
     }
   }
