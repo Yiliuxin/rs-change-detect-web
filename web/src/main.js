@@ -30,7 +30,7 @@ const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
 }[c]));
 
-const ALLOW_FORMATS = ['geotiff', 'png', 'pdf', 'geojson']; // constants.py EXPORT_FORMATS
+const ALLOW_FORMATS = ['geotiff', 'png', 'pdf', 'geojson', 'gif']; // constants.py ALL_EXPORT_FORMATS
 
 const HINTS = {
   browse: '地图浏览模式：自由缩放平移，查看 AOI 预览与专题图叠加。',
@@ -1762,7 +1762,7 @@ async function triggerDownload(f) {
   if (!f || !f.url) return;
   // 文件名优先级：显式 filename → URL 末段（后端 url 形如 /api/v1/artifacts/<run>/change.png）
   // → format 缺省名；仅当三者皆缺才落 .bin 占位
-  const DEFAULT_NAME = { png: 'change.png', geotiff: 'change.tif', pdf: 'report.pdf', geojson: 'change.geojson', zip: 'export.zip' };
+  const DEFAULT_NAME = { png: 'change.png', geotiff: 'change.tif', pdf: 'report.pdf', geojson: 'change.geojson', gif: 'change_animation.gif', zip: 'export.zip' };
   const name = f.filename
     || (f.url ? String(f.url).split('/').pop() : '')
     || DEFAULT_NAME[String(f.format || '').toLowerCase()]
@@ -1836,7 +1836,9 @@ async function doExport(formats) {
   const btn = $('btn-export');
   S.exportBusy = true;
   btn.disabled = true; btn.textContent = '导出中…';
-  const body = { run_id: currentRunId(), formats: fmts };
+  // 批次 I：PNG 制图要素开关默认开；只在勾选 PNG 时下发，关掉等价于历史裸图导出
+  const cartography = !!($('cb-cartography') && $('cb-cartography').checked);
+  const body = { run_id: currentRunId(), formats: fmts, cartographic: cartography && fmts.includes('png') };
   try {
     const res = await api.exportReport(body);
     if (res.demo) markDemo();
@@ -2089,7 +2091,7 @@ function refreshGates() {
     !S.aoiResult ? '需先应用 AOI（左栏「AOI 设置」卡片）'
       : (!S.selectedPair ? '需先选择影像对（左栏「双时相影像对」卡片）' : '检测运行中，请稍候…'));
 
-  const fmts = ['cb-geotiff', 'cb-png', 'cb-pdf', 'cb-geojson'].filter((id) => $(id) && $(id).checked);
+  const fmts = ['cb-geotiff', 'cb-png', 'cb-pdf', 'cb-geojson', 'cb-gif'].filter((id) => $(id) && $(id).checked);
   gate('btn-export', !!currentRunId() && fmts.length > 0 && !S.exportBusy,
     !currentRunId() ? '需先完成一次变化检测获得 run_id' : '请至少勾选一种导出格式');
 
@@ -2781,11 +2783,19 @@ function bindEvents() {
   $('btn-preset-fill').onclick = applyPresetAoi;
   $('btn-auto-sample').onclick = autoStratifiedSample;
 
-  ['cb-geotiff', 'cb-png', 'cb-pdf'].forEach((id) => {
+  ['cb-geotiff', 'cb-png', 'cb-pdf', 'cb-geojson', 'cb-gif'].forEach((id) => {
     $(id).addEventListener('change', refreshGates);
   });
+  // 制图要素只对 PNG 有意义：未勾选 PNG 时禁用开关，勾选状态保留便于回头再选 PNG
+  if ($('cb-png') && $('cb-cartography')) {
+    $('cb-png').addEventListener('change', () => {
+      $('cb-cartography').disabled = !$('cb-png').checked;
+    });
+    $('cb-cartography').disabled = !$('cb-png').checked;
+  }
   $('btn-export').onclick = () => {
-    const fmts = ['cb-geotiff', 'cb-png', 'cb-pdf'].filter((id) => $(id).checked)
+    const fmts = ['cb-geotiff', 'cb-png', 'cb-pdf', 'cb-geojson', 'cb-gif']
+      .filter((id) => $(id) && $(id).checked)
       .map((id) => id.replace('cb-', ''));
     doExport(fmts);
   };

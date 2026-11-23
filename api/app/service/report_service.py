@@ -24,8 +24,9 @@ from app.algorithm.writers import (
 )
 from app.api.errors import ApiError, as_api_error
 from app.config.constants import (
-    EXPERIMENTS_CACHE_COMPARE_KEY, EXPERIMENTS_CACHE_SENSITIVITY_KEY,
-    EXPORT_FORMATS, METHOD_OTSU, METHOD_REGRESSION, RESULT_BUCKET,
+    ANIMATION_FILENAME, EXPERIMENTS_CACHE_COMPARE_KEY,
+    EXPERIMENTS_CACHE_SENSITIVITY_KEY, EXPORT_FORMATS, METHOD_OTSU,
+    METHOD_REGRESSION, RESULT_BUCKET,
 )
 from app.config.storage import (
     StorageSettings, ensure_buckets, get_client, upload_file,
@@ -34,7 +35,7 @@ from app.repository import task_repo
 from app.service import experiment_service
 from app.service.common import (
     artifact_url, export_zip_name, git_short_commit,
-    regression_artifact_names, run_dir,
+    regression_artifact_names, run_dir, utc_now,
 )
 from app.service.concurrency import serial
 from app.service.sample_service import accuracy_for_run
@@ -45,19 +46,19 @@ _FORMAT_CONTENT_TYPE = {
     "png": "image/png",
     "pdf": "application/pdf",
     "geojson": "application/geo+json",
+    "gif": "image/gif",
 }
 _FORMAT_FILE = {
     "geotiff": ("change.tif", "image/tiff"),
     "png": ("change.png", "image/png"),
     "pdf": ("report.pdf", "application/pdf"),
     "geojson": ("change.geojson", "application/geo+json"),
+    "gif": (ANIMATION_FILENAME, "image/gif"),
 }
 # REQ-11：回归法产物名（与 change_service 的 _reg 主名同源）
 _FORMAT_FILE_REG = {
-    "geotiff": regression_artifact_names()["geotiff"],
-    "png": regression_artifact_names()["png"],
-    "pdf": regression_artifact_names()["pdf"],
-    "geojson": regression_artifact_names()["geojson"],
+    **regression_artifact_names(),
+    "gif": ANIMATION_FILENAME,
 }
 
 __all__ = ["export", "experiment_sections_from_cache"]
@@ -112,8 +113,8 @@ def _upload(client, run_id: str, fmt: str, local: Path, filename: str) -> str:
     return artifact_url(run_id, filename)
 
 
-def export(run_id: str, formats: List[str]) -> dict:
-    """报告导出（REQ-12/14/15）。"""
+def export(run_id: str, formats: List[str], cartographic: bool = False) -> dict:
+    """报告导出（REQ-12/14/15；批次 I 的 cartographic 只增不改默认行为）。"""
     try:
         # EX6：格式白名单（writers.validate_export_formats 抛 ExportFormatError.code=EX6）
         allowed = list(validate_export_formats(formats))
@@ -166,6 +167,21 @@ def export(run_id: str, formats: List[str]) -> dict:
                     }
 
             valid_ratio = float(report.get("valid_ratio", 0.0))
+            threshold = report.get("threshold")
+            if threshold is None:
+                threshold = report.get("otsu_threshold")
+            cartography_meta = {
+                "index": str(report.get("index")
+                             or (snapshot or {}).get("index") or "N/A"),
+                "method": method,
+                "threshold": threshold,
+                "t1_date": str(report.get("t1_date")
+                               or (snapshot or {}).get("t1") or "N/A"),
+                "t2_date": str(report.get("t2_date")
+                               or (snapshot or {}).get("t2") or "N/A"),
+                "generated_at": utc_now().strftime("%Y-%m-%d %H:%M:%S UTC"),
+                "run_id": run_id,
+            }
             # 批次 B1：检测时落盘的过渡带掩膜 → 重建专题图渲染副本，保证
             # 重新导出的 PNG / GeoJSON 与首次检测同口径。老 run 无掩膜文件
             # 时 render_change=None，write_png / write_geojson 如实回退三类。
@@ -184,6 +200,9 @@ def export(run_id: str, formats: List[str]) -> dict:
                 change, profile, valid_ratio, report, out_dir,
                 formats=allowed, run_id=run_id, params_snapshot=snapshot,
                 names=names, render_change=render_change,
+                cartographic=cartographic,
+                transform=profile.get("transform"), crs=profile.get("crs"),
+                cartography_meta=cartography_meta,
             )
 
             # 防御性确保 results 桶存在；不可用时仅回退本地路径

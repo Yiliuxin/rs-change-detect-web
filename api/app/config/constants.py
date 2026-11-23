@@ -249,6 +249,16 @@ LANDSAT_NODATA_DN: Final[int] = 0
 # 导出格式白名单，其他格式 → EX6 拒绝。来源：REQ-12 / HLD 3.7
 # geojson：变化图斑矢量导出（RFC 7946 / WGS84，仅 1 增强 / 2 退化，稳定不导出）
 EXPORT_FORMATS: Final[Tuple[str, ...]] = ("geotiff", "png", "pdf", "geojson")
+# 批次 I：新增双时相 GIF 动画（只增不改：EXPORT_FORMATS 保持既有四类不变，
+# 未指定 formats 时的默认导出行为零变化；只有显式勾选 gif 才生成动画）。
+ANIMATION_FORMAT: Final[str] = "gif"
+ALL_EXPORT_FORMATS: Final[Tuple[str, ...]] = EXPORT_FORMATS + (ANIMATION_FORMAT,)
+ANIMATION_FILENAME: Final[str] = "change_animation.gif"
+# GIF 帧序 t1 真彩 → t2 真彩 → 变化专题；每帧 1.2s，循环播放；最长边 ≤1024。
+ANIMATION_FRAME_MS: Final[int] = 1200
+ANIMATION_MAX_EDGE: Final[int] = 1024
+# PNG 制图比例尺候选刻度（米），由 GeoTIFF 地理变换换算后按就近向上取整。
+CARTOGRAPHY_SCALE_TICKS_M: Final[Tuple[int, ...]] = (500, 1000, 2000)
 # Copernicus / USGS 合规署名。来源：REQ-15 / NF6 / NF7 / HLD 3.7
 ATTRIBUTION_S2: Final[str] = "Copernicus Sentinel data [{year}]"
 ATTRIBUTION_S2_MODIFIED: Final[str] = "Contains modified Copernicus Sentinel data [{year}]"

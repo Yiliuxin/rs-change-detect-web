@@ -437,6 +437,7 @@ table.tbl td.diag { background: rgba(33, 160, 76, .1); font-weight: 800; }
 .fmt-row { display: flex; gap: 14px; flex-wrap: wrap; }
 .chk { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 600; cursor: pointer; }
 .chk input { accent-color: var(--accent); width: 15px; height: 15px; }
+.chk:has(input:disabled) { opacity: .55; cursor: not-allowed; }
 
 .file-item { display: flex; align-items: center; gap: 8px; font-size: 11.5px; padding: 7px 9px; border: 1px solid var(--line-soft); border-radius: 8px; margin-top: 7px; background: var(--card2); }
 .file-item .fi-fmt { font-weight: 800; color: #1c5fb0; text-transform: uppercase; width: 62px; flex: 0 0 62px; }

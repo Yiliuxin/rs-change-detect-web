@@ -712,7 +712,7 @@
             <div class="empty-state" id="export-empty">
               <div class="empty-icon">📄</div>
               <p>暂无可导出的运行结果。</p>
-              <p class="empty-sub">完成<strong>「运行变化检测」</strong>获得 run_id 后，可在此勾选格式并导出 GeoTIFF / PNG / PDF。</p>
+              <p class="empty-sub">完成<strong>「运行变化检测」</strong>获得 run_id 后，可在此勾选格式并导出 GeoTIFF / PNG / PDF / GeoJSON / 变化动画 GIF。</p>
             </div>
             <div id="export-body" hidden>
               <div class="fmt-row">
@@ -720,6 +720,10 @@
                 <label class="chk"><input type="checkbox" id="cb-png" checked /> PNG</label>
                 <label class="chk"><input type="checkbox" id="cb-pdf" checked /> PDF</label>
                 <label class="chk" title="带地理坐标的矢量面文件，每个变化图斑是一个多边形，属性含面积"><input type="checkbox" id="cb-geojson" /> <abbr class="term" title="GeoJSON：以 JSON 文本存储的矢量格式，这里导出的是变化图斑多边形（含面积属性），可用 QGIS 或地图软件打开">GeoJSON</abbr></label>
+                <label class="chk" title="t1 真彩 → t2 真彩 → 变化专题，1.2 秒/帧循环播放"><input type="checkbox" id="cb-gif" /> <abbr class="term" title="双时相 GIF 动画：t1 真彩、t2 真彩、变化专题三帧循环，与页面卷帘同源拉伸">变化动画 GIF</abbr></label>
+              </div>
+              <div class="fmt-row gap-top">
+                <label class="chk" id="cartography-toggle" title="图例 / 比例尺 / 指北针 / 角注；取消勾选则导出与历史版本一致的无要素 PNG"><input type="checkbox" id="cb-cartography" checked /> 含制图要素（PNG）</label>
               </div>
               <button type="button" class="btn btn-primary btn-block gap-top" id="btn-export"
                 title="按所选格式导出成果文件">导出所选格式</button>

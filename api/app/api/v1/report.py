@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 
 from app.api.deps import ensure_run_owner
 from app.api.v1.schemas import ErrorResponse, ExportFile
-from app.config.constants import ATTRIBUTION_S2, EXPORT_FORMATS
+from app.config.constants import ALL_EXPORT_FORMATS, ATTRIBUTION_S2
 from app.service import report_service, run_service
 
 router = APIRouter(prefix="/report", tags=["Report"])
@@ -24,7 +24,11 @@ class ReportExportRequest(BaseModel):
     """报告导出请求（REQ-12）。"""
 
     run_id: str = Field(..., description="运行标识（REQ-14）")
-    formats: List[str] = Field(default_factory=list, description=f"子集：{' | '.join(EXPORT_FORMATS)}")
+    formats: List[str] = Field(default_factory=list, description=f"子集：{' | '.join(ALL_EXPORT_FORMATS)}")
+    cartographic: bool = Field(
+        False,
+        description="PNG 是否含制图要素（图例/比例尺/指北针/角注）；缺省 False = 历史裸图",
+    )
 
 
 class ReportExportResponse(BaseModel):
@@ -47,10 +51,14 @@ class ReportExportResponse(BaseModel):
 def export_report(request: Request, payload: ReportExportRequest) -> ReportExportResponse:
     """报告导出（REQ-12/14/15）。
 
-    formats ⊆ EXPORT_FORMATS，否则 EX6；产出 GeoTIFF/PNG/PDF 三件套并强制署名。归属校验：非本人 run → AUTH-03（认证扩展）。
+    formats ⊆ ALL_EXPORT_FORMATS（既有四类 + 批次 I 的 gif），否则 EX6；按勾选产出
+    GeoTIFF/PNG/PDF/GeoJSON/GIF 并强制署名；cartographic=True 时 PNG 追加制图要素。
+    归属校验：非本人 run → AUTH-03（认证扩展）。
     """
     ensure_run_owner(request, payload.run_id)
-    result = report_service.export(payload.run_id, payload.formats)
+    result = report_service.export(
+        payload.run_id, payload.formats, cartographic=payload.cartographic,
+    )
     return ReportExportResponse(**result)
 
 

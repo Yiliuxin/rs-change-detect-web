@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from app.config.constants import (
-    INDEX_RASTER_T1, INDEX_RASTER_T2,
+    ANIMATION_FILENAME, INDEX_RASTER_T1, INDEX_RASTER_T2,
     METHOD_OTSU, METHOD_REGRESSION, REGRESSION_ARTIFACT_SUFFIX, VALID_INDEXES,
 )
 
@@ -38,6 +38,8 @@ ARTIFACT_MEDIA_TYPES: Dict[str, str] = {
     "t2_composite.png": "image/png",
     # REQ-12：三类面积柱状图（PDF 内嵌 + 独立产物，供前端复用）
     "area_chart.png": "image/png",
+    # 批次 I：双时相变化动画（导出后由同一产物端点带鉴权下载）
+    ANIMATION_FILENAME: "image/gif",
 }
 for _index in VALID_INDEXES:
     _suffix = "_" + _index.lower()

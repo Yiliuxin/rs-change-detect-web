@@ -263,6 +263,11 @@ function demoFile(format) {
     if (!_tifUrl) _tifUrl = makeDemoGeotiffUrl();
     return { url: _tifUrl, size: 1024, filename: 'change_demo.tif', placeholder: true };
   }
+  if (f === 'gif') {
+    // 1×1 透明 GIF 占位：离线演示只验证下载链路，不冒充真实动画帧
+    const url = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+    return { url, size: 43, filename: 'change_animation_demo.gif', placeholder: true };
+  }
   return null;
 }
 

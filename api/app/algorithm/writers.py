@@ -17,6 +17,7 @@ from typing import Dict, List, Optional, Sequence
 import numpy as np
 import rasterio
 
+from app.algorithm.animation import write_change_animation
 from app.algorithm.change_detector import (
     CHANGE_CODES, CHANGE_LABELS_EN, CHANGE_NODATA, CHANGE_TRANSITION,
     M2_PER_HA, transition_band_edges,
@@ -25,6 +26,8 @@ from app.algorithm.mask_pipeline import judge_valid_ratio
 from app.algorithm.patch_shape import shape_metrics
 from app.algorithm.renderer import render_change_png
 from app.config.constants import (
+    ALL_EXPORT_FORMATS,
+    ANIMATION_FILENAME,
     ATTRIBUTION_LS,
     ATTRIBUTION_S2,
     ATTRIBUTION_S2_MODIFIED,
@@ -57,7 +60,7 @@ __all__ = [
     "ExportFormatError", "validate_export_formats", "valid_ratio_notice",
     "render_area_chart", "render_index_histogram", "render_intensity_chart",
     "attribution_lines", "write_geotiff", "write_geojson", "write_png",
-    "write_pdf", "export_triplet", "write_index_raster",
+    "write_pdf", "write_change_animation", "export_triplet", "write_index_raster",
 ]
 
 
@@ -70,10 +73,10 @@ class ExportFormatError(Exception):
 def validate_export_formats(formats: Sequence[str]) -> tuple[str, ...]:
     """校验并规范化导出格式；非白名单抛 EX6。"""
     normalized = tuple(str(f).strip().lower() for f in formats)
-    bad = [f for f in normalized if f not in EXPORT_FORMATS]
+    bad = [f for f in normalized if f not in ALL_EXPORT_FORMATS]
     if bad:
         raise ExportFormatError(
-            f"{ERROR_MESSAGES['EX6']}；不支持的格式：{bad}，白名单={list(EXPORT_FORMATS)}"
+            f"{ERROR_MESSAGES['EX6']}；不支持的格式：{bad}，白名单={list(ALL_EXPORT_FORMATS)}"
         )
     return normalized
 
@@ -169,12 +172,19 @@ def write_index_raster(primary, auxiliary, profile: dict, output_path) -> str:
 def write_png(change, valid_ratio: float, output_path, *,
               run_id: str = "", params_snapshot: Optional[dict] = None,
               otsu_threshold: Optional[float] = None,
-              attribution_lines: Optional[Sequence[str]] = None) -> Dict[str, object]:
-    """PNG 落盘（委托 renderer），返回渲染元数据（含文字退化说明）。"""
+              attribution_lines: Optional[Sequence[str]] = None,
+              cartographic: bool = False, transform=None, crs=None,
+              cartography_meta: Optional[dict] = None) -> Dict[str, object]:
+    """PNG 落盘（委托 renderer），返回渲染元数据（含文字退化说明）。
+
+    ``cartographic=False`` 保持历史裸图逐点不变；``True`` 追加制图要素底栏。
+    """
     return render_change_png(
         change, valid_ratio, output_path,
         run_id=run_id, params_snapshot=params_snapshot,
         otsu_threshold=otsu_threshold, attribution_lines=attribution_lines,
+        cartographic=cartographic, transform=transform, crs=crs,
+        cartography_meta=cartography_meta,
     )
 
 
@@ -1067,8 +1077,12 @@ def export_triplet(
     params_snapshot: Optional[dict] = None,
     names: Optional[Dict[str, str]] = None,
     render_change=None,
+    cartographic: bool = False,
+    transform=None,
+    crs=None,
+    cartography_meta: Optional[dict] = None,
 ) -> Dict[str, object]:
-    """一次性导出 GeoTIFF / PNG / PDF / GeoJSON 四件套。
+    """一次性导出 GeoTIFF / PNG / PDF / GeoJSON 四件套（可选追加 GIF 动画）。
 
     缺省文件名 ``change.tif`` / ``change.png`` / ``report.pdf`` /
     ``change.geojson``；``names`` 可按 ``{geotiff, png, pdf, geojson}`` 覆盖
@@ -1089,6 +1103,7 @@ def export_triplet(
         "png": chosen.get("png", "change.png"),
         "pdf": chosen.get("pdf", "report.pdf"),
         "geojson": chosen.get("geojson", "change.geojson"),
+        "gif": ANIMATION_FILENAME,
     }
 
     enriched = dict(report)
@@ -1116,6 +1131,8 @@ def export_triplet(
             run_id=run_id, params_snapshot=params_snapshot,
             otsu_threshold=enriched.get("otsu_threshold"),
             attribution_lines=enriched.get("attribution_lines"),
+            cartographic=cartographic, transform=transform, crs=crs,
+            cartography_meta=cartography_meta,
         )
         files["png"] = png_meta["path"]
         notes["png"] = png_meta
@@ -1136,5 +1153,20 @@ def export_triplet(
         )
         files["geojson"] = gj_meta["path"]
         notes["geojson"] = gj_meta
+
+    if "gif" in allowed:
+        meta = dict(cartography_meta or {})
+        theme = out_dir / file_names["png"]
+        gif_meta = write_change_animation(
+            t1_png=out_dir / "t1_composite.png",
+            t2_png=out_dir / "t2_composite.png",
+            theme_png=theme if theme.is_file() else None,
+            output_path=out_dir / file_names["gif"],
+            t1_label=str(meta.get("t1_date") or "t1"),
+            t2_label=str(meta.get("t2_date") or "t2"),
+            cartographic=cartographic,
+        )
+        files["gif"] = gif_meta["path"]
+        notes["gif"] = gif_meta
 
     return result

@@ -20,13 +20,15 @@ from typing import Dict, Optional, Sequence, Tuple
 
 import numpy as np
 import rasterio
+from affine import Affine
+from rasterio.crs import CRS
 from rasterio.errors import NotGeoreferencedWarning
 
 from app.algorithm.change_detector import (
     CHANGE_CODES, CHANGE_NODATA, CHANGE_TRANSITION,
 )
 from app.algorithm.mask_pipeline import judge_valid_ratio
-from app.config.constants import TRANSITION_BAND_COLOR
+from app.config.constants import CARTOGRAPHY_SCALE_TICKS_M, TRANSITION_BAND_COLOR
 
 # 配色（R, G, B）：三类 + 批次 B1 过渡带独立中性灰
 CLASS_COLORS: Dict[int, Tuple[int, int, int]] = {
@@ -49,6 +51,10 @@ _BG_COLOR: Tuple[int, int, int] = (245, 245, 245)
 _HEADER_H: int = 72
 # 图例多一行「过渡带」，纵向留出 5 行色块 + 署名行的空间
 _LEGEND_H: int = 162
+# 批次 I：制图要素独立占一条底栏，绝不覆盖专题图本体与既有图例
+_CARTOGRAPHY_H: int = 96
+_CARTOGRAPHY_BG: Tuple[int, int, int] = (250, 250, 250)
+_NORTH_COLOR: Tuple[int, int, int] = (18, 62, 130)
 _GLYPH_SCALE: int = 2
 _GLYPH_ADVANCE: int = 6 * _GLYPH_SCALE
 
@@ -114,8 +120,14 @@ _FONT_5X7: Dict[str, str] = {
 
 __all__ = [
     "CLASS_COLORS", "CLASS_NAMES_ZH", "CLASS_NAMES_EN",
+    "MAP_HEADER_H", "MAP_LEGEND_H", "CARTOGRAPHY_STRIP_H",
     "draw_text_5x7", "colorize_change", "build_change_canvas", "render_change_png",
 ]
+
+# 供 GIF 动画复用专题图版面：真彩帧与专题帧必须同尺寸、同图幅位置
+MAP_HEADER_H = _HEADER_H
+MAP_LEGEND_H = _LEGEND_H
+CARTOGRAPHY_STRIP_H = _CARTOGRAPHY_H
 
 
 def draw_text_5x7(canvas: np.ndarray, x: int, y: int, text: str,
@@ -167,6 +179,143 @@ def _pil_image(canvas: np.ndarray):
         return None
 
 
+def _meters_per_pixel(transform, crs, map_height: int, map_width: int) -> Optional[float]:
+    """由 GeoTIFF 地理变换算 x 方向米/像元（旋转网格只取主对角线，展示口径）。"""
+    if transform is None:
+        return None
+    try:
+        t = transform if hasattr(transform, "a") else Affine(*tuple(transform))
+        a, e = abs(float(t.a)), abs(float(t.e))
+    except Exception:  # noqa: BLE001 - 变换损坏时如实跳过比例尺
+        return None
+    if not (np.isfinite(a) and a > 0) or not np.isfinite(e):
+        return None
+    try:
+        geographic = bool(CRS.from_user_input(crs).is_geographic) if crs is not None else False
+    except Exception:  # noqa: BLE001
+        geographic = False
+    if geographic:
+        # 4326 等地理坐标系：按图幅中心纬度做米制近似（AOI ≤0.25°，误差可忽略）
+        lat = float(t.f + t.d * map_width / 2.0 + t.e * map_height / 2.0)
+        return float(a * 111320.0 * max(0.05, abs(np.cos(np.radians(lat)))))
+    return float(a)
+
+
+def _choose_scale_tick(meters_per_px: Optional[float], width: int) -> Tuple[int, int, bool]:
+    """按 500/1000/2000m 候选取图中放得下的最大刻度，返回 (米, 像素, 是否截断)。"""
+    max_px = max(12, min(180, int(width) - 24))
+    if not meters_per_px or not np.isfinite(meters_per_px) or meters_per_px <= 0:
+        return 500, min(50, max_px), True
+    fits = [m for m in CARTOGRAPHY_SCALE_TICKS_M if m / meters_per_px <= max_px]
+    tick = int(max(fits) if fits else min(CARTOGRAPHY_SCALE_TICKS_M))
+    px = int(round(tick / meters_per_px))
+    clamped = px > max_px
+    return tick, max(1, min(max_px, px)), clamped
+
+
+def _draw_cartographic_strip(
+    canvas: np.ndarray,
+    info: Dict[str, object],
+    *,
+    map_height: int,
+    transform,
+    crs,
+    meta: dict,
+    font_path: str,
+) -> np.ndarray:
+    """在专题图下方独立底栏合成比例尺 / 指北针 / 角注（字体降级如实写 info）。"""
+    height, width = canvas.shape[:2]
+    strip_top = _HEADER_H + map_height + _LEGEND_H
+    mpp = _meters_per_pixel(transform, crs, map_height, width)
+    tick_m, tick_px, clamped = _choose_scale_tick(mpp, width)
+    info.update({
+        "cartographic": True,
+        "meters_per_pixel": mpp,
+        "scale_m": tick_m,
+        "scale_px": tick_px,
+        "scale_clamped": clamped,
+    })
+
+    m = dict(meta or {})
+    index = str(m.get("index") or "N/A")
+    method = str(m.get("method") or "N/A")
+    threshold = m.get("threshold")
+    t_text = f"{float(threshold):.4f}" if threshold is not None else "N/A"
+    t1 = str(m.get("t1_date") or "N/A")
+    t2 = str(m.get("t2_date") or "N/A")
+    generated = str(m.get("generated_at") or "N/A")
+    run8 = str(m.get("run_id") or info.get("run_id") or "")[:8] or "N/A"
+
+    img = _pil_image(canvas)
+    font = _load_ttf(font_path, 12)
+    if img is None:
+        # 极端降级：Pillow 不可用时仍用内置 5×7 点阵画出要素，不抛异常
+        canvas[strip_top:height, :, :] = _CARTOGRAPHY_BG
+        x0 = 12
+        for i in range(4):
+            xa, xb = x0 + i * tick_px // 4, x0 + (i + 1) * tick_px // 4
+            canvas[strip_top + 8:strip_top + 18, xa:xb] = (
+                (0, 0, 0) if i % 2 == 0 else (255, 255, 255)
+            )
+        draw_text_5x7(canvas, 12, strip_top + 22,
+                      f"0 ... {tick_m}M", color=(30, 30, 30), scale=1)
+        draw_text_5x7(canvas, 12, strip_top + 40,
+                      f"INDEX {index} METHOD {method} T={t_text}", color=(40, 40, 40), scale=1)
+        draw_text_5x7(canvas, 12, strip_top + 56,
+                      f"T1={t1} T2={t2} RUN={run8} AT {generated}",
+                      color=(40, 40, 40), scale=1)
+        info.update({
+            "cartography_font_mode": "ascii5x7",
+            "cartography_font_note": "Pillow 不可用：制图要素退化为内置 5x7 点阵字模",
+        })
+        return canvas
+
+    from PIL import ImageDraw, ImageFont
+
+    draw = ImageDraw.Draw(img)
+    if font is None:
+        font = ImageFont.load_default()
+        info.update({
+            "cartography_font_mode": "pil-default",
+            "cartography_font_note": f"系统字体 {font_path} 不可用，制图要素降级为 Pillow 默认字体",
+        })
+        # 默认字体无中文字形：角注用 ASCII，避免豆腐块
+        line1 = f"INDEX {index}  METHOD {method}  T={t_text}"
+        line2 = f"T1={t1}  T2={t2}  RUN={run8}  GENERATED {generated}"
+    else:
+        info.update({
+            "cartography_font_mode": "ttf-msyh",
+            "cartography_font_note": "",
+        })
+        line1 = f"指数 {index}  |  方法 {method}  |  阈值 T={t_text}"
+        line2 = f"t1 {t1}  |  t2 {t2}  |  生成 {generated}  |  RUN {run8}"
+
+    draw.rectangle([0, strip_top, width - 1, height - 1], fill=_CARTOGRAPHY_BG)
+    bar_y = strip_top + 8
+    for i in range(4):
+        xa = 12 + i * tick_px / 4.0
+        xb = 12 + (i + 1) * tick_px / 4.0
+        draw.rectangle([xa, bar_y, xb, bar_y + 8],
+                       fill=(0, 0, 0) if i % 2 == 0 else (255, 255, 255),
+                       outline=(0, 0, 0))
+    draw.text((12, bar_y + 11), "0", font=font, fill=(30, 30, 30))
+    draw.text((max(12, 12 + tick_px - 32), bar_y + 11),
+              f"{tick_m} m", font=font, fill=(30, 30, 30))
+
+    cx = max(24, width - 30)
+    arrow_top = strip_top + 6
+    draw.polygon([(cx, arrow_top), (cx - 7, arrow_top + 22),
+                  (cx, arrow_top + 17), (cx + 7, arrow_top + 22)],
+                 fill=_NORTH_COLOR)
+    draw.line([(cx, arrow_top + 16), (cx, arrow_top + 30)],
+              fill=_NORTH_COLOR, width=2)
+    draw.text((cx - 4, arrow_top + 30), "N", font=font, fill=_NORTH_COLOR)
+
+    draw.text((12, strip_top + 42), line1, font=font, fill=(45, 45, 45))
+    draw.text((12, strip_top + 62), line2, font=font, fill=(45, 45, 45))
+    return np.asarray(img).copy()
+
+
 def build_change_canvas(
     change,
     valid_ratio: float,
@@ -177,8 +326,16 @@ def build_change_canvas(
     font_path: str = DEFAULT_FONT_PATH,
     colors: Optional[Dict[int, Tuple[int, int, int]]] = None,
     attribution_lines: Optional[Sequence[str]] = None,
+    cartographic: bool = False,
+    transform=None,
+    crs=None,
+    cartography_meta: Optional[dict] = None,
 ) -> Tuple[np.ndarray, Dict[str, object]]:
-    """构建专题图 RGB 画布（纯函数，不落盘），返回 (canvas, info)。"""
+    """构建专题图 RGB 画布（纯函数，不落盘），返回 (canvas, info)。
+
+    ``cartographic=False`` 时像素与历史版本逐点一致（裸图开关关闭 = 向后兼容）；
+    ``True`` 时在下方追加独立底栏合成比例尺 / 指北针 / 角注，不遮挡专题图与图例。
+    """
     if not 0.0 <= float(valid_ratio) <= 1.0:
         raise ValueError(f"valid_ratio 需落在 [0, 1]，实际 {valid_ratio}")
     palette = dict(CLASS_COLORS if colors is None else colors)
@@ -188,11 +345,14 @@ def build_change_canvas(
 
     rgb = colorize_change(arr, palette)
     height, width = arr.shape
-    canvas = np.full((height + _HEADER_H + _LEGEND_H, width, 3), _BG_COLOR, dtype=np.uint8)
+    extra_h = _CARTOGRAPHY_H if cartographic else 0
+    canvas = np.full((height + _HEADER_H + _LEGEND_H + extra_h, width, 3),
+                     _BG_COLOR, dtype=np.uint8)
     canvas[_HEADER_H:_HEADER_H + height] = rgb
 
     verdict = judge_valid_ratio(float(valid_ratio))
     info: Dict[str, object] = {
+        "cartographic": bool(cartographic),
         "valid_ratio": float(valid_ratio),
         "code": verdict.code,
         "warn": verdict.warn,
@@ -260,6 +420,14 @@ def build_change_canvas(
         info["text_mode"] = "ttf"
         info["font"] = "msyh.ttc"
 
+    if cartographic:
+        meta = dict(cartography_meta or {})
+        meta.setdefault("run_id", run_id)
+        canvas = _draw_cartographic_strip(
+            canvas, info, map_height=height, transform=transform, crs=crs,
+            meta=meta, font_path=font_path,
+        )
+
     return canvas, info
 
 
@@ -286,6 +454,10 @@ def render_change_png(
     font_path: str = DEFAULT_FONT_PATH,
     colors: Optional[Dict[int, Tuple[int, int, int]]] = None,
     attribution_lines: Optional[Sequence[str]] = None,
+    cartographic: bool = False,
+    transform=None,
+    crs=None,
+    cartography_meta: Optional[dict] = None,
 ) -> Dict[str, object]:
     """渲染三类变化专题图 PNG 并落盘，返回含退化说明的元数据 dict。"""
     canvas, info = build_change_canvas(
@@ -293,6 +465,8 @@ def render_change_png(
         run_id=run_id, params_snapshot=params_snapshot,
         otsu_threshold=otsu_threshold, font_path=font_path,
         colors=colors, attribution_lines=attribution_lines,
+        cartographic=cartographic, transform=transform, crs=crs,
+        cartography_meta=cartography_meta,
     )
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
