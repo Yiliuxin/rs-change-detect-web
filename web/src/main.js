@@ -64,6 +64,19 @@ const S = {
   chinaPlaces: [],
 };
 
+// 批次 D11 修复：在线取数组名持久化（刷新页面后仍能识别无 B11 影像对）。
+// 只存组名字符串数组；隐私模式 / 存储被禁用时静默退化为原内存行为，不影响主流程。
+const FETCHED_KEYS_STORAGE = 'rst_fetched_keys';
+function loadFetchedKeys() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(FETCHED_KEYS_STORAGE) || '[]');
+    return Array.isArray(arr) ? arr.filter((x) => typeof x === 'string') : [];
+  } catch (_) { return []; }
+}
+function saveFetchedKeys() {
+  try { localStorage.setItem(FETCHED_KEYS_STORAGE, JSON.stringify([...ON.fetchedKeys])); } catch (_) {}
+}
+
 // 在线取数（可选）卡片独立状态，与离线 S 完全隔离，互不污染。
 const ON = {
   degraded: false,       // 后端未启用在线取数（discover 裸 404 / 网络失败）
@@ -79,9 +92,10 @@ const ON = {
   terminal: '',          // '' | 'SUCCESS' | 'FAILED'
   fetchBbox: null,       // 取数受理时的 AOI 快照（全精度 [w,s,e,n]），成功后据此自动应用
   fetchDates: null,      // 所选候选的实际拍摄日 { t1, t2 }，成功后回填 A 卡时相下拉
-  // 批次 D11：本会话在线取数成功入库的组名（cog_path 为 pair_<name>，即 B 卡 pair.key）。
+  // 批次 D11：在线取数成功入库的组名（cog_path 为 pair_<name>，即 B 卡 pair.key）。
   // 在线取数只下 B02/B03/B04/B08/SCL 五波段、不含 B11，故这些影像对不支持 NDBI/NDMI。
-  fetchedKeys: new Set(),
+  // 刷新后从 localStorage 恢复，避免门控因内存状态丢失而误放行 NDBI/NDMI。
+  fetchedKeys: new Set(loadFetchedKeys()),
   lastFetchName: '',     // 最近一次取数提交规范化后的组名，SUCCESS 后并入 fetchedKeys
 };
 
@@ -754,7 +768,13 @@ function pairHasB11(p) {
   const key = String(p.key || '');
   if (/^L[89]$/.test(s1) || /^L[89]$/.test(s2)) return false;      // Landsat C2 L2
   if (source === 'Landsat C2 L2' || /^landsat_/.test(key)) return false;
-  if (ON.fetchedKeys && ON.fetchedKeys.has(key)) return false;       // 在线取数五波段组
+  // 权威判据：在线取数的 cog_path 固定为 minio://scenes/pair_<name>/<tag>/，
+  // 默认组名 user_YYYYMMDD_HHMM（onlineDefaultName）；cog_path 由后端 sceneVO 返回，
+  // 刷新页面后仍随 /scene/match 重新取回，不依赖本会话内存状态。
+  const cp = [sc.t1 && sc.t1.cog_path, sc.t2 && sc.t2.cog_path]
+    .map((v) => String(v || '')).join(' ');
+  if (/pair_user_\d{8}_\d{4}\//.test(cp) || /^user_\d{8}_\d{4}$/.test(key)) return false;
+  if (ON.fetchedKeys && ON.fetchedKeys.has(key)) return false;       // 自定义组名（本会话 + localStorage）
   return true;                                                       // S2 预置组含 B11
 }
 
@@ -2533,7 +2553,10 @@ async function onlineFetchTerminal(status, data) {
   restoreOnlineFetchButton();
   if (status === 'SUCCESS') {
     // 批次 D11：在线取数只下 5 波段、不含 B11 → 登记组名并即时同步指数可用性
-    if (ON.lastFetchName && ON.fetchedKeys) ON.fetchedKeys.add(ON.lastFetchName);
+    if (ON.lastFetchName && ON.fetchedKeys) {
+      ON.fetchedKeys.add(ON.lastFetchName);
+      saveFetchedKeys();   // 持久化：刷新页面后门控仍生效
+    }
     syncIndexAvailability();
     const ids = (data && data.scene_ids) || {};
     const ok = $('onl-success');
