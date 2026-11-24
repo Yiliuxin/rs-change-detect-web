@@ -8,6 +8,10 @@ import * as demo from './demo.js';
 
 const BASE = '/api/v1';
 const TIMEOUT_MS = 15000; // 重计算接口（POST /scene/match 真实读取 COG 算掩膜）放宽到 15s；constants.py API_TIMEOUT_SEC = 3 仅适用于轻接口，避免 2.5s 误超时降级
+// 同步变化检测 /result/change 走完整管线（读 COG → 掩膜 → Otsu → 渲染），实测 30~35s，
+// 上限预算 90s（constants.py TIME_BUDGET_SEC）。通用 15s 会把它掐断误判成「后端不可用」
+// 而降级到演示数据。这里单独放宽到 120s（90s + 余量），仅作用于同步检测，其余接口仍走 15s。
+const CHANGE_SYNC_TIMEOUT_MS = 120000;
 
 // 认证扩展（注册/登录）：统一注入 Bearer token；401 → 清票据回登录页
 export const AUTH = {
@@ -24,9 +28,9 @@ export const AUTH = {
   toLogin() { location.replace('/login.html'); },
 };
 
-function fetchWithTimeout(url, options) {
+function fetchWithTimeout(url, options, timeoutMs = TIMEOUT_MS) {
   const ctrl = new AbortController();
-  const timer = window.setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+  const timer = window.setTimeout(() => ctrl.abort(), timeoutMs);
   const headers = { ...(options && options.headers) };
   if (AUTH.token) headers['Authorization'] = 'Bearer ' + AUTH.token;
   return fetch(url, { ...options, headers, signal: ctrl.signal })
@@ -57,10 +61,10 @@ function jsonOptions(body) {
  * 通用请求：真实数据 / 空占位降级 / 网络失败降级 / 业务错误抛出
  * @returns {Promise<{data:object, demo:boolean}>}
  */
-async function call(path, body, isPlaceholder, fallback) {
+async function call(path, body, isPlaceholder, fallback, timeoutMs = TIMEOUT_MS) {
   let resp;
   try {
-    resp = await fetchWithTimeout(BASE + path, jsonOptions(body));
+    resp = await fetchWithTimeout(BASE + path, jsonOptions(body), timeoutMs);
   } catch (_) {
     return { data: fallback(), demo: true }; // 8000 未启动 / 超时
   }
@@ -308,6 +312,7 @@ export function runChange(payload) {
     body,
     (d) => !d.run_id && !d.change_png && (!d.stats || !d.stats.length),
     () => demo.demoChange(body),
+    CHANGE_SYNC_TIMEOUT_MS,
   );
 }
 
