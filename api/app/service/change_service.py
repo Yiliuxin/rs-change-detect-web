@@ -49,6 +49,7 @@ from app.algorithm.patches import patch_stats
 from app.algorithm.radiometric import (
     assert_same_caliber, check_baseline, to_reflectance,
 )
+from app.algorithm.renderer import render_change_overlay
 from app.algorithm.cva_detector import detect_change_cva
 from app.algorithm.regression_detector import detect_change_regression
 from app.algorithm.writers import (
@@ -868,6 +869,12 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
         change_geotiff_path = str(exported["files"]["geotiff"])
         change_png_path = str(exported["files"]["png"])
 
+        # 地图叠加专用纯分类图：尺寸严格等于变化栅格、无页眉/图例/署名。
+        # 报告仍用 change.png（带制图要素成品图），二者用途分离。用 band_marked
+        # 与 render_change 同一份数据，保证四类（含过渡带）着色与图例联动一致。
+        overlay_meta = render_change_overlay(
+            band_marked, out_dir / "change_overlay.png")
+
         # REQ-08/11/12：三类统计幂等入库 + task 终态
         # change_result 表仍登记本地绝对路径，schema / 仓储层均不改
         change_result_repo.upsert_stats(run_id, stats, change_geotiff_path, change_png_path)
@@ -892,6 +899,9 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
                 run_id, resp_names.get("change.tif", "change.tif")),
             "change_png": artifact_url(
                 run_id, resp_names.get("change.png", "change.png")),
+            # 地图叠加专用：纯分类图（无制图要素），前端优先用它铺 AOI 层。
+            # 老 run 无此产物时前端自动回退 change.png，历史行为不变。
+            "change_overlay": artifact_url(run_id, "change_overlay.png"),
             "threshold": float(thr),
             "valid_ratio": float(valid_ratio),
             "stats": stats,

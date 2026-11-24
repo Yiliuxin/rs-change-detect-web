@@ -857,10 +857,14 @@ function applyChangeResult(data) {
     if (/^demo:/.test(raw)) return demo.makeChangePngDataUrl();
     return api.artifactObjectUrl(raw);
   };
+  // 地图叠加优先用纯分类图 change_overlay（尺寸=栅格、无页眉/图例/署名，按 AOI
+  // bounds 铺上去正好对齐）；老 run 无该产物时回退 change.png（带制图要素成品图）。
+  const rawOverlay = data.change_overlay;
+  const rawPngOverlay = rawOverlay && !/^demo:/.test(rawOverlay) ? rawOverlay : '';
   const rawPng = data.change_png;
   S.changePngUrl = rawPng && /^demo:/.test(rawPng) ? demo.makeChangePngDataUrl() : rawPng;
   (async () => {
-    const png = await loadImage(rawPng);
+    const png = await loadImage(rawPngOverlay || rawPng);
     if (!png) return;      // 取图失败（缺产物 / 会话过期）→ 不覆盖地图，静默保留上一张
     S.changePngUrl = png;
     if (!S.reclass.preview) S.reclass.basePngUrl = png;  // 批次 K：「还原」用的基准图
@@ -1279,9 +1283,12 @@ function updateReclassUi() {
 function applyReclassResult(rv) {
   const st = S.reclass;
   st.preview = rv;
-  if (rv && rv.change_png_data && S.aoi) {
-    S.changePngUrl = rv.change_png_data;
-    M.setImage(map, rv.change_png_data, S.aoi);   // 保持原 bounds，地图不跳动
+  if (rv && (rv.change_overlay_data || rv.change_png_data) && S.aoi) {
+    // 纯分类图优先：无页眉/图例/署名，尺寸=栅格，按 AOI bounds 铺上去正好对齐；
+    // 老后端无 change_overlay_data 时回退带制图要素的 change_png_data。
+    const overlayImg = rv.change_overlay_data || rv.change_png_data;
+    S.changePngUrl = overlayImg;
+    M.setImage(map, overlayImg, S.aoi);   // 保持原 bounds，地图不跳动
     M.setImageOpacity(map, S.opacity);
   }
   renderChangeResult();   // 三类面积/过渡带/直方图/图例联动；不触发 EXP.onRunChanged()
@@ -1943,6 +1950,7 @@ function loadHistoryRun(d) {
   };
   // 批次 D11：历史回看专题图候选补 change_ndbi* / change_ndmi* 归档名（与后端白名单一致）
   const png = artUrl([
+    'change_overlay.png',  // 纯分类图优先：无图例/署名，按 bbox 叠加不产生文字贴图
     'change.png', 'change_ndvi.png', 'change_ndwi.png', 'change_ndbi.png', 'change_ndmi.png',
     'change_ndvi_reg.png', 'change_ndwi_reg.png', 'change_ndbi_reg.png', 'change_ndmi_reg.png',
   ]);

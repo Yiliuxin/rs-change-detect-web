@@ -38,6 +38,9 @@ ARTIFACT_MEDIA_TYPES: Dict[str, str] = {
     "t2_composite.png": "image/png",
     # REQ-12：三类面积柱状图（PDF 内嵌 + 独立产物，供前端复用）
     "area_chart.png": "image/png",
+    # 地图叠加专用纯分类图：尺寸等于栅格、无页眉/图例/署名，前端按 AOI bounds
+    # 铺到地图上正好对齐。与带制图要素的 change.png（报告成品）用途分离。
+    "change_overlay.png": "image/png",
     # 批次 I：双时相变化动画（导出后由同一产物端点带鉴权下载）
     ANIMATION_FILENAME: "image/gif",
 }
@@ -203,14 +206,14 @@ def artifact_manifest(run_id: str, index: str,
         reg = regression_artifact_names()
         names = [
             *reg.values(), "t1_composite.png", "t2_composite.png",
-            "area_chart.png", *idx_names,
+            "area_chart.png", "change_overlay.png", *idx_names,
             *regression_archive_names(index).values(),
         ]
     else:
         names = [
             "change.tif", "change.png", "report.pdf", "change.geojson",
             "t1_composite.png", "t2_composite.png",
-            "area_chart.png", *idx_names,
+            "area_chart.png", "change_overlay.png", *idx_names,
             *index_artifact_names(index).values(),
         ]
     return {n: artifact_url(run_id, n) for n in dict.fromkeys(names)

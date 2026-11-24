@@ -175,7 +175,8 @@ class ReclassResponse(BaseModel):
     transition_pct: float = Field(0.0, description="过渡带占比（0~100 百分数）")
     transition_band: Dict[str, Any] = Field(default_factory=dict, description="过渡带完整摘要")
     index_histogram: Dict[str, Any] = Field(default_factory=dict, description="直方图（阈值线/过渡带区间已更新）")
-    change_png_data: str = Field("", description="内存渲染专题图 data:image/png;base64,...（不落盘）")
+    change_png_data: str = Field("", description="内存渲染专题图 data:image/png;base64,...（不落盘，带制图要素）")
+    change_overlay_data: str = Field("", description="纯分类叠加图 data:image/png;base64,...（尺寸=栅格、无图例署名，供地图叠加优先使用）")
     computed_at: str = Field("", description="UTC ISO8601 带时区")
 
 

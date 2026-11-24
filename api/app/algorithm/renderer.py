@@ -122,6 +122,7 @@ __all__ = [
     "CLASS_COLORS", "CLASS_NAMES_ZH", "CLASS_NAMES_EN",
     "MAP_HEADER_H", "MAP_LEGEND_H", "CARTOGRAPHY_STRIP_H",
     "draw_text_5x7", "colorize_change", "build_change_canvas", "render_change_png",
+    "render_change_overlay",
 ]
 
 # 供 GIF 动画复用专题图版面：真彩帧与专题帧必须同尺寸、同图幅位置
@@ -488,3 +489,39 @@ def render_change_png(
         "height": int(canvas.shape[0]),
     })
     return info
+
+
+def render_change_overlay(
+    change,
+    output_path,
+    *,
+    colors: Optional[Dict[int, Tuple[int, int, int]]] = None,
+) -> Dict[str, object]:
+    """纯分类着色图（地图叠加专用）：尺寸严格等于变化栅格，无页眉/图例/署名。
+
+    与 :func:`render_change_png` 的「报告专题图」用途分离：
+
+    - ``render_change_png`` 产出带制图要素的成品图（页眉 + 图幅 + 图例 + 署名），
+      用于报告 / 下载 / PDF；画布比图幅高，不能当地理配准层。
+    - 本函数只输出 ``colorize_change(change)`` 的 (H, W, 3) 像素，H/W 与输入栅格
+      逐像元一致，前端按 AOI bounds 铺到地图上正好对齐，且不含任何文字。
+
+    配色与 ``render_change_png`` 同源（``CLASS_COLORS`` / 过渡带色），因此地图
+    叠加层与报告图例的四类联动高亮语义一致。纯函数口径：不改 ``change``。
+    """
+    rgb = colorize_change(change, colors)
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        _write_png_rasterio(rgb, path)
+        writer = "rasterio.PNG"
+    except Exception:  # noqa: BLE001 - 与 render_change_png 同款 PIL 兜底
+        from PIL import Image
+        Image.fromarray(rgb).save(str(path))
+        writer = "PIL"
+    return {
+        "path": str(path.resolve()),
+        "width": int(rgb.shape[1]),
+        "height": int(rgb.shape[0]),
+        "writer": writer,
+    }

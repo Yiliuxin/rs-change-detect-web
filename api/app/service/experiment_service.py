@@ -46,7 +46,7 @@ from app.algorithm.cva_detector import detect_change_cva
 from app.algorithm.morphology import clean_change_map
 from app.algorithm.otsu import otsu_threshold
 from app.algorithm.regression_detector import detect_change_regression
-from app.algorithm.renderer import build_change_canvas
+from app.algorithm.renderer import build_change_canvas, colorize_change
 from app.api.errors import ApiError
 from app.config.constants import (
     COMPARE_MAX_VARIANTS, ERROR_MESSAGES, EXPERIMENTS_CACHE_COMPARE_KEY,
@@ -784,6 +784,8 @@ def reclass(run_id: str, scale) -> dict:
         params_snapshot=ctx.snapshot, otsu_threshold=float(r["threshold"]),
     )
     png_data = _canvas_png_data_url(canvas)
+    # 地图叠加专用纯分类图：同 reclass 口径的 colorize，尺寸=栅格、无图例署名。
+    overlay_data = _canvas_png_data_url(colorize_change(marked))
 
     # 过渡带与直方图阈值线：沿用同一 band 常量，只换阈值 T，分布本身不变
     band_summary = transition_band_stats(
@@ -806,6 +808,8 @@ def reclass(run_id: str, scale) -> dict:
         "transition_band": band_summary,
         "index_histogram": hist,
         "change_png_data": png_data,
+        # 前端地图叠加优先用这张纯分类图（无页眉/图例/署名）；老前端忽略此字段。
+        "change_overlay_data": overlay_data,
         "computed_at": datetime.now(timezone.utc).isoformat(),
     }
 
