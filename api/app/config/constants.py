@@ -61,6 +61,16 @@ SWIR_INDEXES: Final[Tuple[str, ...]] = tuple(
 B11_MISSING_MESSAGE: Final[str] = (
     "该影像对未包含 B11 短波红外，不支持 " + "/".join(SWIR_INDEXES)
 )
+# 在线取数 AOI 覆盖率下限（REQ-02 在线分支）：候选对 AOI 覆盖 < 90% 时拒绝取数/入库。
+# 根因：在线取数只下载「AOI ∩ 影像」窗口，却把 scene bbox 登记为完整 AOI；AOI 大部
+# 分越界时检测按完整 AOI 裁切 → 大量 nodata → EX11。取数前拦住可让坏数据进不了库。
+AOI_COVERAGE_MIN: Final[float] = 0.90
+# 覆盖率不足的 EX11 中文明确诊断（模板：pct / min / miss）；逐字取常量源、不臆造。
+AOI_COVERAGE_DIAGNOSIS: Final[str] = (
+    "AOI 仅 {pct:.1f}% 落在影像范围内（低于 {min:.0f}% 下限），"
+    "约 {miss:.1f}% 面积超出影像边界被填为无数据像元，导致有效像元不足（EX11）。"
+    "请重新在线取数，选能完整覆盖 AOI 的候选影像，或缩小 AOI 后重试。"
+)
 # 手动阈值开区间 (-1, 1)：越界 → EX12。对称阈值取 |T| 分类，负号不改变三类判别语义。
 MANUAL_THRESHOLD_RANGE: Final[Tuple[float, float]] = (-1.0, 1.0)
 

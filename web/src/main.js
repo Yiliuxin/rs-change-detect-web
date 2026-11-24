@@ -1487,8 +1487,12 @@ function renderValidRatio() {
     ex5 = true;
   } else {
     v.classList.add('stop'); note.classList.add('stop');
-    note.textContent = '⛔ 有效像元不足，本轮检测终止　[EX11] ' + ERROR_MESSAGES.EX11;
-    showError({ code: 'EX11', message: ERROR_MESSAGES.EX11, run_id: S.change && S.change.run_id });
+    // 若后端在 params_snapshot 里附带了覆盖诊断（AOI 越界型 EX11），一并展示，
+    // 帮助区分「AOI 超出影像」与「真的云多」；云多时无诊断，文案与历史一致。
+    const covDiag = (S.change && S.change.params_snapshot && S.change.params_snapshot.coverage_diagnosis);
+    note.textContent = '⛔ 有效像元不足，本轮检测终止　[EX11] ' + ERROR_MESSAGES.EX11
+      + (covDiag ? '；' + covDiag : '');
+    showError({ code: 'EX11', message: ERROR_MESSAGES.EX11 + (covDiag ? '；' + covDiag : ''), run_id: S.change && S.change.run_id });
   }
   const bar = $('ex5-bar');
   const snapWarn = S.change && S.change.params_snapshot && S.change.params_snapshot.warning;
@@ -2405,8 +2409,12 @@ function clearOnlineDegraded() {
 // 按 code 展示中文提示（errors.js ERROR_MESSAGES，含 SYS-06/SYS-07），未命中回退后端原文
 function onlineErrText(payload) {
   const code = payload && payload.code;
-  const zh = errorMessage({ code, message: payload && payload.message });
-  return (code ? '[' + code + '] ' : '') + zh;
+  const backendMsg = payload && payload.message;
+  const zh = errorMessage({ code, message: backendMsg });
+  // 后端携带具体诊断（message ≠ 内置映射）时透传原文：如 AOI 覆盖率不足的可执行建议，
+  // 否则会被 ERROR_MESSAGES[EX2] 的通用文案吞掉。正常错误 message === 内置映射，行为不变。
+  const text = (backendMsg && backendMsg !== zh) ? backendMsg : zh;
+  return (code ? '[' + code + '] ' : '') + text;
 }
 
 async function onlineDiscover() {

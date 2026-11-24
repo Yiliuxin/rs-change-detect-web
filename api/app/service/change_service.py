@@ -31,6 +31,7 @@ from app.algorithm.change_detector import (
     transition_band_mask, transition_band_stats,
 )
 from app.algorithm.cog_reader import read_aoi
+from app.algorithm.geotransform import aoi_coverage
 from app.algorithm.composite import (
     assert_grid_aligned, false_color, true_color, write_composite_png,
 )
@@ -55,6 +56,7 @@ from app.algorithm.writers import (
 )
 from app.api.errors import ApiError, as_api_error
 from app.config.constants import (
+    AOI_COVERAGE_DIAGNOSIS, AOI_COVERAGE_MIN, ERROR_MESSAGES,
     B11_MISSING_MESSAGE, BLOCK_SIZE, EXPORT_FORMATS, INDEX_AUXILIARY,
     INDEX_RASTER_T1, INDEX_RASTER_T2,
     LANDSAT_SENSORS, MANUAL_THRESHOLD_RANGE, METHOD_CVA, METHOD_OTSU,
@@ -91,6 +93,29 @@ _INDEX_CALCS = {
     "NDBI": index_calculator.ndbi,
     "NDMI": index_calculator.ndmi,
 }
+
+
+def _ex11_coverage_diagnosis(b04_path: str, bbox: BBox) -> Optional[str]:
+    """EX11 终止时补充「AOI 越界」诊断；非越界（云多）或算不出时返回 None。
+
+    仅失败路径调用：重新打开已解析到本地的 B04 头算覆盖率（与在线取数同口径）。
+    覆盖率低于常量下限时给出可执行中文诊断，帮助区分「AOI 超出影像」与「真云多」。
+    任何读取异常都吞掉返回 None——诊断是附加信息，绝不阻断/改写原有 EX11 语义。
+    """
+    try:
+        import rasterio  # 局部 import：诊断专用，正常检测路径零依赖开销
+
+        with rasterio.open(str(b04_path)) as ds:
+            info = aoi_coverage(ds, bbox)
+        if float(info["coverage"]) >= AOI_COVERAGE_MIN:
+            return None  # 覆盖率合格，EX11 由云/掩膜造成，不附误导性诊断
+        return AOI_COVERAGE_DIAGNOSIS.format(
+            pct=float(info["coverage"]) * 100.0,
+            min=AOI_COVERAGE_MIN * 100.0,
+            miss=float(info["missing_pct"]),
+        )
+    except Exception:  # noqa: BLE001 - 诊断尽力而为，绝不影响主错误
+        return None
 
 
 def _require_b11(cog_path: str, run_id: str, sensor: str) -> Path:
@@ -515,10 +540,23 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
         if verdict.terminate:
             snapshot["valid_ratio"] = float(valid_ratio)
             snapshot["valid_ratio_code"] = verdict.code
+            err_message = None
+            if verdict.code == "EX11":
+                # 兜底诊断：若是在线取数遗留的「AOI 越界」坏数据，给出可执行建议；
+                # 云多导致的 EX11 不附诊断（aoi_coverage≥下限返回 None）。
+                try:
+                    diag = _ex11_coverage_diagnosis(
+                        str(scenes["t1"]["paths"]["B04"]), bbox
+                    )
+                except Exception:  # noqa: BLE001 - 诊断尽力而为
+                    diag = None
+                if diag:
+                    snapshot["coverage_diagnosis"] = diag
+                    err_message = ERROR_MESSAGES["EX11"] + "；" + diag
             task_repo.update_snapshot(run_id, snapshot)
             task_repo.update_status(run_id, "FAILED",
                                     finished_at=utc_now(), error_code=verdict.code)
-            raise ApiError(verdict.code, run_id=run_id)
+            raise ApiError(verdict.code, run_id=run_id, message=err_message)
 
         profile = scenes["t1"]["profile"]
 

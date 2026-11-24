@@ -84,6 +84,46 @@ def aoi_window(ds: rasterio.DatasetReader, bbox: BBox) -> Window:
     return from_bounds(*bounds, transform=ds.transform).round_offsets().round_lengths()
 
 
+def unclipped_window(ds: rasterio.DatasetReader, bbox: BBox):
+    """AOI envelope → **未裁剪**的像素窗口（WGS84 → 数据集 CRS）。
+
+    不做 max/min 裁剪，保留越界信息供覆盖率计算。返回 ``(w, row0, col0, row1, col1)``，
+    后四项为整数像素边界（floor/ceil，保守覆盖整个 AOI）。
+    """
+    xs, ys = warp_transform(
+        "EPSG:4326", ds.crs, [bbox.minx, bbox.maxx], [bbox.miny, bbox.maxy]
+    )
+    w = from_bounds(min(xs), min(ys), max(xs), max(ys), transform=ds.transform)
+    row0, col0 = int(math.floor(w.row_off)), int(math.floor(w.col_off))
+    row1 = int(math.ceil(w.row_off + w.height))
+    col1 = int(math.ceil(w.col_off + w.width))
+    return w, row0, col0, row1, col1
+
+
+def aoi_coverage(ds: rasterio.DatasetReader, bbox: BBox) -> Dict[str, object]:
+    """AOI 落在数据集栅格范围内的覆盖率（在线取数覆盖率校验的唯一口径）。
+
+    覆盖率 = 交集像元数 / AOI 完整窗口像元数。1.0 = AOI 完整落在影像内；
+    0.5 = 一半越界（会被填 nodata，触发 EX11）。返回
+    ``{coverage, aoi_area_px, overlap_area_px, missing_pct, clipped_window}``。
+    纯函数：只读 ds 的 crs/transform/尺寸，不读像元。
+    """
+    _w, row0, col0, row1, col1 = unclipped_window(ds, bbox)
+    aoi_area = max(0, row1 - row0) * max(0, col1 - col0)
+    cr0, cc0 = max(0, row0), max(0, col0)
+    cr1, cc1 = min(ds.height, row1), min(ds.width, col1)
+    overlap = max(0, cr1 - cr0) * max(0, cc1 - cc0)
+    coverage = (overlap / aoi_area) if aoi_area > 0 else 0.0
+    coverage = min(1.0, max(0.0, coverage))
+    return {
+        "coverage": coverage,
+        "aoi_area_px": aoi_area,
+        "overlap_area_px": overlap,
+        "missing_pct": (1.0 - coverage) * 100.0,
+        "clipped_window": Window(cc0, cr0, max(0, cc1 - cc0), max(0, cr1 - cr0)),
+    }
+
+
 def window_transform(ds: rasterio.DatasetReader, window: Window):
     """返回窗口对应的仿射变换。"""
     return rasterio.windows.transform(window, ds.transform)

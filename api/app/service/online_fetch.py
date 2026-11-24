@@ -45,10 +45,13 @@ import numpy as np
 import rasterio
 from rasterio.windows import Window
 
-from app.algorithm.geotransform import BBox, validate_aoi_span
+from app.algorithm.geotransform import (
+    BBox, aoi_coverage, unclipped_window as _unclipped_window, validate_aoi_span,
+)
 from app.api.errors import ApiError, as_api_error
 from app.config.constants import (
-    COG_BUCKET, ERROR_MESSAGES, RADIOMETRIC_FORMULAS, SENSOR_S2,
+    AOI_COVERAGE_DIAGNOSIS, AOI_COVERAGE_MIN, COG_BUCKET, ERROR_MESSAGES,
+    RADIOMETRIC_FORMULAS, SENSOR_S2,
 )
 from app.config.storage import StorageSettings, ensure_buckets, get_client, object_url, upload_file
 from app.repository import online_repo, scene_repo
@@ -78,6 +81,9 @@ RETRY_DELAYS: Tuple[int, ...] = (2, 4, 8, 16, 30, 30)
 MIN_PROC_BASELINE = 4.0
 # 候选上限（共同 tile 通常 1~4 个，兜底防前端一次拉爆）
 MAX_CANDIDATES = 20
+# 覆盖率阈值 / 诊断模板统一取常量源（discover footprint 估算 + fetch 真实栅格共用）
+MIN_AOI_COVERAGE = AOI_COVERAGE_MIN
+COVERAGE_HINT = AOI_COVERAGE_DIAGNOSIS
 
 # 与 scripts/seed_scenes.py 完全一致的 uuid5 命名空间（可复现）
 UUID_NS = uuid.UUID("6ba7b811-9dad-11d1-80b4-00c04fd430c8")
@@ -93,8 +99,9 @@ STATUS_FAILED = "FAILED"
 _ACTIVE_STATUSES = (STATUS_PENDING, STATUS_RUNNING)
 
 __all__ = [
-    "BANDS", "TOTAL_BANDS", "discover", "start_fetch", "get_status",
-    "cog_object_prefix", "fetch_root",
+    "BANDS", "TOTAL_BANDS", "MIN_AOI_COVERAGE", "discover", "start_fetch",
+    "get_status", "cog_object_prefix", "fetch_root", "aoi_coverage",
+    "coverage_diagnosis",
 ]
 
 # --------------------------------------------------------------------------- #
@@ -249,10 +256,39 @@ def _cloud_value(raw) -> Optional[float]:
         return None
 
 
-def _phase_candidates(features: Sequence[dict]) -> Dict[str, dict]:
+def _bbox_coverage(aoi: BBox, feat: dict) -> Optional[float]:
+    """STAC feature footprint 对 AOI 的几何覆盖率估算（0~1）。
+
+    footprint 取 ``geometry`` 的外接矩形（WGS84）。返回 ``None`` 表示 feature
+    无可用几何（如单测的假 feature / STAC 精简响应）——此时 discover 层**不拦截**，
+    交由 fetch 层真实栅格精确校验兜底，绝不因缺字段误杀候选。
+    """
+    geom = feat.get("geometry")
+    if not isinstance(geom, dict):
+        return None
+    coords = (geom.get("coordinates") or [[]])[0]
+    if not coords or len(coords) < 3:
+        return None
+    try:
+        xs = [float(p[0]) for p in coords[:4]]
+        ys = [float(p[1]) for p in coords[:4]]
+        fx0, fx1, fy0, fy1 = min(xs), max(xs), min(ys), max(ys)
+    except (TypeError, ValueError, IndexError):
+        return None
+    inter_x = max(0.0, min(aoi.maxx, fx1) - max(aoi.minx, fx0))
+    inter_y = max(0.0, min(aoi.maxy, fy1) - max(aoi.miny, fy0))
+    aoi_area = aoi.area_deg2
+    if aoi_area <= 0:
+        return None
+    return min(1.0, (inter_x * inter_y) / aoi_area)
+
+
+def _phase_candidates(features: Sequence[dict], aoi: Optional[BBox] = None) -> Dict[str, dict]:
     """单时相特征 → {tile: 该 tile 云量最低的候选}，过滤基线 < 04.00（REQ-04）。
 
     候选字段：source_id / date / cloud_cover / proc_baseline（响应里的 t1|t2 结构）。
+    ``aoi`` 给定时叠加 footprint 覆盖率粗筛（< MIN_AOI_COVERAGE 的候选剔除）；
+    无 footprint 的 feature 放过，由 fetch 层真实栅格校验兜底。
     """
     best: Dict[str, dict] = {}
     for feat in features:
@@ -264,6 +300,10 @@ def _phase_candidates(features: Sequence[dict]) -> Dict[str, dict]:
         baseline = _baseline_value(props.get("s2:processing_baseline"))
         if baseline is None or baseline < MIN_PROC_BASELINE:
             continue  # EX9 口径：基线不可判定或未达标 → 不进候选
+        if aoi is not None:
+            cov = _bbox_coverage(aoi, feat)
+            if cov is not None and cov < MIN_AOI_COVERAGE:
+                continue  # 覆盖率不足 → 不进候选（根治 EX11 第一层）
         tile = parts[1]
         acq = str(props.get("datetime") or parts[2])[:10]
         item = {
@@ -304,8 +344,9 @@ def discover(aoi_geom: Optional[str], bbox: Optional[Sequence[float]],
         w1 = _window_bounds(t1_window, "t1_window", run_id)
         w2 = _window_bounds(t2_window, "t2_window", run_id)
 
-        ph1 = _phase_candidates(_stac_search(box, _stac_datetime(*w1), run_id))
-        ph2 = _phase_candidates(_stac_search(box, _stac_datetime(*w2), run_id))
+        # 传 box 启用 footprint 覆盖率粗筛（缺 geometry 的 feature 自动放过）
+        ph1 = _phase_candidates(_stac_search(box, _stac_datetime(*w1), run_id), box)
+        ph2 = _phase_candidates(_stac_search(box, _stac_datetime(*w2), run_id), box)
 
         common = sorted(set(ph1) & set(ph2))  # 两时相共同 tile
         candidates = [
@@ -319,7 +360,8 @@ def discover(aoi_geom: Optional[str], bbox: Optional[Sequence[float]],
         ]
         candidates.sort(key=lambda c: _cloud_rank(c["t1"]) + _cloud_rank(c["t2"]))
         if not candidates:
-            # 24.6%：无同时相可用 tile → EX2(404)
+            # 24.6%：无同时相可用 tile → EX2(404)，文案逐字取 ERROR_MESSAGES
+            # （含 footprint 覆盖率过滤后为空的情形；诊断在 fetch/EX11 层给出）
             raise ApiError("EX2", run_id=run_id,
                            detail=f"两时相无共同 tile（t1={w1} / t2={w2}）")
         return {"candidates": candidates[:MAX_CANDIDATES], "run_id": run_id}
@@ -364,18 +406,7 @@ def _ensure_gdal_env() -> None:
 
 def _window_for_bbox(src, box: BBox) -> Window:
     """AOI envelope → 像素窗口（WGS84 → 数据集 CRS），并裁剪到数据集范围内。"""
-    from rasterio.warp import transform as warp_transform
-
-    xs, ys = warp_transform(
-        "EPSG:4326", src.crs,
-        [box.minx, box.maxx], [box.miny, box.maxy],
-    )
-    w = rasterio.windows.from_bounds(
-        min(xs), min(ys), max(xs), max(ys), transform=src.transform
-    )
-    row0, col0 = int(np.floor(w.row_off)), int(np.floor(w.col_off))
-    row1 = int(np.ceil(w.row_off + w.height))
-    col1 = int(np.ceil(w.col_off + w.width))
+    _w, row0, col0, row1, col1 = _unclipped_window(src, box)
     row0, col0 = max(0, row0), max(0, col0)
     row1, col1 = min(src.height, row1), min(src.width, col1)
     if row1 <= row0 or col1 <= col0:
@@ -432,6 +463,35 @@ def _download_band(url: str, band: str, box: BBox, dest, run_id: Optional[str]):
                 time.sleep(delay)
     raise ApiError("SYS-06", run_id=run_id, http_status=500,
                    detail=f"波段 {band} 下载失败（已重试 {len(RETRY_DELAYS)} 次）：{last}")
+
+
+def coverage_diagnosis(info: dict, tag: str) -> Optional[str]:
+    """覆盖率不足时返回中文诊断文案，达标返回 None（纯函数，便于单测）。
+
+    文案含实际覆盖率与可执行建议（换候选 / 缩小 AOI），经 ``ApiError.message``
+    → ``_fail`` → ``GET /fetch/{id}`` 的 error.message 透传到在线取数卡。
+    """
+    if float(info.get("coverage", 0.0)) >= MIN_AOI_COVERAGE:
+        return None
+    return f"[{tag}] " + COVERAGE_HINT.format(
+        pct=float(info.get("coverage", 0.0)) * 100.0,
+        min=MIN_AOI_COVERAGE * 100.0,
+        miss=float(info.get("missing_pct", 0.0)),
+    )
+
+
+def _verify_coverage(src, box: BBox, tag: str) -> dict:
+    """用真实 COG 的栅格几何精确计算覆盖率；不足则抛 EX2 + 中文诊断（根治 EX11）。
+
+    ``src`` 为已打开的 B04（10m 参考波段，与检测 read_aoi 的参考网格一致），
+    单测可传合成 dataset。覆盖率达标返回 info dict，不足抛 ApiError。
+    """
+    info = aoi_coverage(src, box)
+    diag = coverage_diagnosis(info, tag)
+    if diag is not None:
+        raise ApiError("EX2", http_status=400, message=diag,
+                       detail=f"{tag} AOI 覆盖率 {info['coverage']:.4f} < {MIN_AOI_COVERAGE}")
+    return info
 
 
 def _assert_has_data(paths: Dict[str, object], tag: str, run_id: Optional[str]) -> None:
@@ -526,13 +586,19 @@ def _release_active(task: dict) -> None:
         _active.pop(key, None)
 
 
-def _fail(fetch_id: str, code: str, detail: Optional[str] = None) -> None:
+def _fail(fetch_id: str, code: str, detail: Optional[str] = None,
+          message: Optional[str] = None) -> None:
+    """标记失败。``message`` 给定时覆写 error.message（用于覆盖率等中文诊断透传），
+    缺省仍逐字取 ERROR_MESSAGES，既有错误码行为不变。"""
     with _lock:
         task = _tasks.get(fetch_id)
         if task is None:
             return
         task["status"] = STATUS_FAILED
-        task["error"] = {"code": code, "message": ERROR_MESSAGES.get(code, code)}
+        task["error"] = {
+            "code": code,
+            "message": message if message is not None else ERROR_MESSAGES.get(code, code),
+        }
         task["detail"] = detail
         _release_active(task)
     logger.warning("在线取数失败 fetch_id=%s code=%s detail=%s", fetch_id, code, detail)
@@ -601,6 +667,22 @@ def _run_fetch(fetch_id: str) -> None:
                 continue
 
             url = _cog_url(meta["source_id"])
+            # 根治 EX11：下载前用真实 COG 的 B04 栅格几何精确校验 AOI 覆盖率。
+            # 只开 header 读 transform/尺寸（aoi_coverage 不读像元），开销极小。
+            # 覆盖率不足 → ApiError(EX2, 中文诊断) → _fail 透传前端，坏数据不入库。
+            try:
+                with rasterio.open(f"/vsicurl/{url}/B04.tif") as _ref:
+                    _cov_info = _verify_coverage(_ref, box, tag)
+                logger.info("覆盖率校验通过 fetch_id=%s tag=%s coverage=%.4f",
+                            fetch_id, tag, _cov_info["coverage"])
+            except ApiError:
+                raise  # 覆盖率不足的诊断原样透传
+            except Exception as exc:  # noqa: BLE001 - 预检本身失败归 SYS-06
+                raise ApiError(
+                    "SYS-06", run_id=fetch_id, http_status=500,
+                    detail=f"{tag} 覆盖率预检无法打开 B04：{type(exc).__name__}: {exc}",
+                ) from exc
+
             paths: Dict[str, object] = {}
             for band in BANDS:
                 dest = root / f"{tag}_{band}.tif"
@@ -616,10 +698,10 @@ def _run_fetch(fetch_id: str) -> None:
 
         _succeed(fetch_id, scene_ids)
     except ApiError as exc:
-        _fail(fetch_id, exc.code, exc.detail)
+        _fail(fetch_id, exc.code, exc.detail, message=exc.message)
     except Exception as exc:  # noqa: BLE001 - 兜底归一
         mapped = as_api_error(exc, run_id=fetch_id)
-        _fail(fetch_id, mapped.code, mapped.detail)
+        _fail(fetch_id, mapped.code, mapped.detail, message=mapped.message)
 
 
 # --------------------------------------------------------------------------- #
