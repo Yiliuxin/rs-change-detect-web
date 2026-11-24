@@ -51,6 +51,7 @@ class SceneMatchItem(BaseModel):
     tile: Optional[str] = None
     proc_baseline: Optional[str] = None
     cog_path: str = ""
+    has_b11: bool = Field(False, description="是否含 B11 短波红外（决定 NDBI/NDMI 可用性）")
 
 
 class ScenePairListResponse(BaseModel):

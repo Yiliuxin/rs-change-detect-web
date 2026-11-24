@@ -749,31 +749,37 @@ function runParams() {
 }
 
 // ===== 批次 D11（REQ-07 / EX11 前端拦截）：无 B11 影像对禁用 NDBI / NDMI =====
-// B11 是 Sentinel-2 短波红外（20m）：11 组 S2 预置影像对含 B11；Landsat C2 L2
-// （sensor L8/L9）组与在线取数（只下 B02/B03/B04/B08/SCL 五波段）不含 B11。
+// B11 是 Sentinel-2 短波红外（20m）：S2 预置组与新版在线取数（含 B11，已重采样到
+// 10m）支持 NDBI/NDMI；Landsat C2 L2（sensor L8/L9）与早期 5 波段在线取数不含 B11。
 // 这里只做前端可用性门控：不新增错误码、不改 ERROR_MESSAGES；若后端仍返回 EX11 +
 // 「该影像对未包含 B11 短波红外，不支持 NDBI/NDMI」，沿用既有 handleErr → showError
 // 展示后端原文（experiments.js 侧沿用 inlineText），不自行臆造错误语义。
 const B11_INDEXES = ['NDBI', 'NDMI'];
 const B11_HINT = '该影像对未包含 B11 短波红外，不支持 NDBI/NDMI';
 
-// 判断单组影像对是否含 B11：复用影像对卡片里的 sensor / source / key 信息。
-// Landsat 判别口径与 syncPresetMeta 的 /^L[89]$/ 完全一致。
+// 判断单组影像对是否含 B11。
+// 权威判据：后端 sceneVO.has_b11（实际探测 MinIO 对象/本地文件，随 /scene/match
+// 返回），两景都有才放行。新版在线取数带 B11 → 自动解锁；早期 5 波段在线数据与
+// Landsat → 继续禁用，无需靠组名猜测。
+// 回退判据：老接口/演示降级无 has_b11 字段时，沿用 sensor / source / 组名口径。
 function pairHasB11(p) {
   if (!p) return true;                       // 未选影像对：不误禁（保持 4 项可用）
   const sc = p.scenes || {};
-  const s1 = String((sc.t1 && sc.t1.sensor) || '').trim().toUpperCase();
-  const s2 = String((sc.t2 && sc.t2.sensor) || '').trim().toUpperCase();
+  const t1 = sc.t1 || {};
+  const t2 = sc.t2 || {};
+  // 两景都明确带 has_b11 字段 → 以服务端探测结果为准
+  if (t1.has_b11 !== undefined && t2.has_b11 !== undefined) {
+    return Boolean(t1.has_b11) && Boolean(t2.has_b11);
+  }
+  // 回退：按 sensor / source / key 判别（老接口、demo 降级、无字段的旧契约）
+  const s1 = String(t1.sensor || '').trim().toUpperCase();
+  const s2 = String(t2.sensor || '').trim().toUpperCase();
   const source = String(p.source || '').trim();
   const key = String(p.key || '');
   if (/^L[89]$/.test(s1) || /^L[89]$/.test(s2)) return false;      // Landsat C2 L2
   if (source === 'Landsat C2 L2' || /^landsat_/.test(key)) return false;
-  // 权威判据：在线取数的 cog_path 固定为 minio://scenes/pair_<name>/<tag>/，
-  // 默认组名 user_YYYYMMDD_HHMM（onlineDefaultName）；cog_path 由后端 sceneVO 返回，
-  // 刷新页面后仍随 /scene/match 重新取回，不依赖本会话内存状态。
-  const cp = [sc.t1 && sc.t1.cog_path, sc.t2 && sc.t2.cog_path]
-    .map((v) => String(v || '')).join(' ');
-  if (/pair_user_\d{8}_\d{4}\//.test(cp) || /^user_\d{8}_\d{4}$/.test(key)) return false;
+  const cp = [t1.cog_path, t2.cog_path].map((v) => String(v || '')).join(' ');
+  if (/pair_user_\d{8}_\d{4}\//.test(cp) || /^user_\d{8}_\d{4}$/.test(key)) return false; // 早期 5 波段在线组
   if (ON.fetchedKeys && ON.fetchedKeys.has(key)) return false;       // 自定义组名（本会话 + localStorage）
   return true;                                                       // S2 预置组含 B11
 }

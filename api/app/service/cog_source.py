@@ -36,7 +36,7 @@ OPTIONAL_BANDS: Tuple[str, ...] = ("B11",)
 _TAG_RE = re.compile(r"^t[12]$", re.IGNORECASE)
 
 __all__ = ["BANDS", "OPTIONAL_BANDS", "parse_cog_path", "resolve_bands",
-           "resolve_optional_bands"]
+           "resolve_optional_bands", "has_optional_band"]
 
 
 def _band_names(band: str, sensor: Optional[str] = None) -> Tuple[str, ...]:
@@ -161,6 +161,32 @@ def resolve_bands(cog_path: str, run_id: str,
         raise ApiError("SYS-01", run_id=run_id,
                        detail=f"COG 5 波段解析失败：cog_path={cog_path}, prefix={prefix}")
     return paths
+
+
+def has_optional_band(cog_path: str, band: str = "B11",
+                      sensor: Optional[str] = None) -> bool:
+    """轻量探测可选波段是否存在（只列对象名 / 查本地文件，**不下载**）。
+
+    供 scene 清单 ``has_b11`` 与在线取数复用判定使用：只判断"这组影像有没有 B11"，
+    不触发 ``resolve_optional_bands`` 的 MinIO 下载与缓存写入。判据与解析同口径：
+    MinIO prefix 下匹配到 ``_<band>.tif`` 即 True；MinIO 不可用/无对象时回退本地
+    ``data/pair_<name>_*``，按同样文件名规则匹配。两路都没有 → False。
+
+    成本：一次 MinIO ``list_objects``（前缀列举，不取对象体）或一次本地目录扫描。
+    scene 清单逐景调用，故刻意不做 ``fget_object``。
+    """
+    _bucket, prefix, pair_name, tag = parse_cog_path(cog_path)
+    try:
+        client = get_client(StorageSettings.from_env())
+        objects = list_objects(client, COG_BUCKET, prefix=prefix)
+        if any(_match_band(o, band, sensor) for o in objects):
+            return True
+    except Exception as exc:  # noqa: BLE001 - MinIO 不可用 → 回退本地
+        logger.warning("可选波段探测 MinIO 失败（回退本地）：%s", exc)
+    try:
+        return _from_local(pair_name, tag, sensor, bands=(band,)) is not None
+    except Exception:  # noqa: BLE001 - 本地探测异常一律视为缺失
+        return False
 
 
 def resolve_optional_bands(cog_path: str, run_id: str,

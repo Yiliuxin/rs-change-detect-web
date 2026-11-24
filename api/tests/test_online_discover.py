@@ -218,5 +218,7 @@ def test_fetch_status_contract_fields(client, monkeypatch):
     body = r.json()
     assert body["fetch_id"] == fetch_id
     assert body["status"] == "RUNNING"
-    assert body["progress"] == {"done": 3, "total": 10}
+    # B11 加入后每组 6 波段 × 2 时相 = 12（BANDS 含 B11，见 test_online_b11）
+    assert body["progress"] == {"done": 3, "total": online_fetch.TOTAL_BANDS}
+    assert online_fetch.TOTAL_BANDS == 12
     assert body["error"] is None and body["scene_ids"] is None

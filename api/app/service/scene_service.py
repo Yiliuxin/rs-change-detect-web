@@ -19,7 +19,7 @@ from app.api.errors import ApiError, as_api_error
 from app.config.constants import BLOCK_SIZE, RADIOMETRIC_FORMULAS, SENSOR_S2
 from app.repository import aoi_repo, scene_repo, task_repo
 from app.service.change_service import load_scene
-from app.service.cog_source import parse_cog_path
+from app.service.cog_source import has_optional_band, parse_cog_path
 
 __all__ = ["match_get", "match_post", "preset_aois"]
 
@@ -44,7 +44,12 @@ def _clip_window(window, profile: dict) -> dict:
 
 
 def _scene_item(scene: dict) -> dict:
-    """匹配清单单项（日期/云量/tile/基线/sensor/cog_path）。"""
+    """匹配清单单项（日期/云量/tile/基线/sensor/cog_path/has_b11）。
+
+    ``has_b11`` 为实际可用性（探测 MinIO 对象/本地文件），供前端精确门控
+    NDBI/NDMI：新在线取数带 B11→放行；早期 5 波段在线数据与 Landsat→禁用。
+    探测失败（MinIO 与本地都不通）按缺失处理，绝不误放行。
+    """
     return {
         "scene_id": scene["scene_id"],
         "sensor": scene["sensor"],
@@ -53,6 +58,8 @@ def _scene_item(scene: dict) -> dict:
         "tile": scene.get("tile"),
         "proc_baseline": scene.get("proc_baseline"),
         "cog_path": scene["cog_path"],
+        "has_b11": bool(has_optional_band(
+            str(scene.get("cog_path") or ""), "B11", sensor=scene.get("sensor"))),
     }
 
 

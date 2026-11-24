@@ -156,6 +156,9 @@ function sceneVO(sc, phase) {
     proc_baseline: sc.proc_baseline,
     phase,
     cog_path: sc.cog_path,
+    // B11 实际可用性由后端探测（MinIO 对象/本地文件），门控 NDBI/NDMI 用。
+    // 缺省 undefined：老接口/演示降级走 pairHasB11 的组名口径回退。
+    has_b11: sc.has_b11,
   };
 }
 

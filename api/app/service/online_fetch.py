@@ -13,16 +13,17 @@
 
 二、``start_fetch`` / ``get_status``（按需下载入库）
     校验 → ``fetch_id = uuid4()`` → ``threading.Thread`` 后台执行：
-      a) ``/vsicurl`` 逐波段（B02/B03/B04/B08/SCL）裁 AOI 窗下载到
+      a) ``/vsicurl`` 逐波段（B02/B03/B04/B08/SCL + B11）裁 AOI 窗下载到
          ``api/runs/<fetch_id>/_cog/``，每波段 6 次指数退避重试（2/4/8/16/30/30s），
-         写完用 rasterio 重新打开校验（防半截文件）；
+         写完用 rasterio 重新打开校验（防半截文件）；B11 为 20m 原生，下载后
+         双线性重采样到 B04 的 10m AOI 网格，与检测网格逐像元对齐；
       b) 上传 MinIO ``scenes`` 桶 ``pair_<name>/<t1|t2>/``（复用 storage.upload_file）；
       c) 复用 seed 的 uuid5 口径写 aoi + scene（``aoi_id=uuid5(NS,"aoi:<name>")``、
          ``cog_path=minio://scenes/pair_<name>/<tag>/``、``footprint=AOI envelope``）；
       d) 同 tile+日期已在 scene 表存在 → 跳过下载直接复用既有 scene_id。
     状态存进程内 dict（Thread + 锁），**不引入** celery/redis/异步队列；
     ``MAX_CONCURRENCY`` 串行限流只覆盖 MVP 计算接口，刻意**不覆盖**取数线程。
-    进度以"波段"为单位（每组 10 波段：0/10 → 10/10）。
+    进度以"波段"为单位（每组 12 波段：0/12 → 12/12）。
     防重复提交：同 ``name+tile+两日期`` 进行中的 fetch 直接返回已有 ``fetch_id``。
 
 错误码：EX1（AOI 超限）/ EX2（无匹配、无有效数据、未知 fetch_id）/ SYS-06（STAC 或
@@ -43,6 +44,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import httpx
 import numpy as np
 import rasterio
+from rasterio.warp import Resampling, reproject
 from rasterio.windows import Window
 
 from app.algorithm.geotransform import (
@@ -56,6 +58,7 @@ from app.config.constants import (
 from app.config.storage import StorageSettings, ensure_buckets, get_client, object_url, upload_file
 from app.repository import online_repo, scene_repo
 from app.service.common import RUNS_ROOT
+from app.service.cog_source import has_optional_band
 
 logger = logging.getLogger(__name__)
 
@@ -70,10 +73,14 @@ STAC_LIMIT = 100
 COG_BASE_URL = "https://sentinel-cogs.s3.us-west-2.amazonaws.com/sentinel-s2-l2a-cogs"
 
 # 逐波段下载：与预置 COG 同构的 5 波段（B02/B03/B04/B08 反射率 + SCL 场景分类）
-BANDS: Tuple[str, ...] = ("B02", "B03", "B04", "B08", "SCL")
+# + B11 短波红外（20m，下载后重采样到 B04 的 10m AOI 网格），解锁 NDBI / NDMI。
+# B11 必须放在 B04 之后：下载时以已落盘的 B04 作 10m 参考网格。
+_BASE_BANDS: Tuple[str, ...] = ("B02", "B03", "B04", "B08", "SCL")
+SWIR_BAND = "B11"
+BANDS: Tuple[str, ...] = _BASE_BANDS + (SWIR_BAND,)
 TAGS: Tuple[str, ...] = ("t1", "t2")
 BANDS_PER_TAG = len(BANDS)
-TOTAL_BANDS = BANDS_PER_TAG * len(TAGS)  # 每组 10 波段（进度分母）
+TOTAL_BANDS = BANDS_PER_TAG * len(TAGS)  # 每组 12 波段（进度分母：6×2）
 # 每波段重试 6 次，退避 2/4/8/16/30/30 秒（S3 /vsicurl 间歇性失败）
 RETRY_DELAYS: Tuple[int, ...] = (2, 4, 8, 16, 30, 30)
 
@@ -101,7 +108,7 @@ _ACTIVE_STATUSES = (STATUS_PENDING, STATUS_RUNNING)
 __all__ = [
     "BANDS", "TOTAL_BANDS", "MIN_AOI_COVERAGE", "discover", "start_fetch",
     "get_status", "cog_object_prefix", "fetch_root", "aoi_coverage",
-    "coverage_diagnosis",
+    "coverage_diagnosis", "resample_b11_to_ref",
 ]
 
 # --------------------------------------------------------------------------- #
@@ -465,6 +472,82 @@ def _download_band(url: str, band: str, box: BBox, dest, run_id: Optional[str]):
                    detail=f"波段 {band} 下载失败（已重试 {len(RETRY_DELAYS)} 次）：{last}")
 
 
+def resample_b11_to_ref(src, ref, box: BBox, dest) -> dict:
+    """把已打开的 B11 dataset（20m）重采样写入 ``ref``（B04，10m）网格。
+
+    纯函数（dataset 由调用方打开，可传合成 dataset 单测）：AOI envelope → B11
+    源窗口 → ``reproject`` 双线性到参考网格。输出 shape/transform 与 ref 逐像元
+    一致，检测时 ``assert_grid_aligned`` 直接通过。
+
+    返回 ``{"shape": (h, w), "transform": ref.transform, "crs": ref.crs}`` 供核对。
+    """
+    _w, row0, col0, row1, col1 = _unclipped_window(src, box)
+    row0, col0 = max(0, row0), max(0, col0)
+    row1, col1 = min(src.height, row1), min(src.width, col1)
+    if row1 <= row0 or col1 <= col0:
+        raise ApiError("EX2", http_status=400,
+                       detail=f"B11 AOI 落在影像范围外（crs={src.crs}）")
+    win = Window(col0, row0, col1 - col0, row1 - row0)
+    dst = np.full((ref.height, ref.width), np.nan, dtype="float32")
+    reproject(
+        rasterio.band(src, 1), dst,
+        src_transform=src.window_transform(win), src_crs=src.crs,
+        dst_transform=ref.transform, dst_crs=ref.crs,
+        dst_shape=(ref.height, ref.width),
+        resampling=Resampling.bilinear,
+    )
+    profile = {
+        "driver": "GTiff", "dtype": "float32", "count": 1,
+        "height": int(ref.height), "width": int(ref.width),
+        "crs": ref.crs, "transform": ref.transform, "nodata": None,
+    }
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    with rasterio.open(str(tmp), "w", **profile) as out:
+        out.write(dst, 1)
+    if not _band_is_valid(tmp):
+        raise RuntimeError(f"写入后校验失败：{tmp}")
+    os.replace(tmp, dest)
+    return {"shape": (int(ref.height), int(ref.width)),
+            "transform": ref.transform, "crs": ref.crs}
+
+
+def _download_b11_on_grid(url: str, box: BBox, ref_path, dest,
+                          run_id: Optional[str]):
+    """下载 B11（20m 原生）并双线性重采样到 ``ref_path``（B04，10m）的 AOI 网格。
+
+    与 ``data/fetch_b11.py::read_band_on_ref_grid`` 同口径，实际重采样在
+    :func:`resample_b11_to_ref`（纯函数，可单测）。重试与写后校验沿用
+    ``_download_band`` 的 6 次退避策略。
+
+    ``ref_path`` 必须是已落盘的 10m 参考波段（调用方保证 B04 在 B11 之前下载）。
+    """
+    last: Optional[Exception] = None
+    for attempt, delay in enumerate(RETRY_DELAYS, start=1):
+        try:
+            with rasterio.open(f"/vsicurl/{url}/{SWIR_BAND}.tif") as src, \
+                    rasterio.open(str(ref_path)) as ref:
+                resample_b11_to_ref(src, ref, box, dest)
+            return dest
+        except ApiError:
+            raise  # AOI 越界等业务错误不重试
+        except Exception as exc:  # noqa: BLE001 - 网络抖动重试
+            last = exc
+            if attempt < len(RETRY_DELAYS):
+                logger.warning("B11 第 %d/%d 次下载失败（%s），%ds 后重试",
+                               attempt, len(RETRY_DELAYS), type(exc).__name__, delay)
+                time.sleep(delay)
+    raise ApiError("SYS-06", run_id=run_id, http_status=500,
+                   detail=f"B11 下载失败（已重试 {len(RETRY_DELAYS)} 次）：{last}")
+
+
+def _b11_reference(paths: Dict[str, object]) -> object:
+    """返回 B11 重采样的 10m 参考波段路径（B04，必须已下载）。"""
+    ref = paths.get("B04")
+    if ref is None:
+        raise ApiError("SYS-06", http_status=500, detail="B11 重采样缺少 B04 参考网格")
+    return ref
+
+
 def coverage_diagnosis(info: dict, tag: str) -> Optional[str]:
     """覆盖率不足时返回中文诊断文案，达标返回 None（纯函数，便于单测）。
 
@@ -550,15 +633,24 @@ def _persist_scene(name: str, tag: str, meta: dict, box: BBox,
 
 
 def _reusable_scenes(tile: str, dates: Sequence[str]) -> Dict[str, dict]:
-    """scene 表查重：同 tile + 同日期已入库 → {acq_date: 场景行}（复用 scene_repo）。"""
+    """scene 表查重：同 tile + 同日期**且含 B11** 已入库 → {acq_date: 场景行}。
+
+    B11 过滤是必要的：早期在线取数只有 5 波段，若不加判据会被直接复用，
+    新取数永远补不上 B11，NDBI / NDMI 仍被 EX11 拦住。缺 B11 的旧 scene
+    不参与复用 → 走重新下载（落盘新组、带 B11）。
+    """
     wanted = {d for d in dates if d}
     hits: Dict[str, dict] = {}
     for row in scene_repo.find_all():
         if row.get("tile") != tile:
             continue
         acq = row.get("acq_date")
-        if acq in wanted:
-            hits[acq] = row
+        if acq not in wanted:
+            continue
+        if not has_optional_band(str(row.get("cog_path") or ""), SWIR_BAND,
+                                 sensor=row.get("sensor")):
+            continue
+        hits[acq] = row
     return hits
 
 
@@ -688,9 +780,13 @@ def _run_fetch(fetch_id: str) -> None:
                 dest = root / f"{tag}_{band}.tif"
                 if _band_is_valid(dest):  # 断点续传：已存在且可读则跳过
                     paths[band] = dest
+                elif band == SWIR_BAND:
+                    # B11 20m→10m：以已落盘的 B04 作参考网格重采样（B04 在 B11 之前）
+                    paths[band] = _download_b11_on_grid(
+                        url, box, _b11_reference(paths), dest, fetch_id)
                 else:
                     paths[band] = _download_band(url, band, box, dest, fetch_id)
-                _advance(fetch_id, 1)  # 进度以"波段"为单位（每组 10 波段）
+                _advance(fetch_id, 1)  # 进度以"波段"为单位（每组 12 波段）
 
             _assert_has_data(paths, tag, fetch_id)
             _upload_tag(name, tag, paths, fetch_id)
