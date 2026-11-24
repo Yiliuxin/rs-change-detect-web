@@ -462,3 +462,16 @@ EXPERIMENTS_CACHE_VERSION: Final[int] = 1
 EXPERIMENTS_CACHE_SIGNATURE_LEN: Final[int] = 16
 EXPERIMENTS_CACHE_COMPARE_KEY: Final[str] = "compare"
 EXPERIMENTS_CACHE_SENSITIVITY_KEY: Final[str] = "sensitivity"
+
+# ---------------------------------------------------------------------------
+# 在线取数数据清理：预置影像对组名白名单（唯一判据源）。
+# 这些组由 scripts/seed_scenes.py 与 data/fetch_landsat.py 固化入库，是离线演示
+# 的基座，**任何清理接口都不得删除**。判据用组名白名单而非 uuid/几何：seed 与
+# 在线取数都用 uuid5 生成 id，无法靠版本区分；组名来自 data/pair_* 与 landsat
+# 脚本的固定 name，稳定可枚举。在线取数组名由用户指定（默认 user_YYYYMMDD_HHMM），
+# 不在本集合内。新增预置组时须同步在此登记（与 seed 脚本改常量同口径）。
+PRESET_GROUP_NAMES: Final[frozenset] = frozenset({
+    "pair_dongting", "pair_farmland", "pair_hetao", "pair_nanchang",
+    "pair_north_china", "pair_poyang", "pair_qinghaihu", "pair_sanjiang",
+    "pair_taihu", "pair_xilingol", "pair_yellow_delta", "landsat_poyang",
+})

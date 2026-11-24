@@ -19,7 +19,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field, model_validator
 
 from app.api.v1.schemas import ErrorResponse
-from app.service import online_fetch
+from app.service import online_cleanup, online_fetch
 
 router = APIRouter(prefix="/scene", tags=["SceneOnline"])
 
@@ -127,6 +127,40 @@ class FetchStatusResponse(BaseModel):
     scene_ids: Optional[dict] = Field(None, description="成功后的 {t1, t2} scene_id")
 
 
+class FetchGroupItem(BaseModel):
+    """可删除的在线取数组。"""
+
+    group: str = Field(..., description="组名（pair_<name>）")
+    scene_count: int = Field(0, description="该组 scene 条数（通常 2）")
+    t1_date: str = Field("", description="较早时相日期")
+    t2_date: str = Field("", description="较晚时相日期")
+
+
+class FetchGroupsResponse(BaseModel):
+    """在线取数组清单（已剔除预置组）。"""
+
+    groups: List[FetchGroupItem] = Field(default_factory=list)
+    total: int = 0
+
+
+class DeleteGroupRequest(BaseModel):
+    """按组删除请求。"""
+
+    group: str = Field(..., min_length=1, description="待删除的在线取数组名（pair_<name>）")
+
+
+class DeleteGroupResponse(BaseModel):
+    """删除结果统计。"""
+
+    deleted_groups: List[str] = Field(default_factory=list)
+    deleted_tasks: int = 0
+    deleted_scenes: int = 0
+    deleted_aois: int = 0
+    deleted_result_dirs: int = 0
+    deleted_runs: List[str] = Field(default_factory=list)
+    minio_errors: List[str] = Field(default_factory=list)
+
+
 @router.post(
     "/discover",
     response_model=DiscoverResponse,
@@ -168,3 +202,37 @@ def fetch_scenes(payload: FetchRequest) -> FetchStartResponse:
 def get_fetch_status(fetch_id: str) -> FetchStatusResponse:
     """查询取数进度（B 级扩展）：progress 以波段为单位（0/10 → 10/10）。"""
     return FetchStatusResponse(**online_fetch.get_status(fetch_id))
+
+
+# --------------------------------------------------------------------------- #
+# 在线取数数据清理（用户主动删除历史取数，不碰预置）
+# --------------------------------------------------------------------------- #
+@router.get(
+    "/fetch_groups",
+    response_model=FetchGroupsResponse,
+    summary="列出可删除的在线取数组（已剔除预置）",
+)
+def list_fetch_groups() -> FetchGroupsResponse:
+    """列出库中的在线取数组（pair_* 且不在预置白名单），供前端渲染删除入口。"""
+    return FetchGroupsResponse(**online_cleanup.list_online_groups())
+
+
+@router.post(
+    "/fetch_group/delete",
+    response_model=DeleteGroupResponse,
+    responses={400: {"model": ErrorResponse, "description": "EX2 预置组/非法组名拒绝删除"}},
+    summary="删除单个在线取数组（含检测任务与结果）",
+)
+def delete_fetch_group(payload: DeleteGroupRequest) -> DeleteGroupResponse:
+    """删除指定在线取数组：级联清 task→scene→aoi→MinIO 对象与本地产物目录。"""
+    return DeleteGroupResponse(**online_cleanup.delete_group(payload.group))
+
+
+@router.post(
+    "/fetch_groups/clear",
+    response_model=DeleteGroupResponse,
+    summary="一键清空全部在线取数组（保预置）",
+)
+def clear_fetch_groups() -> DeleteGroupResponse:
+    """清空所有在线取数组；预置影像对与其检测任务不受影响。"""
+    return DeleteGroupResponse(**online_cleanup.delete_all())

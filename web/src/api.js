@@ -449,6 +449,26 @@ export function pollFetch(fetchId) {
   );
 }
 
+// 在线取数数据清理：列出可删除的取数组（已剔除预置）
+export function listFetchGroups() {
+  return onlineCall(
+    '/scene/fetch_groups',
+    { method: 'GET', headers: { 'Content-Type': 'application/json' } },
+    TIMEOUT_MS,
+    false,
+  );
+}
+
+// 删除单个在线取数组（含其检测任务与结果）
+export function deleteFetchGroup(group) {
+  return onlineCall('/scene/fetch_group/delete', jsonOptions({ group }), TIMEOUT_MS, false);
+}
+
+// 一键清空全部在线取数组（保预置）
+export function clearFetchGroups() {
+  return onlineCall('/scene/fetch_groups/clear', jsonOptions({}), TIMEOUT_MS, false);
+}
+
 // ==========================================================================
 // 批次 1 扩展（REQ-07/13/14）：面积统计 CSV + 历史 run 查询
 // 与既有 5 接口 / 在线取数分支完全独立；沿用 fetchWithTimeout 与 safeError，

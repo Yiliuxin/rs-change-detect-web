@@ -2583,6 +2583,7 @@ async function onlineFetchTerminal(status, data) {
     // 自动收尾后再刷新 B 卡清单：autoSelectPair 按 t1/t2 命中刚入库的组，口径随即自动确认
     try { await onlineApplyFetchResult(); } catch (_) { /* 失败不阻断列表刷新 */ }
     loadPairs();
+    loadFetchGroups();   // 刷新「管理已入库数据」列表，新组立即可见可删
   } else {
     const box = $('onl-failed');
     box.hidden = false;
@@ -2703,6 +2704,124 @@ function retryOnline() {
   $('onl-badge').textContent = '可选 · 离线优先';
   $('onl-discover-err').textContent = '';
   onlineDiscover();
+}
+
+// ---------- 在线取数数据管理：列出 / 按组删 / 一键清空（不碰预置） ----------
+async function loadFetchGroups() {
+  const box = $('onl-groups');
+  const err = $('onl-groups-err');
+  const ok = $('onl-groups-ok');
+  if (!box) return;
+  if (err) err.textContent = '';
+  if (ok) ok.hidden = true;
+  box.innerHTML = '<div class="status-line"><span class="spinner"></span>正在读取在线取数组…</div>';
+  let res;
+  try {
+    res = await api.listFetchGroups();
+  } catch (_) {
+    res = { ok: false, unavailable: true };
+  }
+  if (!res || !res.ok) {
+    const msg = res && (res.message || res.code)
+      ? onlineErrText(res)
+      : '在线取数管理接口不可用（后端未启用或网络异常）';
+    if (err) err.textContent = msg;
+    box.innerHTML = '<div class="empty-state compact"><p>无法读取在线取数组</p></div>';
+    return;
+  }
+  const groups = (res.data && res.data.groups) || [];
+  const count = $('onl-groups-count');
+  if (count) count.textContent = groups.length ? ('共 ' + groups.length + ' 组') : '无';
+  const clearBtn = $('onl-clear-all');
+  if (clearBtn) clearBtn.hidden = groups.length === 0;
+  if (!groups.length) {
+    box.innerHTML = '<div class="empty-state compact"><p>暂无在线取数据</p>'
+      + '<p class="empty-sub">下载入库后，可在此按组删除或一键清空。</p></div>';
+    return;
+  }
+  box.innerHTML = groups.map((g, i) => {
+    const name = String(g.group || '');
+    const short = name.replace(/^pair_/, '');
+    const meta = [g.scene_count ? (g.scene_count + ' 景') : '',
+      g.t1_date && g.t2_date ? (g.t1_date + ' → ' + g.t2_date) : '']
+      .filter(Boolean).join(' · ');
+    return '<div class="onl-group-row" data-group="' + esc(name) + '">'
+      + '<div class="onl-group-main">'
+      + '<div class="onl-group-name">' + esc(short) + '</div>'
+      + '<div class="onl-group-meta">' + esc(meta) + '</div>'
+      + '</div>'
+      + '<button type="button" class="onl-group-del" data-idx="' + i + '">删除</button>'
+      + '</div>';
+  }).join('');
+  box._groups = groups; // 供事件委托按 idx 取组名
+}
+
+async function deleteOneFetchGroup(group) {
+  const short = String(group || '').replace(/^pair_/, '');
+  if (!window.confirm('确定删除在线取数组「' + short + '」吗？\n'
+      + '该组下载的影像、以及用它跑出的所有检测结果都会被删除，且不可恢复。')) return;
+  const err = $('onl-groups-err');
+  const ok = $('onl-groups-ok');
+  if (err) err.textContent = '';
+  let res;
+  try {
+    res = await api.deleteFetchGroup(group);
+  } catch (_) {
+    res = { ok: false, unavailable: true };
+  }
+  if (!res || !res.ok) {
+    if (err) err.textContent = res && (res.message || res.code)
+      ? onlineErrText(res) : '删除失败，请稍后重试';
+    return;
+  }
+  const d = res.data || {};
+  // 同步前端本会话记忆：删掉的组不再是「含 B11 受限」的组
+  const key = String(group || '').replace(/^pair_/, '');
+  if (ON.fetchedKeys && ON.fetchedKeys.delete) ON.fetchedKeys.delete(key);
+  saveFetchedKeys();
+  if (ok) {
+    ok.hidden = false;
+    ok.textContent = '✓ 已删除「' + short + '」：' + (d.deleted_tasks || 0) + ' 个检测任务、'
+      + (d.deleted_scenes || 0) + ' 景影像'
+      + ((d.minio_errors && d.minio_errors.length) ? '（部分对象删除失败，可重试）' : '');
+  }
+  // 若当前正选中该组，清空口径选择并刷新 B 卡
+  if (S.sceneKey === key) { S.sceneKey = ''; S.sceneMatch = null; }
+  await loadFetchGroups();
+  loadPairs();
+  syncIndexAvailability();
+}
+
+async function clearAllFetchGroups() {
+  if (!window.confirm('确定清空全部在线取数据吗？\n'
+      + '所有在线下载的影像及基于它们跑出的检测结果都会被删除，且不可恢复。\n'
+      + '12 组预置影像对不受影响。')) return;
+  const err = $('onl-groups-err');
+  const ok = $('onl-groups-ok');
+  if (err) err.textContent = '';
+  let res;
+  try {
+    res = await api.clearFetchGroups();
+  } catch (_) {
+    res = { ok: false, unavailable: true };
+  }
+  if (!res || !res.ok) {
+    if (err) err.textContent = res && (res.message || res.code)
+      ? onlineErrText(res) : '清空失败，请稍后重试';
+    return;
+  }
+  const d = res.data || {};
+  if (ON.fetchedKeys && ON.fetchedKeys.clear) { ON.fetchedKeys.clear(); saveFetchedKeys(); }
+  if (ok) {
+    ok.hidden = false;
+    ok.textContent = '✓ 已清空 ' + (d.deleted_groups || []).length + ' 组在线取数：'
+      + (d.deleted_tasks || 0) + ' 个检测任务、' + (d.deleted_scenes || 0) + ' 景影像'
+      + ((d.minio_errors && d.minio_errors.length) ? '（部分对象删除失败，可重试）' : '');
+  }
+  S.sceneKey = ''; S.sceneMatch = null;
+  await loadFetchGroups();
+  loadPairs();
+  syncIndexAvailability();
 }
 
 // ===== B1 图层面板：三层显隐 + 各自透明度（change 与原滑块双向同步） =====
@@ -2849,6 +2968,16 @@ function bindEvents() {
   $('onl-fetch').onclick = onlineFetch;
   $('onl-retry').onclick = retryOnline;
   $('onl-place').onchange = onlPlaceChange;
+  // 在线取数数据管理：刷新 / 按组删 / 一键清空
+  $('onl-groups-refresh').onclick = loadFetchGroups;
+  $('onl-clear-all').onclick = clearAllFetchGroups;
+  $('onl-groups').addEventListener('click', (e) => {
+    const btn = e.target.closest && e.target.closest('.onl-group-del');
+    if (!btn) return;
+    const groups = $('onl-groups')._groups || [];
+    const g = groups[Number(btn.dataset.idx)];
+    if (g && g.group) deleteOneFetchGroup(g.group);
+  });
   initChinaSearch();
   $('onl-body').querySelector('.onl-place-draw').onclick = () => {
     // 复用地图「AOI 框选」模式：拖拽画框后 AOI 回填 A 卡并同步在线卡回显
@@ -3011,6 +3140,8 @@ function init() {
 
   // 影像对清单启动即加载（自由流程：无 AOI 也可浏览，GET /scene/match 不强制 aoi_id）
   loadPairs();
+  // 在线取数数据管理区：加载可删除的取数组（失败仅内联提示，不影响离线流程）
+  loadFetchGroups();
   // 任务 A：12 组预置地点独立加载；失败仅内联提示，不触碰演示降级层与既有流程
   loadPresetAois();
 

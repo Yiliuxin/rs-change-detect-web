@@ -19,7 +19,11 @@ from typing import Optional, Sequence
 
 from app.repository.db import db_cursor
 
-__all__ = ["upsert_aoi", "upsert_scene"]
+__all__ = [
+    "upsert_aoi", "upsert_scene",
+    "list_fetch_groups", "group_scene_ids", "group_aoi_ids",
+    "delete_tasks_for_scenes", "delete_scenes", "delete_aois",
+]
 
 
 def upsert_aoi(aoi_id: str, bbox: Sequence[float], area_deg2: float) -> str:
@@ -73,3 +77,99 @@ def upsert_scene(scene_id: str, aoi_id: str, sensor: str, acq_date: str,
             ),
         )
         return str(cur.fetchone()["scene_id"])
+
+
+# --------------------------------------------------------------------------- #
+# 在线取数数据删除（用户主动清理，仅删在线取数组、不碰预置）
+# --------------------------------------------------------------------------- #
+
+# 在线取数组在 MinIO 的 cog_path 固定为 minio://scenes/pair_<name>/<tag>/。
+# 用第 4 段（pair_<name>）分组；Landsat 预置组形如 landsat_<name>，不含 pair_ 前缀。
+_FETCH_GROUP_SQL = """
+    SELECT split_part(cog_path, '/', 4) AS grp,
+           count(*) AS scene_count,
+           min(acq_date) AS t1_date,
+           max(acq_date) AS t2_date
+    FROM scene
+    WHERE cog_path LIKE 'minio://scenes/pair_%'
+    GROUP BY 1
+    ORDER BY 1
+"""
+
+
+def list_fetch_groups() -> list:
+    """列出库中所有 ``pair_*`` 组（含预置与在线），供上层按白名单过滤。
+
+    返回 ``[{group, scene_count, t1_date, t2_date}]``。刻意不在此处区分预置/
+    在线——判据放在 service 层（预置名单），便于单测与口径集中。
+    """
+    with db_cursor() as cur:
+        cur.execute(_FETCH_GROUP_SQL)
+        rows = cur.fetchall()
+    return [
+        {
+            "group": str(r["grp"]),
+            "scene_count": int(r["scene_count"]),
+            "t1_date": str(r["t1_date"]) if r["t1_date"] else "",
+            "t2_date": str(r["t2_date"]) if r["t2_date"] else "",
+        }
+        for r in rows
+    ]
+
+
+def group_scene_ids(group: str) -> list:
+    """取某 ``pair_<name>`` 组下的全部 scene_id（精确匹配组名段）。"""
+    with db_cursor() as cur:
+        cur.execute(
+            "SELECT scene_id::text AS id FROM scene "
+            "WHERE split_part(cog_path, '/', 4) = %s",
+            (group,),
+        )
+        return [str(r["id"]) for r in cur.fetchall()]
+
+
+def group_aoi_ids(group: str) -> list:
+    """取某组 scene 关联的 aoi_id（去重）。"""
+    with db_cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT aoi_id::text AS id FROM scene "
+            "WHERE split_part(cog_path, '/', 4) = %s",
+            (group,),
+        )
+        return [str(r["id"]) for r in cur.fetchall()]
+
+
+def delete_tasks_for_scenes(scene_ids: list) -> int:
+    """删除以给定 scene 为 t1/t2 的检测任务（下游 change_result/sample 由 CASCADE 清理）。"""
+    if not scene_ids:
+        return 0
+    with db_cursor() as cur:
+        cur.execute(
+            "DELETE FROM task WHERE scene_t1_id = ANY(%s::uuid[]) "
+            "OR scene_t2_id = ANY(%s::uuid[])",
+            (scene_ids, scene_ids),
+        )
+        return int(cur.rowcount)
+
+
+def delete_scenes(scene_ids: list) -> int:
+    """删除给定 scene（须先删引用它们的 task，否则 RESTRICT 报外键错）。"""
+    if not scene_ids:
+        return 0
+    with db_cursor() as cur:
+        cur.execute("DELETE FROM scene WHERE scene_id = ANY(%s::uuid[])", (scene_ids,))
+        return int(cur.rowcount)
+
+
+def delete_aois(aoi_ids: list) -> int:
+    """删除不再被 scene/task 引用的 aoi（有引用则跳过，避免误删）。"""
+    if not aoi_ids:
+        return 0
+    with db_cursor() as cur:
+        cur.execute(
+            "DELETE FROM aoi WHERE aoi_id = ANY(%s::uuid[]) "
+            "AND NOT EXISTS (SELECT 1 FROM scene WHERE scene.aoi_id = aoi.aoi_id) "
+            "AND NOT EXISTS (SELECT 1 FROM task WHERE task.aoi_id = aoi.aoi_id)",
+            (aoi_ids,),
+        )
+        return int(cur.rowcount)

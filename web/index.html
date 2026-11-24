@@ -286,6 +286,19 @@
                 <div class="ok-line" id="onl-success" hidden></div>
                 <div class="err-line" id="onl-failed" hidden></div>
               </div>
+
+              <!-- 管理已入库的在线取数据：按组删除 / 一键清空（不碰预置影像对） -->
+              <div class="card-subtitle">管理已入库数据<span class="hint" id="onl-groups-count">—</span>
+                <button type="button" class="btn btn-sm btn-ghost subtitle-btn" id="onl-groups-refresh"
+                  title="重新读取在线取数组清单">刷新</button>
+              </div>
+              <div class="onl-manage-note">此处仅列出在线取数获得的影像对；12 组预置影像对受保护，不会出现在列表中。</div>
+              <div class="onl-groups" id="onl-groups">
+                <div class="empty-state compact"><p>暂无在线取数据</p><p class="empty-sub">下载入库后，可在此按组删除或一键清空。</p></div>
+              </div>
+              <button type="button" class="btn btn-sm btn-ghost gap-top" id="onl-clear-all" hidden>清空全部在线取数</button>
+              <div class="err-line" id="onl-groups-err"></div>
+              <div class="ok-line" id="onl-groups-ok" hidden></div>
             </div>
           </section>
 
