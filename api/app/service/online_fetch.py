@@ -38,8 +38,9 @@ import re
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import httpx
 import numpy as np
@@ -351,9 +352,13 @@ def discover(aoi_geom: Optional[str], bbox: Optional[Sequence[float]],
         w1 = _window_bounds(t1_window, "t1_window", run_id)
         w2 = _window_bounds(t2_window, "t2_window", run_id)
 
-        # 传 box 启用 footprint 覆盖率粗筛（缺 geometry 的 feature 自动放过）
-        ph1 = _phase_candidates(_stac_search(box, _stac_datetime(*w1), run_id), box)
-        ph2 = _phase_candidates(_stac_search(box, _stac_datetime(*w2), run_id), box)
+        # 传 box 启用 footprint 覆盖率粗筛（缺 geometry 的 feature 自动放过）。
+        # 两个时相的 STAC 检索彼此独立 → 并发发出，省掉一次串行 RTT。
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="online-stac") as pool:
+            f1 = pool.submit(_stac_search, box, _stac_datetime(*w1), run_id)
+            f2 = pool.submit(_stac_search, box, _stac_datetime(*w2), run_id)
+            ph1 = _phase_candidates(f1.result(), box)
+            ph2 = _phase_candidates(f2.result(), box)
 
         common = sorted(set(ph1) & set(ph2))  # 两时相共同 tile
         candidates = [
@@ -434,12 +439,20 @@ def _band_is_valid(path) -> bool:
         return False
 
 
-def _download_band(url: str, band: str, box: BBox, dest, run_id: Optional[str]):
-    """带 6 次指数退避重试地裁 AOI 窗下载单波段；全部失败 → SYS-06(500)。"""
+def _download_band(url: str, band: str, box: BBox, dest, run_id: Optional[str],
+                   on_open: Optional[Callable] = None):
+    """带 6 次指数退避重试地裁 AOI 窗下载单波段；全部失败 → SYS-06(500)。
+
+    ``on_open`` 在 dataset 打开后、读像元前调用（当前用于 B04 覆盖率预检），
+    使「预检 + 下载」复用同一次 /vsicurl 打开，省掉一次远程往返。
+    回调抛出的 ApiError 不重试，原样透传。
+    """
     last: Optional[Exception] = None
     for attempt, delay in enumerate(RETRY_DELAYS, start=1):
         try:
             with rasterio.open(f"/vsicurl/{url}/{band}.tif") as src:
+                if on_open is not None:
+                    on_open(src)
                 win = _window_for_bbox(src, box)
                 data = src.read(1, window=win)
                 profile = {
@@ -726,8 +739,57 @@ def _task_view(fetch_id: str) -> dict:
 # --------------------------------------------------------------------------- #
 # 后台工作线程
 # --------------------------------------------------------------------------- #
+def _fetch_one_tag(fetch_id: str, name: str, tag: str, meta: dict,
+                   box: BBox, root) -> str:
+    """单时相完整流程：下载 → 校验 → 上传 → 入库。
+
+    两时相由调用方并发提交；本函数只处理自己那一相。进度经 :func:`_advance`
+    加锁，MinIO client / PG 连接每次新建，不共享可变状态。
+    """
+    url = _cog_url(meta["source_id"])
+    paths: Dict[str, object] = {}
+    cov_holder: Dict[str, float] = {}
+
+    def _check_coverage(src):
+        """覆盖率不足 → ApiError(EX2, 中文诊断)，原样透传前端，坏数据不入库。"""
+        info = _verify_coverage(src, box, tag)
+        cov_holder["coverage"] = float(info["coverage"])
+        return info
+
+    # B04 先行：它既是覆盖率判据的 10m 参考网格，也是 B11 重采样的基准。
+    ordered = ("B04",) + tuple(b for b in BANDS if b != "B04")
+    for band in ordered:
+        dest = root / f"{tag}_{band}.tif"
+        if _band_is_valid(dest):  # 断点续传：已存在且可读则跳过
+            if band == "B04":
+                # 本地文件直接验，不再为续传打一次远程
+                with rasterio.open(str(dest)) as src:
+                    _check_coverage(src)
+            paths[band] = dest
+        elif band == SWIR_BAND:
+            paths[band] = _download_b11_on_grid(
+                url, box, _b11_reference(paths), dest, fetch_id)
+        else:
+            # 根治 EX11：覆盖率校验并入 B04 的 /vsicurl 打开，省一次远程 RTT。
+            paths[band] = _download_band(
+                url, band, box, dest, fetch_id,
+                on_open=_check_coverage if band == "B04" else None,
+            )
+        _advance(fetch_id, 1)  # 进度以"波段"为单位（两组共 12）
+
+    logger.info("覆盖率校验通过 fetch_id=%s tag=%s coverage=%.4f",
+                fetch_id, tag, cov_holder.get("coverage", -1.0))
+    _assert_has_data(paths, tag, fetch_id)
+    _upload_tag(name, tag, paths, fetch_id)
+    return _persist_scene(name, tag, meta, box, fetch_id)
+
+
 def _run_fetch(fetch_id: str) -> None:
-    """后台取数主流程（a 下载 → b 上传 → c 入库；d 查重跳过）。"""
+    """后台取数主流程（a 下载 → b 上传 → c 入库；d 查重跳过）。
+
+    t1/t2 两时相彼此独立 → 并发处理（约 2 倍提速）；波段级仍串行，避免
+    S3 限速与 GDAL 跨线程 dataset 风险。总进度仍为 12，两相交错推进。
+    """
     with _lock:
         task = _tasks.get(fetch_id)
         if task is None:
@@ -744,53 +806,26 @@ def _run_fetch(fetch_id: str) -> None:
         _ensure_gdal_env()
         reusable = _reusable_scenes(tile, [metas["t1"]["date"], metas["t2"]["date"]])
         root = fetch_root(fetch_id)
-        scene_ids: Dict[str, str] = {}
 
-        for tag in TAGS:
+        def _one(tag: str) -> Tuple[str, str]:
             meta = dict(metas[tag])
             meta["tile"] = tile
             hit = reusable.get(meta["date"])
             if hit is not None:
                 # d) 同 tile+日期已入库 → 跳过下载/上传，直接复用
-                scene_ids[tag] = hit["scene_id"]
                 _advance(fetch_id, BANDS_PER_TAG)
                 logger.info("复用既有场景 tile=%s date=%s scene_id=%s",
                             tile, meta["date"], hit["scene_id"])
-                continue
+                return tag, hit["scene_id"]
+            return tag, _fetch_one_tag(fetch_id, name, tag, meta, box, root)
 
-            url = _cog_url(meta["source_id"])
-            # 根治 EX11：下载前用真实 COG 的 B04 栅格几何精确校验 AOI 覆盖率。
-            # 只开 header 读 transform/尺寸（aoi_coverage 不读像元），开销极小。
-            # 覆盖率不足 → ApiError(EX2, 中文诊断) → _fail 透传前端，坏数据不入库。
-            try:
-                with rasterio.open(f"/vsicurl/{url}/B04.tif") as _ref:
-                    _cov_info = _verify_coverage(_ref, box, tag)
-                logger.info("覆盖率校验通过 fetch_id=%s tag=%s coverage=%.4f",
-                            fetch_id, tag, _cov_info["coverage"])
-            except ApiError:
-                raise  # 覆盖率不足的诊断原样透传
-            except Exception as exc:  # noqa: BLE001 - 预检本身失败归 SYS-06
-                raise ApiError(
-                    "SYS-06", run_id=fetch_id, http_status=500,
-                    detail=f"{tag} 覆盖率预检无法打开 B04：{type(exc).__name__}: {exc}",
-                ) from exc
-
-            paths: Dict[str, object] = {}
-            for band in BANDS:
-                dest = root / f"{tag}_{band}.tif"
-                if _band_is_valid(dest):  # 断点续传：已存在且可读则跳过
-                    paths[band] = dest
-                elif band == SWIR_BAND:
-                    # B11 20m→10m：以已落盘的 B04 作参考网格重采样（B04 在 B11 之前）
-                    paths[band] = _download_b11_on_grid(
-                        url, box, _b11_reference(paths), dest, fetch_id)
-                else:
-                    paths[band] = _download_band(url, band, box, dest, fetch_id)
-                _advance(fetch_id, 1)  # 进度以"波段"为单位（每组 12 波段）
-
-            _assert_has_data(paths, tag, fetch_id)
-            _upload_tag(name, tag, paths, fetch_id)
-            scene_ids[tag] = _persist_scene(name, tag, meta, box, fetch_id)
+        scene_ids: Dict[str, str] = {}
+        with ThreadPoolExecutor(max_workers=2,
+                                thread_name_prefix=f"online-tag-{fetch_id[:8]}") as pool:
+            futures = [pool.submit(_one, tag) for tag in TAGS]
+            for fut in as_completed(futures):
+                tag, sid = fut.result()  # 任一相失败 → 异常在此抛出，统一走下方处理
+                scene_ids[tag] = sid
 
         _succeed(fetch_id, scene_ids)
     except ApiError as exc:
