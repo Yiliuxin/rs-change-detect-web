@@ -906,7 +906,18 @@ input[type="range"]:disabled { opacity: .45; cursor: not-allowed; }
   padding: 3px 9px; border-radius: 999px; max-width: 180px;
 }
 .user-chip .u-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.btn-logout { margin-left: 4px; }
+/* 顶栏为深蓝渐变，退出按钮用白底深字保证醒目（覆盖 .btn-ghost 的透明底） */
+.btn-logout {
+  margin-left: 4px;
+  background: #fff;
+  border-color: rgba(255, 255, 255, .8);
+  color: #16324f;
+}
+.btn-logout:hover:not(:disabled) {
+  background: #eaf2fb;
+  border-color: #fff;
+  color: #16324f;
+}
 
 /* ===== 批次 A · 转移流向桑基 / 运行对比 / 图斑详情卡 ===== */
 .chart-sankey { height: 320px; }
