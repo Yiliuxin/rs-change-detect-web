@@ -58,6 +58,11 @@ class ChangeResponse(BaseModel):
     run_id: str = Field(..., description="运行标识（REQ-14）")
     change_geotiff: str = Field("", description="GeoTIFF 结果路径（REQ-12）")
     change_png: str = Field("", description="静态专题图 PNG 路径（REQ-10）")
+    # 纯分类地图叠加图（无页眉/图例/署名，尺寸严格等于栅格）；必须显式声明，
+    # 否则 Pydantic 过滤掉 service 层写入的 change_overlay → 前端只能回退带
+    # 制图要素的 change.png，地图上就出现图例/署名文字。
+    change_overlay: str = Field(
+        "", description="纯分类叠加图 URL，供地图铺图使用（无文字/图例）")
     threshold: float = Field(OTSU_FALLBACK_DNDVI, description="实际阈值：Otsu 或手动（REQ-07）")
     valid_ratio: float = Field(0.0, description="有效像元占比（REQ-05）")
     stats: List[StatItem] = Field(default_factory=list, description="三类像元数 / 面积")

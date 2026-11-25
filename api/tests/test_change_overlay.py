@@ -100,6 +100,25 @@ def test_overlay_registered_in_artifacts():
     assert any("change_overlay.png" in u for u in reg.values())
 
 
+def test_overlay_url_survives_response_model():
+    """service 写入的 change_overlay 必须被 ChangeResponse 保留，否则前端回退
+    到带图例/署名的 change.png，地图上就会出现文字。
+    """
+    from app.api.v1.change import ChangeResponse
+    from app.service.common import artifact_url
+
+    rid = "4f79db68-fc1f-45ec-9703-861aff2a9a93"
+    resp = ChangeResponse(**{
+        "run_id": rid,
+        "change_png": artifact_url(rid, "change.png"),
+        "change_overlay": artifact_url(rid, "change_overlay.png"),
+    }).model_dump()
+    assert resp["change_overlay"] == artifact_url(rid, "change_overlay.png")
+    assert "change_overlay.png" in resp["change_overlay"]
+    # 老 run / 演示降级不传该字段时仍为空串，前端照旧回退，不破坏历史口径
+    assert ChangeResponse(run_id=rid).model_dump()["change_overlay"] == ""
+
+
 def test_overlay_does_not_mutate_input(tmp_path):
     """纯函数口径：渲染不得改动输入栅格。"""
     change = _synthetic_change()
