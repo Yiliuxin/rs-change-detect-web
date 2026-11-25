@@ -1189,7 +1189,7 @@ function renderChangeResult() {
   renderValidRatio();
   const snap = d.params_snapshot || {};
   // 批次 D11（REQ-07/11）：按 params_snapshot.index 动态显示 Δ<指数>，不再写死 ΔNDVI；
-  // NDBI / NDMI 的专题图 / 直方图 / 转移矩阵直接复用既有渲染与数值口径，不改结论数字。
+  // NDBI / NDMI 的专题图 / 直方图复用既有渲染口径；转移矩阵的第三类判据随主指数变化。
   const indexName = String(d.index || snap.index || 'NDVI').trim().toUpperCase();
   const thrLabel = $('threshold-label');
   if (thrLabel) thrLabel.textContent = '变化阈值 Δ' + indexName;
@@ -1468,6 +1468,13 @@ function renderTransition() {
     ['有效像元数', Number(tr.valid_count || 0).toLocaleString()],
     ['未变像元数', Number(tr.unchanged_count || 0).toLocaleString()],
   ];
+  // A3 第三类判据随主指数切换，明示当前口径，便于对比不同指数的转移流向
+  const pc = (tr.criteria && tr.criteria.primary_criteria) || null;
+  if (pc && pc.index) {
+    const op = pc.op === 'ge' ? '≥' : '<';
+    const thr = Number(pc.threshold || 0).toFixed(2);
+    metrics.push(['第三类判据', `${pc.index} ${op} ${thr}`]);
+  }
   $('transition-metrics').innerHTML = metrics.map(([k, v]) =>
     `<div class="metric"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join('');
   let html = '<thead><tr><th>t1 \\ t2</th>'

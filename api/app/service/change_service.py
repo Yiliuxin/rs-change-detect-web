@@ -38,7 +38,7 @@ from app.algorithm.composite import (
 from app.algorithm.geotransform import BBox
 from app.algorithm.index_raster import IndexRaster
 from app.algorithm.intensity import intensity_stats
-from app.algorithm.landcover import classify_landcover, transition_matrix
+from app.algorithm.landcover import classify_landcover_indexed, transition_matrix
 from app.algorithm.mask_builder import landsat_dn_nodata_mask
 from app.algorithm.mask_pipeline import (
     compute_valid_ratio, judge_valid_ratio, run_mask_pipeline,
@@ -329,8 +329,8 @@ def _build_pair_indexes(key: str, rho_t: Dict, profile: dict,
     primary = ``_build_index(key)``；aux = ``_build_index(INDEX_AUXILIARY[key]).data``；
     NDVI / NDWI 主指数时 primary / aux 与既有值对象逐字一致（NDVI↔NDWI 互为辅助）。
     NDBI / NDMI 主指数时 aux 固定为 NDVI（需 B11 的分支由 rho_t["B11"] 供给）。
-    ``ndvi`` / ``ndwi`` 数组仍恒返回，供 A3 ``classify_landcover`` 保持既有联合
-    判据语义与数字口径；额外的辅助指数只用于地物判据与探针前置双波段栅格。
+    ``ndvi`` / ``ndwi`` 数组恒返回，供 A3 判水体/植被；``primary`` 供 A3 第三类
+    「裸土/建成」按主指数判据分类（NDVI 主与旧口径逐字一致）。
     """
     aux_key = INDEX_AUXILIARY[key]
     # 一次算齐 NDVI + NDWI（A3 联合判据对所有主指数保持既有口径，不臆造数值）
@@ -744,12 +744,18 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
         )
         _stage_progress(on_stage, "change_detect", 5, 6)
 
-        # A3 地物转移矩阵：NDVI/NDWI 联合判据（同一 valid 掩膜、同一像元面积）；
-        # 对所有主指数（含 NDBI/NDMI）保持既有语义与数字口径，不改 landcover 算法。
-        lc_t1 = classify_landcover(pair_t1["ndvi"], pair_t1["ndwi"], valid_mask=valid)
-        lc_t2 = classify_landcover(pair_t2["ndvi"], pair_t2["ndwi"], valid_mask=valid)
+        # A3 地物转移矩阵：水体(NDWI>0)/植被(NDVI≥0.30)恒定，第三类「裸土/建成」
+        # 由主检测指数按 LANDCOVER_PRIMARY_CRITERIA 判定；NDVI 主逐字沿用旧口径。
+        # 同一 valid 掩膜、同一像元面积，切换主指数后矩阵数字真实变化。
+        lc_t1 = classify_landcover_indexed(
+            pair_t1["ndvi"], pair_t1["ndwi"], pair_t1["primary"].data,
+            key, valid_mask=valid)
+        lc_t2 = classify_landcover_indexed(
+            pair_t2["ndvi"], pair_t2["ndwi"], pair_t2["primary"].data,
+            key, valid_mask=valid)
         transition_summary = transition_matrix(
             lc_t1, lc_t2, float(summary["pixel_area_m2"]), valid_mask=valid,
+            index=key,
         )
         _stage_progress(on_stage, "change_detect", 6, 6)
 

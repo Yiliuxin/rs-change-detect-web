@@ -789,6 +789,19 @@ def write_pdf(report: dict, output_path, font_path: str = DEFAULT_FONT_PATH) -> 
         _line(L(LANDCOVER_NOTE, LANDCOVER_NOTE_EN), size=9, gap=14,
               color=(150, 30, 30))
         _ascii_line(LANDCOVER_NOTE_EN, gap=14)
+        # 主指数感知判据（A3）：第三类归属随主检测指数切换，逐字标注便于复核
+        pc = ((trans.get("criteria") or {}).get("primary_criteria") or {})
+        if pc:
+            pidx = str(pc.get("index", ""))
+            pop = "≥" if pc.get("op") == "ge" else "<"
+            pthr = float(pc.get("threshold", 0.0))
+            _line(L(
+                f"第三类判据（主指数 {pidx}）：{pop}{pthr:.2f} → 裸土/建成",
+                f"CLASS 3 CRITERION (PRIMARY {pidx}): {pop}{pthr:.2f} -> BARE/BUILT",
+            ), size=9, gap=14, color=(150, 30, 30))
+            _ascii_line(
+                f"PRIMARY_INDEX={pidx} PRIMARY_OP={pc.get('op', '')} "
+                f"PRIMARY_THR={pthr:.2f}", gap=14)
 
     # —— 批次 F：实验分析（只读实验复算缓存；compare / sensitivity 两者皆无则整段不输出，REQ-12/14）——
     # 章节渲染只做 Table / 纯 ASCII 检索行：行数据、结论文案的唯一业务源在

@@ -17,7 +17,7 @@ from rasterio.windows import Window
 
 from app.algorithm.change_detector import CHANGE_LABELS_ZH
 from app.algorithm.intensity import intensity_grade
-from app.algorithm.landcover import classify_landcover_scalar
+from app.algorithm.landcover import classify_landcover_scalar_indexed
 from app.api.errors import ApiError
 from app.config.constants import (
     INDEX_AUXILIARY, INDEX_RASTER_T1, INDEX_RASTER_T2, INTENSITY_LABELS_ZH,
@@ -101,8 +101,8 @@ def probe(run_id: str, lng: float, lat: float) -> Dict[str, object]:
     t2, aux2 = _band(raw2, 0), _band(raw2, 1)
     # band1 = 主检测指数(index)，band2 = 按 INDEX_AUXILIARY 映射的辅助指数。
     # NDVI 主 → (ndvi,ndwi)=(b1,b2)；NDWI 主 → (b2,b1)（既有行为逐字不变）；
-    # NDBI / NDMI 主 → band2 是 NDVI，取 ndvi=aux、ndwi=NaN（landcover 类别自然
-    # 为 0 / 无效，不臆造 NDWI 数值、不崩、不 500）。CVA 幅值仍用 t1/t2 原值不变。
+    # NDBI / NDMI 主 → band2 是 NDVI，取 ndvi=aux、ndwi=NaN（标量判据跳过水体
+    # 判据，不臆造 NDWI 数值、不崩、不 500）。CVA 幅值仍用 t1/t2 原值不变。
     aux_key = INDEX_AUXILIARY.get(index, "")
     band_map = {index: (t1, t2), aux_key: (aux1, aux2)}
     nan = float("nan")
@@ -141,8 +141,9 @@ def probe(run_id: str, lng: float, lat: float) -> Dict[str, object]:
     finite = all(math.isfinite(v) for v in (t1, t2, delta))
     grade = (intensity_grade(delta, thr, change_class=change_class)
              if finite else 0)
-    lc1 = classify_landcover_scalar(ndvi1, ndwi1)
-    lc2 = classify_landcover_scalar(ndvi2, ndwi2)
+    # 地物类别与 A3 转移矩阵共用主指数感知判据：band1 即本轮主指数。
+    lc1 = classify_landcover_scalar_indexed(ndvi1, ndwi1, t1, index)
+    lc2 = classify_landcover_scalar_indexed(ndvi2, ndwi2, t2, index)
 
     return {
         "run_id": str(run_id),

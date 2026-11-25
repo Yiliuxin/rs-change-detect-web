@@ -13,7 +13,8 @@ import numpy as np
 import pytest
 
 from app.algorithm.landcover import (
-    classify_landcover, classify_landcover_scalar, transition_matrix,
+    classify_landcover, classify_landcover_scalar, classify_landcover_indexed,
+    classify_landcover_scalar_indexed, transition_matrix,
 )
 from app.config.constants import (
     LANDCOVER_CODES, LANDCOVER_NODATA, LANDCOVER_NOTE,
@@ -134,3 +135,67 @@ def test_transition_matrix_empty_and_valid_mask():
                                valid_mask=np.zeros((3, 3), dtype=bool))
     assert masked["valid_count"] == 0
     assert masked["unchanged_ratio"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# 主指数感知判据（A3 转移流向随主指数变化）
+# ---------------------------------------------------------------------------
+def test_ndvi_primary_is_bitwise_identical_to_legacy():
+    """NDVI 主指数逐像元等于旧联合判据，历史口径与数字不变。"""
+    rng = np.random.default_rng(20261125)
+    ndvi = rng.uniform(-0.5, 0.9, size=(12, 12)).astype(np.float32)
+    ndwi = rng.uniform(-0.4, 0.4, size=(12, 12)).astype(np.float32)
+    ndvi[0, 0] = np.nan
+    legacy = classify_landcover(ndvi, ndwi)
+    indexed = classify_landcover_indexed(ndvi, ndwi, ndvi, "NDVI")
+    np.testing.assert_array_equal(indexed, legacy)
+
+
+def test_third_class_follows_primary_index():
+    """同一像元在 NDVI 主判「其他」，其余三指数判「裸土/建成」。"""
+    # 非水体(NDWI=-0.05)、非植被(NDVI=0.20)的中性像元
+    ndvi = np.array([[0.20]], dtype=np.float32)
+    ndwi = np.array([[-0.05]], dtype=np.float32)
+    primaries = {
+        "NDVI": np.array([[0.20]], dtype=np.float32),   # 未 <0.15 → 4
+        "NDWI": np.array([[-0.20]], dtype=np.float32),  # < -0.10 → 3
+        "NDBI": np.array([[0.10]], dtype=np.float32),   # ≥0.00 → 3
+        "NDMI": np.array([[-0.20]], dtype=np.float32),  # < -0.10 → 3
+    }
+    expected = {"NDVI": 4, "NDWI": 3, "NDBI": 3, "NDMI": 3}
+    for index, primary in primaries.items():
+        got = int(classify_landcover_indexed(ndvi, ndwi, primary, index)[0, 0])
+        assert got == expected[index], (index, got)
+        assert classify_landcover_scalar_indexed(
+            float(ndvi[0, 0]), float(ndwi[0, 0]),
+            float(primary[0, 0]), index) == expected[index]
+
+    # 水体 / 植被在四种主指数下恒定（仅第三类随主指数变）
+    wet_ndvi = np.array([[0.8, 0.5]], dtype=np.float32)
+    wet_ndwi = np.array([[0.1, -0.1]], dtype=np.float32)
+    for index, primary in primaries.items():
+        p = np.broadcast_to(primary[0, 0], (1, 2))
+        out = classify_landcover_indexed(wet_ndvi, wet_ndwi, p, index)
+        assert [int(v) for v in out[0]] == [1, 2], index
+
+
+def test_transition_matrix_records_primary_criteria():
+    """矩阵回传主指数判据，报告/前端据此逐字标注口径。"""
+    lc = np.array([[1, 2, 3, 4]], dtype=np.uint8)
+    tr = transition_matrix(lc, lc, 100.0, index="NDBI")
+    crit = tr["criteria"]
+    assert crit["primary_index"] == "NDBI"
+    assert crit["primary_criteria"] == {
+        "index": "NDBI", "op": "ge", "threshold": 0.0,
+    }
+    assert "主检测指数" in crit["index_note_zh"]
+
+
+def test_scalar_indexed_skips_water_when_ndwi_missing():
+    """NDBI 主探针的 2 波段产物无 NDWI：跳过水体判据，不臆造数值。"""
+    nan = float("nan")
+    assert classify_landcover_scalar_indexed(0.2, nan, 0.1, "NDBI") == 3
+    assert classify_landcover_scalar_indexed(0.5, nan, 0.1, "NDBI") == 2
+    assert classify_landcover_scalar_indexed(nan, nan, 0.1, "NDBI") == 0
+    assert classify_landcover_scalar_indexed(0.2, nan, 0.1, "NDBI",
+                                             valid=False) == 0

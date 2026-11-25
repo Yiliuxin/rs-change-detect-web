@@ -343,6 +343,24 @@ TRANSITION_TOP_N: Final[int] = 5
 # 硬约束 4：经验阈值在 PDF 与界面逐字标注（与 A1 同一措辞）
 LANDCOVER_NOTE: Final[str] = INTENSITY_NOTE
 LANDCOVER_NOTE_EN: Final[str] = INTENSITY_NOTE_EN
+# 主指数感知判据：四类语义与 4×4 结构不变，仅第三类「裸土/建成」由主指数决定。
+# NDVI 主指数沿用 NDVI_BARE_LT 原口径（历史数字逐字可比）；其余指数按各自
+# 物理语义判第三类。水体(NDWI>0) / 植被(NDVI≥0.30) 判据对所有指数恒定。
+NDWI_BARE_LT: Final[float] = -0.10
+NDBI_BUILT_GE: Final[float] = 0.00
+NDMI_DRY_LT: Final[float] = -0.10
+LANDCOVER_PRIMARY_CRITERIA: Final[Dict[str, Dict[str, object]]] = {
+    "NDVI": {"index": "NDVI", "op": "lt", "threshold": NDVI_BARE_LT},
+    "NDWI": {"index": "NDWI", "op": "lt", "threshold": NDWI_BARE_LT},
+    "NDBI": {"index": "NDBI", "op": "ge", "threshold": NDBI_BUILT_GE},
+    "NDMI": {"index": "NDMI", "op": "lt", "threshold": NDMI_DRY_LT},
+}
+LANDCOVER_INDEX_NOTE_ZH: Final[str] = (
+    "第三类「裸土/建成」判据随主检测指数切换；水体与植被判据恒定"
+)
+LANDCOVER_INDEX_NOTE_EN: Final[str] = (
+    "Class 3 (bare/built) follows the primary index; water/vegetation criteria fixed"
+)
 
 # ---------------------------------------------------------------------------
 # 批次 B1 置信度过渡带（|Δ| 贴近阈值 T，判定证据不足）
