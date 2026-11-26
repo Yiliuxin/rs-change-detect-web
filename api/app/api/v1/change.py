@@ -47,6 +47,9 @@ class ChangeRequest(BaseModel):
     # REQ-13：异步受理（后台线程 + 阶段进度轮询）；alias 兼容 JSON 键 ``async``
     async_mode: bool = Field(False, alias="async",
                             description="true=异步受理，立即返回 PENDING 并由 GET /task/{id} 轮询")
+    # 快速模式（可选）：cloud=云端 CDSE 算指数（秒级），缺省 local=本地读 COG。
+    # 不改变任何历史 run；仅本次检测生效。
+    source: str = Field("local", description="指数来源：local（默认，本地 COG）/ cloud（云端 CDSE 快速模式）")
 
 
 class ChangeResponse(BaseModel):
@@ -148,12 +151,12 @@ def run_change(payload: ChangeRequest):
     if payload.async_mode:
         accept = change_async.start_change(
             payload.run_id, payload.index, payload.block_size, payload.threshold,
-            payload.method,
+            payload.method, source=payload.source,
         )
         return ChangeAsyncAccept(**accept)
     result = change_service.run(
         payload.run_id, payload.index, payload.block_size, payload.threshold,
-        payload.method,
+        payload.method, source=payload.source,
     )
     result.setdefault("method", METHOD_OTSU)
     return ChangeResponse(**result)

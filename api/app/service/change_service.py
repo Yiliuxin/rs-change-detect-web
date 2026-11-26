@@ -76,6 +76,62 @@ from app.service.concurrency import serial
 
 __all__ = ["load_scene", "run", "run_pipeline"]
 
+
+def _cloud_pair_indexes(key: str, bbox: BBox, sc_t1: dict, sc_t2: dict,
+                        run_id: str, snapshot: Dict,
+                        size: int = 512) -> Tuple[Dict, Dict, np.ndarray, dict]:
+    """快速模式：云端算 NDVI/NDWI/NDBI/NDMI，构造与 local 同构的 pair。
+
+    只替换「读 COG 算指数」这一段；返回 ``(pair_t1, pair_t2, valid, profile)``
+    供下游 Otsu / 统计 / 转移矩阵 / 出图逐字复用。云端单指数请求（实测稳定）。
+    """
+    from app.service import cdse_service  # 局部导入：local 路径不依赖云端模块
+
+    needed = {key, "NDVI", "NDWI", INDEX_AUXILIARY.get(key)}
+    needed.discard(None)
+    date1 = str(snapshot.get("t1") or sc_t1.get("acq_date") or "")[:10]
+    date2 = str(snapshot.get("t2") or sc_t2.get("acq_date") or "")[:10]
+    if not date1 or not date2:
+        raise ApiError("EX2", run_id=run_id,
+                       detail="快速模式无法确定两时相日期，请用在线取数或预置影像")
+
+    arrays: Dict[str, Dict[str, np.ndarray]] = {"t1": {}, "t2": {}}
+    profile: Optional[dict] = None
+    for tag, dt in (("t1", date1), ("t2", date2)):
+        for ik in sorted(needed):
+            data, prof = cdse_service.fetch_index(ik, tuple(bbox.as_tuple()),
+                                                  dt, dt, run_id, size=size)
+            arrays[tag][ik] = data
+            if profile is None:
+                profile = prof
+    if profile is None:
+        raise ApiError("SYS-06", run_id=run_id, detail="云端未回传任何有效指数栅格")
+
+    # 公共有效掩膜：所有需要的指数均有限（云端 SCL 粗掩膜 + NaN 传播）
+    valid = np.ones(arrays["t1"][sorted(needed)[0]].shape, dtype=bool)
+    for tag in ("t1", "t2"):
+        for ik in needed:
+            valid &= np.isfinite(arrays[tag][ik])
+
+    def make_pair(tag: str) -> Dict:
+        a = arrays[tag]
+        def ir(name: str) -> IndexRaster:
+            return IndexRaster(
+                data=a[name], profile=dict(profile), name=name,
+                valid_mask=valid, run_id=run_id, params_snapshot=dict(snapshot),
+            )
+        primary = ir(key)
+        aux_key = INDEX_AUXILIARY.get(key)
+        return {
+            "primary": primary,
+            "aux": a[aux_key] if aux_key else a["NDVI"],
+            "ndvi": a["NDVI"], "ndwi": a["NDWI"],
+        }
+
+    snapshot["index_source"] = "cloud"
+    snapshot["cloud_provider"] = "CDSE Sentinel Hub Processing API"
+    return make_pair("t1"), make_pair("t2"), valid, dict(profile)
+
 _BANDS_10M = ("B02", "B03", "B04", "B08")
 # REQ-06/07：指数 → (band_a, band_b)：NDVI=(B04,B08 红/近红外)，
 # NDWI=(B03,B08 绿/近红外)，NDBI=(B11,B08 短波红外/近红外)，
@@ -440,21 +496,24 @@ def _resolve_bbox(task: dict) -> BBox:
 
 
 def run(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
-        threshold: Optional[float] = None, method: str = METHOD_OTSU) -> dict:
+        threshold: Optional[float] = None, method: str = METHOD_OTSU,
+        source: str = "local") -> dict:
     """变化检测主流程（REQ-05/06/07/08/14），同步阻塞入口。
 
     保持既有语义不变：``with serial`` 占用唯一处理槽（REQ-13，超限 EX7），
     内部调用 :func:`run_pipeline` 执行完整管线。``method`` 缺省 ``otsu`` 时
-    与历史版本逐字一致。
+    与历史版本逐字一致。``source="cloud"`` 为可选快速模式（缺省 local 不变）。
     """
     with serial(run_id):  # REQ-13：同步阻塞、并发上限 1（超限 EX7）
-        return run_pipeline(run_id, index, block_size, threshold, method=method)
+        return run_pipeline(run_id, index, block_size, threshold, method=method,
+                            source=source)
 
 
 def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
                  threshold: Optional[float] = None,
                  on_stage: Optional[object] = None,
-                 method: str = METHOD_OTSU) -> dict:
+                 method: str = METHOD_OTSU,
+                 source: str = "local") -> dict:
     """变化检测完整管线（REQ-05/06/07/08/11/14），不含并发闸门。
 
     供同步入口 :func:`run` 与异步入口 ``change_async`` 复用。``on_stage(name)``
@@ -502,49 +561,64 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
 
         task_repo.update_status(run_id, "RUNNING", started_at=utc_now())
 
-        # B3：读裁切阶段内进度 = 2 时相 × 4 波段 = 8 个单位（B11 循环外读，不占单位）
-        def _band_cb(offset: int):
-            return lambda i: _stage_progress(on_stage, "read_clip", offset + i, 8)
+        # 快速模式（source=cloud）：云端算 4 指数，跳过本地读 COG；下游
+        # Otsu / 统计 / 转移矩阵 / 出图完全复用，与 local 口径逐字一致。
+        cloud_mode = str(source or "local").strip().lower() in {"cloud", "fast"}
+        pair_t1: Optional[Dict] = None
+        pair_t2: Optional[Dict] = None
+        if cloud_mode:
+            pair_t1, pair_t2, valid, profile = _cloud_pair_indexes(
+                key, bbox, sc_t1, sc_t2, run_id, snapshot)
+            valid_ratio = compute_valid_ratio(valid)
+            verdict = judge_valid_ratio(valid_ratio, mask=valid)
+            _stage_progress(on_stage, "read_clip", 8, 8)
+            _stage_progress(on_stage, "mask", 3, 3)
+            _stage_progress(on_stage, "index", 3, 6)
+        else:
+            # B3：读裁切阶段内进度 = 2 时相 × 4 波段 = 8 个单位（B11 循环外读，不占单位）
+            def _band_cb(offset: int):
+                return lambda i: _stage_progress(on_stage, "read_clip", offset + i, 8)
 
-        scenes = {
-            "t1": load_scene(sc_t1["cog_path"], sc_t1["sensor"],
-                             sc_t1.get("proc_baseline"), bbox, run_id,
-                             on_band=_band_cb(0), need_b11=need_b11),
-            "t2": load_scene(sc_t2["cog_path"], sc_t2["sensor"],
-                             sc_t2.get("proc_baseline"), bbox, run_id,
-                             on_band=_band_cb(4), need_b11=need_b11),
-        }
-        _stage_progress(on_stage, "read_clip", 8, 8)  # 阶段 1：读裁切
+            scenes = {
+                "t1": load_scene(sc_t1["cog_path"], sc_t1["sensor"],
+                                 sc_t1.get("proc_baseline"), bbox, run_id,
+                                 on_band=_band_cb(0), need_b11=need_b11),
+                "t2": load_scene(sc_t2["cog_path"], sc_t2["sensor"],
+                                 sc_t2.get("proc_baseline"), bbox, run_id,
+                                 on_band=_band_cb(4), need_b11=need_b11),
+            }
+            _stage_progress(on_stage, "read_clip", 8, 8)  # 阶段 1：读裁切
 
-        # REQ-03 / EX4：双时相左上角/尺寸/CRS 一致
-        assert_grid_aligned(scenes["t1"]["profile"], scenes["t2"]["profile"])
+            # REQ-03 / EX4：双时相左上角/尺寸/CRS 一致
+            assert_grid_aligned(scenes["t1"]["profile"], scenes["t2"]["profile"])
 
-        # 双时相有效掩膜交集 + 剔除 NODATA(=0)。
-        # NDVI / NDWI 分支下面这段逐字不变；仅 need_b11（NDBI / NDMI）时把 B11
-        # 有效性并入，避免 B11 的 NaN / 0 参与 Otsu 直方图。
-        valid = scenes["t1"]["masks"].valid & scenes["t2"]["masks"].valid
-        for phase in ("t1", "t2"):
-            for band in ("B04", "B08"):
-                valid &= scenes[phase]["dn"][band] > 0
-        if need_b11:
+            # 双时相有效掩膜交集 + 剔除 NODATA(=0)。
+            # NDVI / NDWI 分支下面这段逐字不变；仅 need_b11（NDBI / NDMI）时把 B11
+            # 有效性并入，避免 B11 的 NaN / 0 参与 Otsu 直方图。
+            valid = scenes["t1"]["masks"].valid & scenes["t2"]["masks"].valid
             for phase in ("t1", "t2"):
-                valid &= (np.isfinite(scenes[phase]["dn"]["B11"])
-                          & (scenes[phase]["dn"]["B11"] > 0))
-        _stage_progress(on_stage, "mask", 1, 3)
+                for band in ("B04", "B08"):
+                    valid &= scenes[phase]["dn"][band] > 0
+            if need_b11:
+                for phase in ("t1", "t2"):
+                    valid &= (np.isfinite(scenes[phase]["dn"]["B11"])
+                              & (scenes[phase]["dn"]["B11"] > 0))
+            _stage_progress(on_stage, "mask", 1, 3)
 
-        valid_ratio = compute_valid_ratio(valid)
-        _stage_progress(on_stage, "mask", 2, 3)
-        verdict = judge_valid_ratio(valid_ratio, mask=valid)
-        _stage_progress(on_stage, "mask", 3, 3)  # 阶段 2：掩膜
+            valid_ratio = compute_valid_ratio(valid)
+            _stage_progress(on_stage, "mask", 2, 3)
+            verdict = judge_valid_ratio(valid_ratio, mask=valid)
+            _stage_progress(on_stage, "mask", 3, 3)  # 阶段 2：掩膜
 
         # EX3(=0) / EX11(<0.10) 终止档：不产出结果，如实报告
         if verdict.terminate:
             snapshot["valid_ratio"] = float(valid_ratio)
             snapshot["valid_ratio_code"] = verdict.code
             err_message = None
-            if verdict.code == "EX11":
+            if verdict.code == "EX11" and not cloud_mode:
                 # 兜底诊断：若是在线取数遗留的「AOI 越界」坏数据，给出可执行建议；
                 # 云多导致的 EX11 不附诊断（aoi_coverage≥下限返回 None）。
+                # 快速模式无本地 COG 路径，跳过此诊断（其数据源为云端 AOI 窗）。
                 try:
                     diag = _ex11_coverage_diagnosis(
                         str(scenes["t1"]["paths"]["B04"]), bbox
@@ -559,36 +633,43 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
                                     finished_at=utc_now(), error_code=verdict.code)
             raise ApiError(verdict.code, run_id=run_id, message=err_message)
 
-        profile = scenes["t1"]["profile"]
+        if not cloud_mode:
+            profile = scenes["t1"]["profile"]
 
         # EX5(0.10–0.50) 告警可继续档：200 且 params_snapshot 带 warning，检测继续
         if verdict.warn:
             snapshot["warning"] = {"code": verdict.code, "message": verdict.message}
 
-        # NF4：先掩膜后缩放。B11 与 10m 波段同走 _mask_then_scale → to_reflectance
-        # （ρ=DN/10000，B11 为 DN 量级，不额外缩放）；NDVI / NDWI 分支仍仅 4 波段、
-        # 逐字不变。need_b11 时 rho[phase] 额外含 "B11" 供 NDBI / NDMI 计算。
-        rho = {}
-        rho_bands = _BANDS_10M + (("B11",) if need_b11 else ())
-        for phase in ("t1", "t2"):
-            baseline = scenes[phase]["baseline"]
-            rho[phase] = {
-                band: _mask_then_scale(scenes[phase]["dn"][band], sensor, baseline, valid)
-                for band in rho_bands
-            }
+        if not cloud_mode:
+            # NF4：先掩膜后缩放。B11 与 10m 波段同走 _mask_then_scale → to_reflectance
+            # （ρ=DN/10000，B11 为 DN 量级，不额外缩放）；NDVI / NDWI 分支仍仅 4 波段、
+            # 逐字不变。need_b11 时 rho[phase] 额外含 "B11" 供 NDBI / NDMI 计算。
+            rho = {}
+            rho_bands = _BANDS_10M + (("B11",) if need_b11 else ())
+            for phase in ("t1", "t2"):
+                baseline = scenes[phase]["baseline"]
+                rho[phase] = {
+                    band: _mask_then_scale(scenes[phase]["dn"][band], sensor, baseline, valid)
+                    for band in rho_bands
+                }
 
-        # REQ-10：双时相真彩合成落盘 t1_composite.png / t2_composite.png
-        # （批次 2 卷帘对比消费）；假彩合成仍按既有链路在 t1 验证纯函数。
-        out_dir = run_dir(run_id)
-        for i, tag in enumerate(("t1", "t2"), start=1):
-            rgb = true_color(
-                rho[tag]["B04"], rho[tag]["B03"], rho[tag]["B02"],
-                valid_mask=valid,
-            )
-            write_composite_png(rgb, out_dir / f"{tag}_composite.png")
-            _stage_progress(on_stage, "index", i, 6)
-        false_color(rho["t1"]["B08"], rho["t1"]["B04"], rho["t1"]["B03"], valid_mask=valid)
-        _stage_progress(on_stage, "index", 3, 6)
+            # REQ-10：双时相真彩合成落盘 t1_composite.png / t2_composite.png
+            # （批次 2 卷帘对比消费）；假彩合成仍按既有链路在 t1 验证纯函数。
+            out_dir = run_dir(run_id)
+            for i, tag in enumerate(("t1", "t2"), start=1):
+                rgb = true_color(
+                    rho[tag]["B04"], rho[tag]["B03"], rho[tag]["B02"],
+                    valid_mask=valid,
+                )
+                write_composite_png(rgb, out_dir / f"{tag}_composite.png")
+                _stage_progress(on_stage, "index", i, 6)
+            false_color(rho["t1"]["B08"], rho["t1"]["B04"], rho["t1"]["B03"], valid_mask=valid)
+            _stage_progress(on_stage, "index", 3, 6)
+        else:
+            # 快速模式：云端只回传指数，无原始反射率波段 → 不生成真彩卷帘图。
+            # 这是已知限制，如实标注；三类专题图 / 统计 / 转移矩阵全部正常产出。
+            out_dir = run_dir(run_id)
+            snapshot["composite_skipped"] = "快速模式（云端指数）无原始波段，未生成真彩卷帘图"
 
         # 产物清单（REQ-10/12/14）：本轮主三件套 + 带 index / method 后缀归档 + 合成图。
         # 差值法 NDVI 沿用历史主名（缺省行为不变）；回归法改用 _reg 主名，互不覆盖。
@@ -596,6 +677,8 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
         out_names = (regression_artifact_names()
                      if method_key == METHOD_REGRESSION else None)
 
+        baselines = ({k: scenes[k]["baseline"] for k in ("t1", "t2")}
+                     if not cloud_mode else {"t1": None, "t2": None})
         snapshot.update({
             "block_size": int(block_size),
             "index": key,
@@ -604,7 +687,7 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
             "sensor": sensor,
             # 常量源按 sensor 锁定公式口径，绝不使用 scene 表历史旧字段
             "formula": str(radiometric_formula(sensor)["text"]),
-            "baselines": {k: scenes[k]["baseline"] for k in ("t1", "t2")},
+            "baselines": baselines,
             "valid_ratio": float(valid_ratio),
             "valid_ratio_code": verdict.code,
             "valid_ratio_min": VALID_RATIO_MIN,
@@ -616,10 +699,12 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
         # 后续 Δ / 阈值 / 三类判别 / 形态学 / 面积统计对所有指数完全一致。
         # A3/B2：主键走 _build_index(key)、辅助按 INDEX_AUXILIARY 取，且恒算齐
         # NDVI + NDWI 供 A3 联合判据；NDVI / NDWI 主检测指数口径逐字不变。
-        _stage_progress(on_stage, "index", 4, 6)
-        pair_t1 = _build_pair_indexes(key, rho["t1"], profile, valid, run_id, snapshot)
-        _stage_progress(on_stage, "index", 5, 6)
-        pair_t2 = _build_pair_indexes(key, rho["t2"], profile, valid, run_id, snapshot)
+        # 快速模式的 pair 已在 _cloud_pair_indexes 用云端指数构造，口径同构。
+        if not cloud_mode:
+            _stage_progress(on_stage, "index", 4, 6)
+            pair_t1 = _build_pair_indexes(key, rho["t1"], profile, valid, run_id, snapshot)
+            _stage_progress(on_stage, "index", 5, 6)
+            pair_t2 = _build_pair_indexes(key, rho["t2"], profile, valid, run_id, snapshot)
         idx_t1, idx_t2 = pair_t1["primary"], pair_t2["primary"]
 
         # B2 前置：探针只读 1 个像元的双时相指数栅格（回归法 _reg 隔离命名）。

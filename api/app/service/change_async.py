@@ -113,7 +113,8 @@ def _stage(task_id: str, name: str, done=None, total=None) -> None:
 # --------------------------------------------------------------------------- #
 def start_change(run_id: str, index: str = "NDVI", block_size: int = 256,
                  threshold: Optional[float] = None,
-                 method: str = METHOD_OTSU) -> dict:
+                 method: str = METHOD_OTSU,
+                 source: str = "local") -> dict:
     """受理异步变化检测：先过并发闸门（超限 → EX7 409），立即返回 PENDING。
 
     后台线程持有 ``concurrency`` 闸门运行 ``change_service.run_pipeline`` 完整管线，
@@ -128,7 +129,7 @@ def start_change(run_id: str, index: str = "NDVI", block_size: int = 256,
     rec = _new_record(run_id)
     t = threading.Thread(
         target=_run_change,
-        args=(run_id, index, block_size, threshold, method_key),
+        args=(run_id, index, block_size, threshold, method_key, source),
         name=f"change-async-{str(run_id)[:8]}",
         daemon=True,
     )
@@ -138,7 +139,8 @@ def start_change(run_id: str, index: str = "NDVI", block_size: int = 256,
 
 
 def _run_change(run_id: str, index: str, block_size: int,
-                threshold: Optional[float], method: str = METHOD_OTSU) -> None:
+                threshold: Optional[float], method: str = METHOD_OTSU,
+                source: str = "local") -> None:
     """后台主流程：RUNNING →（SUCCESS | FAILED），finally 释放并发闸门。"""
     try:
         _patch(run_id, status=STATUS_RUNNING)
@@ -152,6 +154,8 @@ def _run_change(run_id: str, index: str, block_size: int,
         kwargs = {"on_stage": on_stage}
         if method != METHOD_OTSU:
             kwargs["method"] = method
+        if str(source or "local").strip().lower() != "local":
+            kwargs["source"] = source
         result = change_service.run_pipeline(
             run_id, index, block_size, threshold, **kwargs,
         )

@@ -159,6 +159,13 @@
               <span class="hint" id="run-mode-hint">关闭 · 同步提交</span>
             </div>
 
+            <!-- 快速模式（可选）：云端 CDSE 算指数、本地做检测，秒级响应；默认关闭。
+                 关闭时走既有本地读 COG 链路，行为与历史版本逐字一致。 -->
+            <div class="run-mode-row gap-top" id="cloud-mode-row">
+              <label class="chk" title="开启后由 Copernicus Data Space Ecosystem 云端计算 NDVI/NDWI/NDBI/NDMI，只回传指数小图，本地继续做变化检测，秒级响应；需配置 API 凭证。关闭则用本地影像，行为不变"><input type="checkbox" id="chk-cloud-mode" /> 快速模式（云端算指数）</label>
+              <span class="hint" id="cloud-mode-hint">关闭 · 本地影像</span>
+            </div>
+
             <button type="button" class="btn btn-primary btn-block gap-top" id="btn-run-change" disabled
               title="需先应用 AOI（A 卡片）并选择影像对（B 卡片）">运行变化检测</button>
             <div class="status-line gap-top" id="run-progress" hidden><span class="spinner"></span><span id="run-status">正在运行变化检测…</span></div>

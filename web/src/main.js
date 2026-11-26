@@ -910,7 +910,9 @@ async function runChangeDetection() {
   btn.textContent = '运行中…';
   $('run-progress').hidden = false;
   const { index, threshold, method } = runParams();
-  $('run-status').textContent = '正在运行变化检测（' + METHOD_LABELS[method] + ' · 读取 COG → 掩膜 → '
+  const cloudMode = !!($('chk-cloud-mode') && $('chk-cloud-mode').checked);
+  $('run-status').textContent = '正在运行变化检测（' + METHOD_LABELS[method] + ' · '
+    + (cloudMode ? '云端算指数 → 本地检测 → ' : '读取 COG → 掩膜 → ')
     + (method === 'cva' ? 'CVA 幅值' : 'Δ' + index)
     + (threshold === undefined ? ' → Otsu 自适应阈值' : ' → 手动阈值 T=' + threshold.toFixed(2))
     + ' → 渲染专题图）…';
@@ -920,6 +922,8 @@ async function runChangeDetection() {
     block_size: Number($('block-size').value) || 256,
   };
   if (threshold !== undefined) body.threshold = threshold;
+  // 快速模式：云端算指数、本地做检测；默认关闭时不下发 source，行为与历史一致
+  if (cloudMode) body.source = 'cloud';
   try {
     const res = await api.runChange(body);
     if (res.demo) markDemo();
@@ -974,6 +978,13 @@ function syncBgModeUi() {
   const on = !!($('chk-bg-run') && $('chk-bg-run').checked);
   const hint = $('run-mode-hint');
   if (hint) hint.textContent = on ? '开启 · 后台任务 + 2s 轮询' : '关闭 · 同步提交';
+}
+
+// 快速模式（可选）：云端算指数、本地做检测；默认关闭，行为与历史一致。
+function syncCloudModeUi() {
+  const on = !!($('chk-cloud-mode') && $('chk-cloud-mode').checked);
+  const hint = $('cloud-mode-hint');
+  if (hint) hint.textContent = on ? '开启 · 云端算指数（秒级）' : '关闭 · 本地影像';
 }
 
 function stopBgPolling() {
@@ -1162,6 +1173,8 @@ async function runChangeAsync() {
     block_size: Number($('block-size').value) || 256,
   };
   if (threshold !== undefined) body.threshold = threshold;
+  // 快速模式：云端算指数、本地做检测；默认关闭时不下发 source，行为与历史一致
+  if ($('chk-cloud-mode') && $('chk-cloud-mode').checked) body.source = 'cloud';
   try {
     const res = await api.startAsyncChange(body);
     if (res.ok && res.data && res.data.task_id) {
@@ -3037,6 +3050,7 @@ function bindEvents() {
 
   // ===== 3A（REQ-13）：C 卡「后台运行」开关（默认关 = 同步提交，既有行为零变化） =====
   $('chk-bg-run').addEventListener('change', syncBgModeUi);
+  if ($('chk-cloud-mode')) $('chk-cloud-mode').addEventListener('change', syncCloudModeUi);
   syncBgModeUi();
 
   // ===== 2B：结果卡标签页 / 图上点选 / 历史运行（第七张常驻卡） =====
