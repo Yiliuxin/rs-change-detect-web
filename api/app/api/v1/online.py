@@ -83,6 +83,8 @@ class FetchRequest(BaseModel):
 
     name: str = Field(..., pattern=r"^[a-z0-9_]{1,40}$",
                       description="取数组名，规范为 [a-z0-9_]（用作 pair_<name> 与 uuid5 种子）")
+    mode: str = Field("local", pattern=r"^(local|cloud)$",
+                      description="local=下载原始波段（默认）；cloud=CDSE 云端直接算指数（快）")
     aoi_geom: Optional[str] = Field(None, description="GeoJSON Polygon（WGS84，闭合）")
     bbox: Optional[List[float]] = Field(None, description="AOI 外包框 [minx,miny,maxx,maxy]")
     tile: str = Field(..., pattern=r"^[0-9]{2}[A-Za-z]{3}$", description="MGRS 景号（如 49RFN）")
@@ -122,6 +124,7 @@ class FetchStatusResponse(BaseModel):
 
     fetch_id: str
     status: str = Field(..., description="PENDING / RUNNING / SUCCESS / FAILED")
+    mode: str = Field("local", description="local=原始波段 / cloud=云端指数")
     progress: FetchProgress = Field(default_factory=FetchProgress)
     error: Optional[FetchError] = None
     scene_ids: Optional[dict] = Field(None, description="成功后的 {t1, t2} scene_id")
@@ -134,6 +137,7 @@ class FetchGroupItem(BaseModel):
     scene_count: int = Field(0, description="该组 scene 条数（通常 2）")
     t1_date: str = Field("", description="较早时相日期")
     t2_date: str = Field("", description="较晚时相日期")
+    index_source: Optional[str] = Field(None, description="cloud=云端指数组 / local=原始波段组")
 
 
 class FetchGroupsResponse(BaseModel):
@@ -188,7 +192,7 @@ def fetch_scenes(payload: FetchRequest) -> FetchStartResponse:
     """受理取数任务（B 级扩展）：返回 fetch_id，进度由 GET 轮询。"""
     result = online_fetch.start_fetch(
         payload.name, payload.aoi_geom, payload.bbox, payload.tile,
-        payload.t1.model_dump(), payload.t2.model_dump(),
+        payload.t1.model_dump(), payload.t2.model_dump(), mode=payload.mode,
     )
     return FetchStartResponse(**result)
 

@@ -20,7 +20,7 @@
 """
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from minio.deleteobjects import DeleteObject
 
@@ -57,15 +57,31 @@ def _assert_deletable(group: str) -> None:
         )
 
 
+def _index_source(group: str) -> Optional[str]:
+    """探测组的取数口径（cloud=云端指数成品 / local=原始波段）。"""
+    from app.config.constants import COG_BUCKET
+    from app.service.cog_source import has_cloud_indices
+
+    try:
+        if has_cloud_indices(f"minio://{COG_BUCKET}/{group}/t1/"):
+            return "cloud"
+    except Exception:  # noqa: BLE001 - 探测失败按 local 处理，不影响删除功能
+        pass
+    return "local"
+
+
 def list_online_groups() -> Dict[str, object]:
     """列出可删除的在线取数组（已剔除预置白名单与非 pair 组）。
 
-    返回 ``{"groups": [{group, scene_count, t1_date, t2_date}], "total": n}``。
+    返回 ``{"groups": [{group, scene_count, t1_date, t2_date, index_source}],
+    "total": n}``；``index_source`` 供前端区分云端指数与原始波段取数。
     """
     groups = [
         g for g in online_repo.list_fetch_groups()
         if g["group"].startswith("pair_") and not _is_preset(g["group"])
     ]
+    for g in groups:
+        g["index_source"] = _index_source(str(g["group"]))
     return {"groups": groups, "total": len(groups)}
 
 

@@ -98,7 +98,7 @@ def test_fetch_index_clips_and_returns_metric_profile(monkeypatch):
         def __exit__(self, *a): return False
         def read(self): return tif_bytes
 
-    monkeypatch.setattr(cdse_service.urllib.request, "urlopen",
+    monkeypatch.setattr(cdse_service, "_urlopen",
                         lambda req, timeout: _FakeResp())
 
     data, prof = cdse_service.fetch_index(
@@ -119,7 +119,7 @@ def test_fetch_index_retries_then_raises(monkeypatch):
         calls["n"] += 1
         raise urllib.error.HTTPError(req.full_url, 500, "boom", {}, io.BytesIO(b"{}"))
 
-    monkeypatch.setattr(cdse_service.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(cdse_service, "_urlopen", fake_urlopen)
     monkeypatch.setattr(cdse_service.time, "sleep", lambda s: None)
     with pytest.raises(ApiError) as ei:
         cdse_service.fetch_index("NDVI", (100.0, 29.9, 100.9, 30.0),

@@ -54,7 +54,7 @@ from app.algorithm.geotransform import (
 from app.api.errors import ApiError, as_api_error
 from app.config.constants import (
     AOI_COVERAGE_DIAGNOSIS, AOI_COVERAGE_MIN, COG_BUCKET, ERROR_MESSAGES,
-    RADIOMETRIC_FORMULAS, SENSOR_S2,
+    RADIOMETRIC_FORMULAS, SENSOR_S2, VALID_RATIO_MIN,
 )
 from app.config.storage import StorageSettings, ensure_buckets, get_client, object_url, upload_file
 from app.repository import online_repo, scene_repo
@@ -106,9 +106,16 @@ STATUS_SUCCESS = "SUCCESS"
 STATUS_FAILED = "FAILED"
 _ACTIVE_STATUSES = (STATUS_PENDING, STATUS_RUNNING)
 
+# 云端模式：每期一次请求拿 4 个指数（NDVI/NDWI/NDBI/NDMI），两期共 8 个进度单位。
+# 只回传指数小图（约 150KB×4/期），不再跨国下载 12 个原始 COG 波段。
+from app.service.cog_source import CLOUD_INDEXES
+CLOUD_INDEX_BANDS: Tuple[str, ...] = CLOUD_INDEXES
+TOTAL_CLOUD = len(CLOUD_INDEX_BANDS) * len(TAGS)  # 8
+
 __all__ = [
-    "BANDS", "TOTAL_BANDS", "MIN_AOI_COVERAGE", "discover", "start_fetch",
-    "get_status", "cog_object_prefix", "fetch_root", "aoi_coverage",
+    "BANDS", "TOTAL_BANDS", "CLOUD_INDEX_BANDS", "TOTAL_CLOUD",
+    "MIN_AOI_COVERAGE", "discover", "start_fetch", "get_status",
+    "cog_object_prefix", "fetch_root", "aoi_coverage",
     "coverage_diagnosis", "resample_b11_to_ref",
 ]
 
@@ -730,6 +737,7 @@ def _task_view(fetch_id: str) -> dict:
         return {
             "fetch_id": task["fetch_id"],
             "status": task["status"],
+            "mode": str(task.get("mode") or "local"),
             "progress": {"done": int(task["done"]), "total": int(task["total"])},
             "error": dict(task["error"]) if task["error"] else None,
             "scene_ids": dict(task["scene_ids"]) if task["scene_ids"] else None,
@@ -784,6 +792,143 @@ def _fetch_one_tag(fetch_id: str, name: str, tag: str, meta: dict,
     return _persist_scene(name, tag, meta, box, fetch_id)
 
 
+def _write_cloud_index_tif(dest, arrays: Dict[str, np.ndarray],
+                           profile: dict, run_id: str) -> None:
+    """把 4 个云端指数写成一个 4 波段 float32 GeoTIFF（band1..4 顺序固定）。"""
+    prof = {
+        "driver": "GTiff",
+        "dtype": "float32",
+        "count": len(CLOUD_INDEX_BANDS),
+        "height": int(profile["height"]),
+        "width": int(profile["width"]),
+        "crs": profile.get("crs"),
+        "transform": profile["transform"],
+        "nodata": float("nan"),
+    }
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    try:
+        with rasterio.open(str(tmp), "w", **prof) as ds:
+            for i, ik in enumerate(CLOUD_INDEX_BANDS, start=1):
+                ds.write(np.asarray(arrays[ik], dtype=np.float32), i)
+        if not _band_is_valid(tmp):
+            raise RuntimeError(f"云端指数写入校验失败：{tmp}")
+        os.replace(tmp, dest)
+    except Exception as exc:  # noqa: BLE001
+        raise ApiError("SYS-07", run_id=run_id, http_status=500,
+                       detail=f"云端指数栅格写入失败：{exc}") from exc
+
+
+def _fetch_cloud_tag(fetch_id: str, name: str, tag: str, meta: dict,
+                     box: BBox, root) -> str:
+    """云端模式单时相：CDSE 算 4 指数 + 真彩 → 校验 → 落盘 → 上传 → 入库。
+
+    不再下载原始 12 个 COG 波段；返回的产物是**指数成品**，下游检测直接读取，
+    不必再调指数 CDSE。另存 ``<tag>_composite.png``（云端 B04/B03/B02 回传、
+    本地按同一 ``true_color`` 口径拉伸），供双时相卷帘对比消费。
+    真彩生成失败不影响指数入库（卷帘图是附加价值，检测端仍可现场补调）。
+    """
+    from app.service import cdse_service  # 局部导入：local 路径零依赖
+    from app.algorithm.composite import true_color, write_composite_png
+
+    date = str(meta["date"])[:10]
+    arrays: Dict[str, np.ndarray] = {}
+    profile: Optional[dict] = None
+    composite_path = None
+
+    def _one(ik: str):
+        data, prof = cdse_service.fetch_index(
+            ik, tuple(box.as_tuple()), date, date, fetch_id)
+        return ik, np.asarray(data, dtype=np.float32), dict(prof)
+
+    def _rgb():
+        rgb, _prof = cdse_service.fetch_true_color(
+            tuple(box.as_tuple()), date, fetch_id)
+        return rgb
+
+    # 实测 CDSE 单请求偶发 RemoteDisconnected（重试 2s/4s 后第 3 次成功），
+    # 串行会把重试耗时累加到 4 分钟以上；4 指数 + 1 真彩并发让失败重试重叠。
+    with ThreadPoolExecutor(max_workers=len(CLOUD_INDEX_BANDS) + 1,
+                            thread_name_prefix=f"cdse-idx-{fetch_id[:8]}") as pool:
+        futures = {pool.submit(_one, ik): ik for ik in CLOUD_INDEX_BANDS}
+        rgb_future = pool.submit(_rgb)
+        for fut in as_completed(futures):
+            ik, data, prof = fut.result()
+            arrays[ik] = data
+            if profile is None:
+                profile = prof
+            _advance(fetch_id, 1)  # 进度按指数计（两期共 8，真彩不额外计）
+        try:
+            rgb = rgb_future.result()
+            dest_png = root / f"{tag}_composite.png"
+            write_composite_png(true_color(rgb[0], rgb[1], rgb[2]), dest_png)
+            composite_path = dest_png
+        except Exception as exc:  # noqa: BLE001 - 真彩失败不阻断指数入库
+            logger.warning("云端真彩生成失败 fetch_id=%s tag=%s：%s（卷帘图将由检测端补调）",
+                           fetch_id, tag, type(exc).__name__)
+
+    if profile is None:
+        raise ApiError("SYS-06", run_id=fetch_id,
+                       detail="CDSE 未回传任何有效指数栅格")
+    valid = np.ones(arrays[CLOUD_INDEX_BANDS[0]].shape, dtype=bool)
+    for arr in arrays.values():
+        valid &= np.isfinite(arr)
+    ratio = float(np.count_nonzero(valid) / valid.size) if valid.size else 0.0
+    if ratio < VALID_RATIO_MIN:
+        raise ApiError(
+            "EX2", http_status=400, run_id=fetch_id,
+            message=(f"[{tag}] 云端指数有效像元仅 {ratio * 100:.1f}%"
+                     f"（低于 {VALID_RATIO_MIN * 100:.0f}%），请换云量更低的候选或调整 AOI"),
+            detail=f"{tag} 云端指数有效像元不足：{ratio:.4f}",
+        )
+
+    dest = root / f"{tag}_indices.tif"
+    _write_cloud_index_tif(dest, arrays, profile, fetch_id)
+    logger.info("云端指数校验通过 fetch_id=%s tag=%s valid_ratio=%.4f shape=%s composite=%s",
+                fetch_id, tag, ratio, arrays[CLOUD_INDEX_BANDS[0]].shape,
+                bool(composite_path))
+    try:
+        client = get_client(StorageSettings.from_env())
+        ensure_buckets(client, [COG_BUCKET])
+        prefix = cog_object_prefix(name, tag)
+        upload_file(client, COG_BUCKET, f"{prefix}{dest.name}", str(dest))
+        if composite_path is not None:
+            upload_file(client, COG_BUCKET,
+                        f"{prefix}{composite_path.name}", str(composite_path))
+    except Exception as exc:  # noqa: BLE001 - MinIO 写入失败 → SYS-07
+        raise ApiError("SYS-07", run_id=fetch_id, http_status=500,
+                       detail=f"云端指数上传失败（{tag}）：{exc}") from exc
+    return _persist_scene(name, tag, meta, box, fetch_id)
+
+
+def _run_cloud_fetch(fetch_id: str, snapshot: dict) -> None:
+    """云端在线取数后台流程：两期 × 4 指数并发请求（8 路，失败重试重叠）。"""
+    _set_status(fetch_id, STATUS_RUNNING)
+    name = str(snapshot["name"])
+    box: BBox = snapshot["bbox"]
+    metas = {"t1": snapshot["t1"], "t2": snapshot["t2"]}
+    try:
+        root = fetch_root(fetch_id)
+        scene_ids: Dict[str, str] = {}
+
+        def _one(tag: str) -> Tuple[str, str]:
+            meta = dict(metas[tag])
+            meta["tile"] = str(snapshot["tile"])
+            return tag, _fetch_cloud_tag(fetch_id, name, tag, meta, box, root)
+
+        with ThreadPoolExecutor(max_workers=len(TAGS),
+                                thread_name_prefix=f"online-cloud-{fetch_id[:8]}") as pool:
+            futures = {pool.submit(_one, tag): tag for tag in TAGS}
+            for fut in as_completed(futures):
+                tag, sid = fut.result()  # 任一期的异常在此抛出，统一走下方处理
+                scene_ids[tag] = sid
+        _succeed(fetch_id, scene_ids)
+    except ApiError as exc:
+        _fail(fetch_id, exc.code, exc.detail, message=exc.message)
+    except Exception as exc:  # noqa: BLE001
+        mapped = as_api_error(exc, run_id=fetch_id)
+        _fail(fetch_id, mapped.code, mapped.detail, message=mapped.message)
+
+
 def _run_fetch(fetch_id: str) -> None:
     """后台取数主流程（a 下载 → b 上传 → c 入库；d 查重跳过）。
 
@@ -796,6 +941,11 @@ def _run_fetch(fetch_id: str) -> None:
             return
         snapshot = dict(task)
     _set_status(fetch_id, STATUS_RUNNING)
+
+    # 云端模式：不下载原始波段，直接调 CDSE 取两期指数成品（约几十秒）
+    if str(snapshot.get("mode") or "local").lower() == "cloud":
+        _run_cloud_fetch(fetch_id, snapshot)
+        return
 
     name: str = snapshot["name"]
     tile: str = snapshot["tile"]
@@ -839,11 +989,19 @@ def _run_fetch(fetch_id: str) -> None:
 # 对外入口
 # --------------------------------------------------------------------------- #
 def start_fetch(name: str, aoi_geom: Optional[str], bbox: Optional[Sequence[float]],
-                tile: str, t1: dict, t2: dict) -> dict:
-    """POST /api/v1/scene/fetch：校验 + 建 fetch_id + 起后台线程，立即返回 PENDING。"""
+                tile: str, t1: dict, t2: dict, mode: str = "local") -> dict:
+    """POST /api/v1/scene/fetch：校验 + 建 fetch_id + 起后台线程，立即返回 PENDING。
+
+    ``mode="cloud"`` 为云端指数取数（默认 local 逐字不变）：只向 CDSE 请求
+    两期各 4 个指数，进度单位为指数（0/8），不下载原始 12 个 COG 波段。
+    """
     # 先生成 fetch_id：校验失败时也用它当 run_id，错误响应可追溯（EX1/EX2）
     fetch_id = str(uuid.uuid4())
     try:
+        mode_key = str(mode or "local").strip().lower()
+        if mode_key not in {"local", "cloud"}:
+            raise ApiError("EX2", run_id=fetch_id, http_status=400,
+                           detail=f"mode 非法：{mode!r}，仅支持 local / cloud")
         slug = _slug(name, fetch_id)
         box, _geom_json = _resolve_aoi(aoi_geom, bbox, fetch_id)
         tile_norm = str(tile or "").strip().upper()
@@ -867,7 +1025,7 @@ def start_fetch(name: str, aoi_geom: Optional[str], bbox: Optional[Sequence[floa
             raise ApiError("EX2", run_id=fetch_id, http_status=400,
                            detail="双时相日期不能相同")
 
-        key = (slug, tile_norm, metas["t1"]["date"], metas["t2"]["date"])
+        key = (slug, tile_norm, metas["t1"]["date"], metas["t2"]["date"], mode_key)
         with _lock:
             existing_id = _active.get(key)
             if existing_id is not None:
@@ -882,11 +1040,12 @@ def start_fetch(name: str, aoi_geom: Optional[str], bbox: Optional[Sequence[floa
                 "name": slug,
                 "tile": tile_norm,
                 "bbox": box,
+                "mode": mode_key,
                 "t1": metas["t1"],
                 "t2": metas["t2"],
                 "status": STATUS_PENDING,
                 "done": 0,
-                "total": TOTAL_BANDS,
+                "total": TOTAL_CLOUD if mode_key == "cloud" else TOTAL_BANDS,
                 "error": None,
                 "scene_ids": None,
                 "detail": None,

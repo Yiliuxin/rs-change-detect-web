@@ -35,8 +35,19 @@ BANDS: Tuple[str, ...] = ("B02", "B03", "B04", "B08", "SCL")
 OPTIONAL_BANDS: Tuple[str, ...] = ("B11",)
 _TAG_RE = re.compile(r"^t[12]$", re.IGNORECASE)
 
-__all__ = ["BANDS", "OPTIONAL_BANDS", "parse_cog_path", "resolve_bands",
-           "resolve_optional_bands", "has_optional_band"]
+# 云端在线取数：CDSE 直接回传的 4 指数合并为单文件 ``<tag>_indices.tif``
+# （band1=NDVI / band2=NDWI / band3=NDBI / band4=NDMI）。它是「指数成品」，
+# 不是原始反射率波段，故刻意不并入 BANDS / OPTIONAL_BANDS；检测侧识别到该文件
+# 会跳过读 COG 与本地算指数，直接复用云端结果。
+CLOUD_INDEXES: Tuple[str, ...] = ("NDVI", "NDWI", "NDBI", "NDMI")
+CLOUD_INDEX_SUFFIX = "_indices.tif"
+# 云端真彩成品（在线取数 cloud 模式顺带落盘），供双时相卷帘对比消费。
+CLOUD_COMPOSITE_SUFFIX = "_composite.png"
+
+__all__ = ["BANDS", "OPTIONAL_BANDS", "CLOUD_INDEXES", "CLOUD_INDEX_SUFFIX",
+           "CLOUD_COMPOSITE_SUFFIX", "parse_cog_path", "resolve_bands",
+           "resolve_optional_bands", "has_optional_band", "has_cloud_indices",
+           "resolve_cloud_indices", "resolve_cloud_composite"]
 
 
 def _band_names(band: str, sensor: Optional[str] = None) -> Tuple[str, ...]:
@@ -210,3 +221,102 @@ def resolve_optional_bands(cog_path: str, run_id: str,
     if paths is None or len(paths) != len(wanted):
         return {}
     return dict(paths)
+
+
+# --------------------------------------------------------------------------- #
+# 云端指数成品（在线取数 cloud 模式）
+# --------------------------------------------------------------------------- #
+def _is_cloud_index_object(object_name: str) -> bool:
+    """对象名是否以 ``_indices.tif`` 结尾（大小写不敏感）。"""
+    return object_name.rsplit("/", 1)[-1].lower().endswith(CLOUD_INDEX_SUFFIX)
+
+
+def has_cloud_indices(cog_path: Optional[str]) -> bool:
+    """轻量探测该时相是否存有云端 4 指数成品（只列对象名，不下载）。
+
+    与 :func:`has_optional_band` 同口径：MinIO 优先，失败回退本地目录；
+    只判断"有没有指数成品"，不读取像素。检测侧用它自动识别在线云端取数组，
+    无需用户再勾快速模式，也不会重复调 CDSE。
+    """
+    if not cog_path:
+        return False
+    _bucket, prefix, pair_name, tag = parse_cog_path(str(cog_path))
+    try:
+        client = get_client(StorageSettings.from_env())
+        if any(_is_cloud_index_object(o)
+               for o in list_objects(client, COG_BUCKET, prefix=prefix)):
+            return True
+    except Exception as exc:  # noqa: BLE001 - MinIO 不可用 → 回退本地
+        logger.warning("云端指数探测 MinIO 失败（回退本地）：%s", exc)
+    try:
+        if pair_name and DATA_ROOT.exists():
+            for pair_dir in sorted(p for p in DATA_ROOT.glob(f"{pair_name}*") if p.is_dir()):
+                if list(pair_dir.glob(f"{tag}*{CLOUD_INDEX_SUFFIX}")):
+                    return True
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
+
+def resolve_cloud_indices(cog_path: str, run_id: str) -> Optional[Path]:
+    """把 ``<tag>_indices.tif`` 下载到 run 缓存，返回本地路径；缺失 → None。
+
+    缓存目录与波段解析共用 ``runs/<run_id>/_cog/<pair_name>/<tag>/``，按影像对
+    与 tag 隔离，避免切换组时串文件。MinIO 不可用时回退本地 ``data/pair_*``。
+    """
+    _bucket, prefix, pair_name, tag = parse_cog_path(str(cog_path))
+    try:
+        client = get_client(StorageSettings.from_env())
+        objects = [o for o in list_objects(client, COG_BUCKET, prefix=prefix)
+                   if _is_cloud_index_object(o)]
+        if objects:
+            obj = sorted(objects)[0]
+            dest_dir = RUNS_ROOT / run_id / "_cog" / pair_name / tag
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            local = dest_dir / obj.rsplit("/", 1)[-1]
+            if not local.exists() or local.stat().st_size == 0:
+                client.fget_object(COG_BUCKET, obj, str(local))
+            return local
+    except Exception as exc:  # noqa: BLE001 - MinIO 不可用 → 回退本地
+        logger.warning("云端指数解析失败（回退本地）：%s", exc)
+    if pair_name and DATA_ROOT.exists():
+        for pair_dir in sorted(p for p in DATA_ROOT.glob(f"{pair_name}*") if p.is_dir()):
+            hits = sorted(pair_dir.glob(f"{tag}*{CLOUD_INDEX_SUFFIX}"))
+            if hits:
+                return hits[0]
+    return None
+
+
+def resolve_cloud_composite(cog_path: Optional[str], run_id: str,
+                            tag: str) -> Optional[Path]:
+    """把在线取数 cloud 模式已落盘的 ``<tag>_composite.png`` 取到 run 目录。
+
+    与 :func:`resolve_cloud_indices` 同口径（MinIO 优先、本地回退），但真彩 PNG
+    不参与栅格计算，只需复制到 ``runs/<run_id>/<tag>_composite.png`` 供产物清单
+    与卷帘前端消费；缺失返回 None，由检测端现场补调 CDSE 兜底。
+    """
+    from app.service.common import run_dir
+
+    if not cog_path:
+        return None
+    _bucket, prefix, pair_name, scene_tag = parse_cog_path(str(cog_path))
+    dest = run_dir(run_id) / f"{tag}_composite.png"
+    wanted = f"{scene_tag}_composite.png"
+    try:
+        client = get_client(StorageSettings.from_env())
+        objects = [o for o in list_objects(client, COG_BUCKET, prefix=prefix)
+                   if o.rsplit("/", 1)[-1].lower() == wanted.lower()]
+        if objects:
+            if not dest.exists() or dest.stat().st_size == 0:
+                client.fget_object(COG_BUCKET, sorted(objects)[0], str(dest))
+            return dest
+    except Exception as exc:  # noqa: BLE001 - MinIO 不可用 → 回退本地
+        logger.warning("云端真彩成品解析失败（回退本地）：%s", exc)
+    if pair_name and DATA_ROOT.exists():
+        for pair_dir in sorted(p for p in DATA_ROOT.glob(f"{pair_name}*") if p.is_dir()):
+            hits = sorted(pair_dir.glob(wanted))
+            if hits:
+                import shutil
+                shutil.copyfile(hits[0], dest)
+                return dest
+    return None

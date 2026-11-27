@@ -269,20 +269,26 @@
                 <div class="empty-state compact"><p>尚未检索</p><p class="empty-sub">设置 t1 / t2 窗口后点击「查询候选影像」。</p></div>
               </div>
 
+              <!-- 取数模式：默认云端指数（快，含真彩卷帘）；关闭则下载原始 12 波段 -->
+              <div class="run-mode-row gap-top" id="onl-mode-row">
+                <label class="chk" title="开启后由 CDSE 云端直接算好双时相 NDVI/NDWI/NDBI/NDMI 与真彩合成图并入库，不再下载 12 个原始 COG 波段；双时相卷帘对比照常可用"><input type="checkbox" id="onl-cloud-mode" checked /> 云端取指数（快）</label>
+                <span class="hint" id="onl-mode-hint">不下载原始波段 · 含真彩卷帘</span>
+              </div>
+
               <!-- 组名 + 下载并入库 -->
-              <div class="card-subtitle">下载并入库</div>
+              <div class="card-subtitle" id="onl-fetch-title">云端取数并入库</div>
               <label class="fld" for="onl-name">组名 name（自动规范化为 [a-z0-9_]）</label>
               <input type="text" id="onl-name" maxlength="40" spellcheck="false" />
               <div class="onl-name-preview" id="onl-name-preview"></div>
               <button type="button" class="btn btn-primary btn-block gap-top" id="onl-fetch" disabled
-                title="请先在候选清单中点选一个候选影像对">下载并入库</button>
+                title="请先在候选清单中点选一个候选影像对">云端取数并入库</button>
               <div class="err-line" id="onl-fetch-err"></div>
 
               <!-- 进度态：状态徽标 + 「波段 x/10」进度条 + 2s 轮询 -->
               <div class="onl-progress" id="onl-progress" hidden>
                 <div class="onl-prog-head">
                   <span class="onl-status-badge" id="onl-status-badge">PENDING</span>
-                  <span class="onl-band" id="onl-band">波段 0/10</span>
+                  <span class="onl-band" id="onl-band">指数 0/8</span>
                 </div>
                 <div class="onl-bar"><i id="onl-bar-fill" style="width:0%"></i></div>
                 <div class="onl-prog-foot">

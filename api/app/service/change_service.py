@@ -67,14 +67,91 @@ from app.config.constants import (
     VALID_RATIO_MIN, VALID_RATIO_WARN,
 )
 from app.repository import aoi_repo, change_result_repo, scene_repo, task_repo
-from app.service.cog_source import resolve_bands, resolve_optional_bands
+from app.service.cog_source import (
+    CLOUD_INDEXES, has_cloud_indices, resolve_bands, resolve_cloud_composite,
+    resolve_cloud_indices, resolve_optional_bands,
+)
 from app.service.common import (
     artifact_manifest, artifact_url, index_artifact_names, index_raster_names,
     regression_archive_names, regression_artifact_names, run_dir, utc_now,
 )
 from app.service.concurrency import serial
 
-__all__ = ["load_scene", "run", "run_pipeline"]
+__all__ = ["load_scene", "load_cloud_scene_meta", "run", "run_pipeline"]
+
+
+def _make_cloud_composite(scene: dict, tag: str, bbox: BBox,
+                          run_id: str, snapshot: Dict) -> Optional[str]:
+    """为云端检测单时相生成 ``<tag>_composite.png``（卷帘对比消费）。
+
+    优先复用在线取数 cloud 模式已落盘的成品（零 CDSE 调用）；老组或落盘失败
+    时现场调 CDSE 回传 B04/B03/B02，用与本地 COG 完全相同的 ``true_color``
+    口径拉伸。返回 ``stored`` / ``fetched`` / None（失败）。
+    """
+    # 1) 新组：在线取数时已存真彩成品 → 直接取到 run 目录
+    if resolve_cloud_composite(scene.get("cog_path"), run_id, tag) is not None:
+        return "stored"
+    # 2) 老组兜底：现场调 CDSE 取真彩波段，本地拉伸写 PNG
+    from app.service import cdse_service  # 局部导入：local 路径零依赖
+
+    if not cdse_service.configured():
+        return None
+    date = str((snapshot.get(tag) or scene.get("acq_date") or ""))[:10]
+    if not date:
+        return None
+    rgb, _prof = cdse_service.fetch_true_color(
+        tuple(bbox.as_tuple()), date, run_id)
+    dest = run_dir(run_id) / f"{tag}_composite.png"
+    write_composite_png(true_color(rgb[0], rgb[1], rgb[2]), dest)
+    return "fetched" if (dest.exists() and dest.stat().st_size > 0) else None
+
+
+def load_cloud_scene_meta(cog_path: str, bbox: BBox, run_id: str) -> Dict:
+    """读在线取数 cloud 模式单时相指数成品的窗口 / profile / 有效比。
+
+    与 :func:`load_scene` 的 ``window`` / ``profile`` / ``valid_ratio`` 口径对齐，
+    供 ``POST /scene/match`` 复用。云端成品只有 4 个指数波段（无 SCL、无原始
+    反射率），因此有效像元按 band1=NDVI 的有限值判定，不再走 SCL 掩膜流水线。
+    """
+    path = resolve_cloud_indices(str(cog_path or ""), run_id)
+    if path is None:
+        raise ApiError("SYS-01", run_id=run_id,
+                       detail=f"云端指数成品解析失败：cog_path={cog_path}")
+    arr, profile, window = read_aoi(path, bbox, indexes=1)
+    finite = np.isfinite(np.asarray(arr, dtype=np.float32))
+    ratio = float(finite.mean()) if finite.size else 0.0
+    return {"window": window, "profile": dict(profile), "valid_ratio": ratio}
+
+
+def _stored_cloud_arrays(scenes: Dict[str, dict], needed: set, bbox: BBox,
+                         run_id: str) -> Tuple[Dict[str, Dict[str, np.ndarray]], dict]:
+    """读取在线取数 cloud 模式已落盘的 4 波段指数成品（两期）。
+
+    文件 band1..4 固定为 ``CLOUD_INDEXES`` 顺序；只读取本轮需要的指数，
+    shape/CRS/transform 直接沿用取数时的米制 profile（与本地 COG 同口径）。
+    """
+    arrays: Dict[str, Dict[str, np.ndarray]] = {"t1": {}, "t2": {}}
+    profiles: Dict[str, dict] = {}
+    for tag, sc in scenes.items():
+        path = resolve_cloud_indices(str(sc.get("cog_path") or ""), run_id)
+        if path is None:
+            raise ApiError("SYS-01", run_id=run_id,
+                           detail=f"云端指数成品解析失败：{tag}")
+        for band_no, ik in enumerate(CLOUD_INDEXES, start=1):
+            if ik not in needed:
+                continue
+            arr, prof, _window = read_aoi(path, bbox, indexes=band_no)
+            arrays[tag][ik] = np.asarray(arr, dtype=np.float32)
+            profiles.setdefault(tag, dict(prof))
+    if len(profiles) == 2:
+        assert_grid_aligned(profiles["t1"], profiles["t2"])  # EX4：双时相同网格
+    profile = profiles.get("t1")
+    if profile is None:
+        raise ApiError("SYS-01", run_id=run_id, detail="云端指数文件无有效波段")
+    shapes = {a.shape for per_tag in arrays.values() for a in per_tag.values()}
+    if len(shapes) != 1:
+        raise ApiError("EX4", run_id=run_id, detail="双时相云端指数栅格网格不一致")
+    return arrays, dict(profile)
 
 
 def _cloud_pair_indexes(key: str, bbox: BBox, sc_t1: dict, sc_t2: dict,
@@ -82,30 +159,40 @@ def _cloud_pair_indexes(key: str, bbox: BBox, sc_t1: dict, sc_t2: dict,
                         size: int = 512) -> Tuple[Dict, Dict, np.ndarray, dict]:
     """快速模式：云端算 NDVI/NDWI/NDBI/NDMI，构造与 local 同构的 pair。
 
-    只替换「读 COG 算指数」这一段；返回 ``(pair_t1, pair_t2, valid, profile)``
-    供下游 Otsu / 统计 / 转移矩阵 / 出图逐字复用。云端单指数请求（实测稳定）。
+    两条路径，返回结构完全相同：
+      1. 在线取数 cloud 模式已把 4 指数存成 MinIO 成品 → 直接读取（零重复请求）；
+      2. 本地预置影像组无成品 → 现场调 CDSE 取指数（既有快速模式行为不变）。
     """
     from app.service import cdse_service  # 局部导入：local 路径不依赖云端模块
 
     needed = {key, "NDVI", "NDWI", INDEX_AUXILIARY.get(key)}
     needed.discard(None)
-    date1 = str(snapshot.get("t1") or sc_t1.get("acq_date") or "")[:10]
-    date2 = str(snapshot.get("t2") or sc_t2.get("acq_date") or "")[:10]
-    if not date1 or not date2:
-        raise ApiError("EX2", run_id=run_id,
-                       detail="快速模式无法确定两时相日期，请用在线取数或预置影像")
 
-    arrays: Dict[str, Dict[str, np.ndarray]] = {"t1": {}, "t2": {}}
+    _s1 = str(sc_t1.get("cog_path") or "")
+    _s2 = str(sc_t2.get("cog_path") or "")
+    stored = bool(_s1 and _s2 and has_cloud_indices(_s1) and has_cloud_indices(_s2))
     profile: Optional[dict] = None
-    for tag, dt in (("t1", date1), ("t2", date2)):
-        for ik in sorted(needed):
-            data, prof = cdse_service.fetch_index(ik, tuple(bbox.as_tuple()),
-                                                  dt, dt, run_id, size=size)
-            arrays[tag][ik] = data
-            if profile is None:
-                profile = prof
-    if profile is None:
-        raise ApiError("SYS-06", run_id=run_id, detail="云端未回传任何有效指数栅格")
+    if stored:
+        arrays, profile = _stored_cloud_arrays(
+            {"t1": sc_t1, "t2": sc_t2}, needed, bbox, run_id)
+        source_label = "cloud_stored"
+    else:
+        date1 = str(snapshot.get("t1") or sc_t1.get("acq_date") or "")[:10]
+        date2 = str(snapshot.get("t2") or sc_t2.get("acq_date") or "")[:10]
+        if not date1 or not date2:
+            raise ApiError("EX2", run_id=run_id,
+                           detail="快速模式无法确定两时相日期，请用在线取数或预置影像")
+        arrays = {"t1": {}, "t2": {}}
+        for tag, dt in (("t1", date1), ("t2", date2)):
+            for ik in sorted(needed):
+                data, prof = cdse_service.fetch_index(ik, tuple(bbox.as_tuple()),
+                                                      dt, dt, run_id, size=size)
+                arrays[tag][ik] = data
+                if profile is None:
+                    profile = prof
+        if profile is None:
+            raise ApiError("SYS-06", run_id=run_id, detail="云端未回传任何有效指数栅格")
+        source_label = "cloud"
 
     # 公共有效掩膜：所有需要的指数均有限（云端 SCL 粗掩膜 + NaN 传播）
     valid = np.ones(arrays["t1"][sorted(needed)[0]].shape, dtype=bool)
@@ -128,7 +215,7 @@ def _cloud_pair_indexes(key: str, bbox: BBox, sc_t1: dict, sc_t2: dict,
             "ndvi": a["NDVI"], "ndwi": a["NDWI"],
         }
 
-    snapshot["index_source"] = "cloud"
+    snapshot["index_source"] = source_label
     snapshot["cloud_provider"] = "CDSE Sentinel Hub Processing API"
     return make_pair("t1"), make_pair("t2"), valid, dict(profile)
 
@@ -553,9 +640,17 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
         # REQ-04 / NF5 / EX8：双时相辐射口径一致
         sensor = assert_same_caliber(sc_t1["sensor"], sc_t2["sensor"])
 
+        # 在线取数 cloud 模式已把 4 指数（含 NDBI/NDMI）存成 MinIO 成品：
+        # 检测侧自动识别并直接复用，无需用户勾快速模式，也不会重复调 CDSE。
+        stored_cloud = bool(
+            has_cloud_indices(str(sc_t1.get("cog_path") or ""))
+            and has_cloud_indices(str(sc_t2.get("cog_path") or ""))
+        )
+
         # B11 缺失预检：仅 need_b11 时执行，放在 RUNNING 状态更新之前（与「非法
         # 参数不误标 task 状态」既有风格一致）；NDVI / NDWI 链路完全不触发。
-        if need_b11:
+        # 云端指数成品无原始 B11 但四指数齐全 → 跳过预检（语义上不伪造 B11）。
+        if need_b11 and not stored_cloud:
             for sc in (sc_t1, sc_t2):
                 _require_b11(str(sc["cog_path"]), run_id, sc["sensor"])
 
@@ -563,7 +658,8 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
 
         # 快速模式（source=cloud）：云端算 4 指数，跳过本地读 COG；下游
         # Otsu / 统计 / 转移矩阵 / 出图完全复用，与 local 口径逐字一致。
-        cloud_mode = str(source or "local").strip().lower() in {"cloud", "fast"}
+        cloud_mode = (str(source or "local").strip().lower() in {"cloud", "fast"}
+                      or stored_cloud)
         pair_t1: Optional[Dict] = None
         pair_t2: Optional[Dict] = None
         if cloud_mode:
@@ -666,10 +762,31 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
             false_color(rho["t1"]["B08"], rho["t1"]["B04"], rho["t1"]["B03"], valid_mask=valid)
             _stage_progress(on_stage, "index", 3, 6)
         else:
-            # 快速模式：云端只回传指数，无原始反射率波段 → 不生成真彩卷帘图。
-            # 这是已知限制，如实标注；三类专题图 / 统计 / 转移矩阵全部正常产出。
+            # 快速模式双时相卷帘：new 组用在线取数时存的真彩成品；老组（或存图
+            # 失败）现场补调 CDSE 回传 B04/B03/B02，本地按同一 true_color 口径拉伸。
+            # 卷帘图是附加价值：任何失败只标注 skipped，不影响检测主产物。
             out_dir = run_dir(run_id)
-            snapshot["composite_skipped"] = "快速模式（云端指数）无原始波段，未生成真彩卷帘图"
+            _src_label = ("在线取数云端指数成品" if snapshot.get("index_source") == "cloud_stored"
+                          else "快速模式（云端指数）")
+            try:
+                src_t1 = _make_cloud_composite(
+                    sc_t1, "t1", bbox, run_id, snapshot)
+                src_t2 = _make_cloud_composite(
+                    sc_t2, "t2", bbox, run_id, snapshot)
+                if src_t1 and src_t2:
+                    snapshot["composite_source"] = (
+                        "cloud_stored" if src_t1 == src_t2 == "stored"
+                        else "cloud_fetched")
+                    snapshot.pop("composite_skipped", None)  # 清掉历史 run 的旧标记
+                else:
+                    snapshot.pop("composite_source", None)
+                    snapshot["composite_skipped"] = (
+                        _src_label + "真彩补调失败，未生成双时相卷帘图")
+            except Exception as exc:  # noqa: BLE001 - 附加产物失败不阻断检测
+                logger.warning("快速模式真彩合成失败 run_id=%s：%s", run_id, exc)
+                snapshot.pop("composite_source", None)
+                snapshot["composite_skipped"] = (
+                    _src_label + "真彩补调失败，未生成双时相卷帘图")
 
         # 产物清单（REQ-10/12/14）：本轮主三件套 + 带 index / method 后缀归档 + 合成图。
         # 差值法 NDVI 沿用历史主名（缺省行为不变）；回归法改用 _reg 主名，互不覆盖。

@@ -18,8 +18,8 @@ from app.algorithm.radiometric import assert_same_caliber, check_baseline
 from app.api.errors import ApiError, as_api_error
 from app.config.constants import BLOCK_SIZE, RADIOMETRIC_FORMULAS, SENSOR_S2
 from app.repository import aoi_repo, scene_repo, task_repo
-from app.service.change_service import load_scene
-from app.service.cog_source import has_optional_band, parse_cog_path
+from app.service.change_service import load_cloud_scene_meta, load_scene
+from app.service.cog_source import has_cloud_indices, has_optional_band, parse_cog_path
 
 __all__ = ["match_get", "match_post", "preset_aois"]
 
@@ -60,6 +60,10 @@ def _scene_item(scene: dict) -> dict:
         "cog_path": scene["cog_path"],
         "has_b11": bool(has_optional_band(
             str(scene.get("cog_path") or ""), "B11", sensor=scene.get("sensor"))),
+        # 云端在线取数存的是 4 指数成品（无原始 B11），但四个指数都齐，
+        # 前端据此放行 NDBI/NDMI；不伪造 has_b11，语义保持真实。
+        "index_source": ("cloud" if has_cloud_indices(
+            str(scene.get("cog_path") or "")) else None),
     }
 
 
@@ -167,10 +171,19 @@ def match_post(aoi_id: str, scene_t1_id: str, scene_t2_id: str,
         if box:
             bbox = BBox.from_sequence(list(box))
             probe_run = run_id or f"scenematch_{uuid.uuid4().hex[:8]}"
-            loaded = load_scene(sc_t1["cog_path"], sensor,
-                                sc_t1.get("proc_baseline"), bbox, probe_run)
-            clip_window = _clip_window(loaded["window"], loaded["profile"])
-            valid_ratio = float(loaded["ratio_result"].valid_ratio)
+            # 云端在线取数只落 4 指数成品（无 SCL / 原始 5 波段），不能走
+            # load_scene 的 COG 解析，否则 SYS-01；按指数成品口径读窗口/有效比。
+            cloud_pair = (has_cloud_indices(str(sc_t1.get("cog_path") or ""))
+                          and has_cloud_indices(str(sc_t2.get("cog_path") or "")))
+            if cloud_pair:
+                meta = load_cloud_scene_meta(sc_t1["cog_path"], bbox, probe_run)
+                clip_window = _clip_window(meta["window"], meta["profile"])
+                valid_ratio = float(meta["valid_ratio"])
+            else:
+                loaded = load_scene(sc_t1["cog_path"], sensor,
+                                    sc_t1.get("proc_baseline"), bbox, probe_run)
+                clip_window = _clip_window(loaded["window"], loaded["profile"])
+                valid_ratio = float(loaded["ratio_result"].valid_ratio)
 
         return {
             "run_id": run_id or "",

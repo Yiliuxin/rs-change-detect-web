@@ -86,6 +86,7 @@ const ON = {
   runId: '',
   fetching: false,       // POST /scene/fetch 已受理，轮询进行中
   fetchId: '',
+  fetchMode: 'cloud',    // 本次取数口径：cloud=云端指数（默认）/ local=原始波段
   pollTimer: null,
   pollBusy: false,       // 避免单次 GET 未返回时重叠发请求
   pollFails: 0,
@@ -767,6 +768,9 @@ function pairHasB11(p) {
   const sc = p.scenes || {};
   const t1 = sc.t1 || {};
   const t2 = sc.t2 || {};
+  // 云端在线取数：4 指数（含 NDBI/NDMI）已由 CDSE 算好入库，虽无原始 B11，
+  // 但四类指数都可直接检测 → 放行；不伪造 has_b11 字段。
+  if (t1.index_source === 'cloud' && t2.index_source === 'cloud') return true;
   // 两景都明确带 has_b11 字段 → 以服务端探测结果为准
   if (t1.has_b11 !== undefined && t2.has_b11 !== undefined) {
     return Boolean(t1.has_b11) && Boolean(t2.has_b11);
@@ -2530,14 +2534,36 @@ function autoSelectBestOnlineCandidate() {
   showToast('已自动选定综合云量最低的候选（' + fmtCloud(bestCloud) + '）', 'ok');
 }
 
+// ---------- 取数模式：默认云端指数；关闭回退原始波段下载 ----------
+function onlineMode() {
+  const el = $('onl-cloud-mode');
+  return el && el.checked ? 'cloud' : 'local';
+}
+
+function syncOnlineModeUi() {
+  const cloud = onlineMode() === 'cloud';
+  const hint = $('onl-mode-hint');
+  if (hint) hint.textContent = cloud ? '不下载原始波段 · 含真彩卷帘' : '下载 12 波段 · 保留真彩卷帘';
+  const title = $('onl-fetch-title');
+  if (title) title.textContent = cloud ? '云端取数并入库' : '下载并入库';
+  if (!ON.fetching) {
+    const btn = $('onl-fetch');
+    if (btn) btn.textContent = cloud ? '云端取数并入库' : '下载并入库';
+    const band = $('onl-band');
+    if (band) band.textContent = cloud ? '指数 0/8' : '波段 0/12';
+  }
+}
+
 // ---------- fetch：提交 + 2s 轮询状态 ----------
 function renderOnlineProgress(status, done, total) {
   const st = String(status || 'PENDING').toUpperCase();
   const badge = $('onl-status-badge');
   badge.textContent = st;
   badge.className = 'onl-status-badge st-' + st;
-  const d = Number(done) || 0, t = Number(total) || 10;
-  $('onl-band').textContent = '波段 ' + d + '/' + t;
+  const d = Number(done) || 0;
+  const t = Number(total) || (ON.fetchMode === 'cloud' ? 8 : 12);
+  const unit = ON.fetchMode === 'cloud' ? '指数' : '波段';
+  $('onl-band').textContent = unit + ' ' + d + '/' + t;
   const pct = Math.max(0, Math.min(100, Math.round((d / t) * 100)));
   $('onl-bar-fill').style.width = pct + '%';
   const bar = $('onl-progress').querySelector('.onl-bar');
@@ -2556,7 +2582,7 @@ function stopOnlinePolling() {
 function restoreOnlineFetchButton() {
   ON.fetching = false;
   const btn = $('onl-fetch');
-  btn.textContent = '下载并入库';
+  btn.textContent = ON.fetchMode === 'cloud' ? '云端取数并入库' : '下载并入库';
   updateOnlineFetchGate();
 }
 
@@ -2594,16 +2620,21 @@ async function onlineFetchTerminal(status, data) {
   renderOnlineProgress(status, pg.done, pg.total);
   restoreOnlineFetchButton();
   if (status === 'SUCCESS') {
-    // 批次 D11：在线取数只下 5 波段、不含 B11 → 登记组名并即时同步指数可用性
-    if (ON.lastFetchName && ON.fetchedKeys) {
+    // 老口径：原始波段的早期在线组不含 B11 → 登记组名禁用 NDBI/NDMI；
+    // cloud 模式四指数齐全（sceneVO.index_source=cloud 为权威判据），不登记。
+    if (ON.lastFetchName && ON.fetchedKeys && ON.fetchMode !== 'cloud') {
       ON.fetchedKeys.add(ON.lastFetchName);
       saveFetchedKeys();   // 持久化：刷新页面后门控仍生效
+    } else if (ON.lastFetchName && ON.fetchedKeys && ON.fetchedKeys.delete) {
+      ON.fetchedKeys.delete(ON.lastFetchName);
+      saveFetchedKeys();
     }
     syncIndexAvailability();
     const ids = (data && data.scene_ids) || {};
     const ok = $('onl-success');
     ok.hidden = false;
-    ok.textContent = '✓ 入库完成 · scene t1 ' + (ids.t1 || '—') + ' / t2 ' + (ids.t2 || '—')
+    ok.textContent = '✓ ' + (ON.fetchMode === 'cloud' ? '云端指数入库完成（无需真彩卷帘）' : '入库完成')
+      + ' · scene t1 ' + (ids.t1 || '—') + ' / t2 ' + (ids.t2 || '—')
       + '；正在按取数范围自动应用 AOI 并确认口径…';
     showToast('在线取数完成，正在自动应用 AOI 与时相', 'ok', 4200);
     // 自动收尾后再刷新 B 卡清单：autoSelectPair 按 t1/t2 命中刚入库的组，口径随即自动确认
@@ -2616,7 +2647,7 @@ async function onlineFetchTerminal(status, data) {
     const err = (data && data.error) || {};
     box.textContent = onlineErrText({ code: err.code, message: err.message });
     // 终态后按钮进度态复位为可再次提交
-    $('onl-fetch').textContent = '下载并入库';
+    $('onl-fetch').textContent = ON.fetchMode === 'cloud' ? '云端取数并入库' : '下载并入库';
   }
 }
 
@@ -2633,7 +2664,9 @@ async function onlinePollTick() {
       const st = String(data.status || '').toUpperCase();
       const pg = data.progress || {};
       renderOnlineProgress(st || 'PENDING', pg.done, pg.total);
-      $('onl-fetch').textContent = '下载中… 波段 ' + (Number(pg.done) || 0) + '/' + (Number(pg.total) || 10);
+      const unit = ON.fetchMode === 'cloud' ? '指数' : '波段';
+      $('onl-fetch').textContent = (ON.fetchMode === 'cloud' ? '云端取数中… ' : '下载中… ')
+        + unit + ' ' + (Number(pg.done) || 0) + '/' + (Number(pg.total) || 8);
       if (st === 'SUCCESS' || st === 'FAILED') onlineFetchTerminal(st, data);
     } else if (res.transient) {
       // 单次 GET 抖动（网络/5xx/超时）：跳过本次，2s 后继续，绝不中断长下载
@@ -2665,8 +2698,10 @@ function startOnlinePolling(fetchId, initialStatus) {
   $('onl-success').hidden = true;
   $('onl-failed').hidden = true;
   $('onl-fetch-id').textContent = 'fetch_id ' + fetchId;
-  renderOnlineProgress(initialStatus || 'PENDING', 0, 10);
-  $('onl-fetch').textContent = '下载中… 波段 0/10';
+  renderOnlineProgress(initialStatus || 'PENDING', 0,
+                       ON.fetchMode === 'cloud' ? 8 : 12);
+  $('onl-fetch').textContent = ON.fetchMode === 'cloud'
+    ? '云端取数中… 指数 0/8' : '下载中… 波段 0/12';
   updateOnlineFetchGate();
   onlinePollTick();                                  // 立即拉一次，尽快进入 RUNNING
   ON.pollTimer = window.setInterval(onlinePollTick, ON_POLL_MS); // 之后每 2s 独立轮询
@@ -2695,8 +2730,10 @@ async function onlineFetch() {
     proc_baseline: String((p && p.proc_baseline) || ''),
     cloud_cover: (p && p.cloud_cover != null) ? Number(p.cloud_cover) : null,
   });
+  ON.fetchMode = onlineMode();
   const body = {
     name,
+    mode: ON.fetchMode,
     bbox: pre.bbox,
     tile: String(c.tile || ''),
     t1: phase(c.t1),
@@ -2769,6 +2806,7 @@ async function loadFetchGroups() {
     const name = String(g.group || '');
     const short = name.replace(/^pair_/, '');
     const meta = [g.scene_count ? (g.scene_count + ' 景') : '',
+      g.index_source === 'cloud' ? '云端指数' : '原始波段',
       g.t1_date && g.t2_date ? (g.t1_date + ' → ' + g.t2_date) : '']
       .filter(Boolean).join(' · ');
     return '<div class="onl-group-row" data-group="' + esc(name) + '">'
@@ -2992,6 +3030,10 @@ function bindEvents() {
   // 在线取数（可选）卡片事件（B 级扩展 / REQ-02 在线分支）
   $('onl-discover').onclick = onlineDiscover;
   $('onl-fetch').onclick = onlineFetch;
+  if ($('onl-cloud-mode')) {
+    $('onl-cloud-mode').addEventListener('change', syncOnlineModeUi);
+    syncOnlineModeUi();
+  }
   $('onl-retry').onclick = retryOnline;
   $('onl-place').onchange = onlPlaceChange;
   // 在线取数数据管理：刷新 / 按组删 / 一键清空

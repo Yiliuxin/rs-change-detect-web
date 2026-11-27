@@ -30,10 +30,12 @@ import io
 import json
 import logging
 import os
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
@@ -93,12 +95,21 @@ INDEX_BAND_EXPR: Dict[str, Tuple[str, str]] = {
     "NDMI": ("B08", "B11"),
 }
 
-DEFAULT_SIZE = 512          # 单波段稳定输出尺寸（实测 256/512 稳，1024 偶发挂起）
+DEFAULT_SIZE = 256          # 单波段稳定输出尺寸（实测 256 最快，1024 偶发挂起）
 TOKEN_REFRESH_S = 1500      # token 有效期 1800s，提前 300s 刷新
 HTTP_TIMEOUT_S = 120
 MAX_RETRIES = 3
 
 _token_cache: Dict[str, object] = {"value": "", "expires_at": 0.0}
+
+# 直连 CDSE：运行环境可能注入 HTTP_PROXY/HTTPS_PROXY（本机调试代理），
+# urllib 默认走代理时实测反复 RemoteDisconnected（每次触发 2s/4s 退避重试，
+# 一次取数被拖到 4 分钟以上）。这里显式禁用代理，与前端 requests(trust_env=False)
+# 口径一致；凭证与数据均走 HTTPS，直连不影响安全。
+def _urlopen(req, timeout: int = HTTP_TIMEOUT_S):
+    """每次新建直连 opener（线程安全，可被单测整体打桩）。"""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return opener.open(req, timeout=timeout)
 
 
 def configured() -> bool:
@@ -120,8 +131,21 @@ def _credentials() -> Tuple[str, str]:
     return cid, sec
 
 
+_token_lock = threading.Lock()
+
+
 def get_token(force: bool = False) -> str:
-    """获取 access token（进程内缓存，过期前刷新）；失败 → SYS-06。"""
+    """获取 access token（线程安全的进程内缓存，过期前刷新）。
+
+    云端在线取数会并发发 8 个指数请求；无锁时可能同时刷新 token，
+    这里用锁保证只有一个请求真正去拿 token。
+    """
+    with _token_lock:
+        return _get_token_impl(force)
+
+
+def _get_token_impl(force: bool = False) -> str:
+    """实际取 token 逻辑（调用方须持 :data:`_token_lock`）。"""
     now = time.time()
     if (not force and _token_cache["value"]
             and float(_token_cache["expires_at"]) > now):
@@ -137,7 +161,7 @@ def get_token(force: bool = False) -> str:
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_S) as resp:
+        with _urlopen(req, timeout=HTTP_TIMEOUT_S) as resp:
             payload = json.load(resp)
         token = str(payload["access_token"])
         expires_in = int(payload.get("expires_in", 1800))
@@ -189,18 +213,45 @@ def _parse_tif(body: bytes) -> Tuple[np.ndarray, dict]:
     return data, profile
 
 
-def fetch_index(index: str, bbox: Tuple[float, float, float, float],
-                date_from: str, date_to: str, run_id: str,
-                size: int = DEFAULT_SIZE) -> Tuple[np.ndarray, dict]:
-    """云端算单个指数，返回 (data float32, profile)；失败 → SYS-06。
+def _evalscript_band(band: str) -> str:
+    """单波段原始反射率 evalscript（真彩合成用，与指数共用 SCL 粗掩膜）。
 
-    ``date_from`` / ``date_to`` 为 ISO 日期串（YYYY-MM-DD），取该时相前后
-    各 1 天窗口以锁定具体影像。单波段请求（实测稳定），最多重试 3 次。
+    ``band`` 恰为 SCL 时不可把 SCL 重复列入 input（Processing API 400），
+    故按 band 是否等于 SCL 分两种脚本：SCL 自身直接回传分类值。
     """
-    key = str(index).upper()
-    if key not in INDEX_BAND_EXPR:
-        raise ApiError("EX12", run_id=run_id,
-                       detail=f"快速模式不支持指数：{index}")
+    if band.upper() == "SCL":
+        return """//VERSION=3
+function setup() {
+  return {
+    input: ["SCL"],
+    output: { id: "band", bands: 1, sampleType: "FLOAT32" }
+  };
+}
+function evaluatePixel(s) { return [s.SCL]; }"""
+    return f"""//VERSION=3
+function setup() {{
+  return {{
+    input: ["{band}", "SCL"],
+    output: {{ id: "band", bands: 1, sampleType: "FLOAT32" }}
+  }};
+}}
+function evaluatePixel(s) {{
+  var bad = (s.SCL === 0 || s.SCL === 1 || s.SCL === 3 || s.SCL === 8 ||
+             s.SCL === 9 || s.SCL === 10 || s.SCL === 11);
+  if (bad) return [NaN];
+  return [s.{band}];
+}}"""
+
+
+def _request_raster(evalscript: str, bbox: Tuple[float, float, float, float],
+                    date_from: str, date_to: str, run_id: str,
+                    size: int, label: str,
+                    identifier: str = "idx") -> Tuple[np.ndarray, dict]:
+    """通用单波段 Processing API 请求：token / payload / 重试 / 米制 profile。
+
+    指数与真彩波段共用同一套请求骨架，只换 evalscript 与 identifier；
+    ``label`` 仅用于日志，不改变业务语义。最多重试 MAX_RETRIES 次。
+    """
     token = get_token()
     west, south, east, north = [float(v) for v in bbox]
     # CRS84 请求最稳定（UTM 渲染实测 500）；面积口径由本地 metric_profile 注入米制 transform。
@@ -221,11 +272,11 @@ def fetch_index(index: str, bbox: Tuple[float, float, float, float],
         "output": {
             "width": int(size), "height": int(size),
             "responses": [{
-                "identifier": "idx",
+                "identifier": identifier,
                 "format": {"type": "image/tiff", "parameters": {"codec": "deflate"}},
             }],
         },
-        "evalscript": _evalscript(key),
+        "evalscript": evalscript,
     }
     body_bytes = json.dumps(payload).encode("utf-8")
     last: Optional[Exception] = None
@@ -236,16 +287,14 @@ def fetch_index(index: str, bbox: Tuple[float, float, float, float],
                 headers={"Authorization": f"Bearer {token}",
                          "Content-Type": "application/json"},
             )
-            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_S) as resp:
+            with _urlopen(req, timeout=HTTP_TIMEOUT_S) as resp:
                 body = resp.read()
             data, _cloud_profile = _parse_tif(body)
             # 用本地米制 profile 覆盖云端度制 profile：面积口径与本地 COG 一致
             profile = metric_profile(bbox, size)
-            # 本地二次口径：分母保护 + 物理域裁剪（与 index_calculator 一致）
-            data = np.clip(data, -1.0, 1.0).astype(np.float32)
             data[~np.isfinite(data)] = np.float32(np.nan)
-            logger.info("CDSE 云端指数成功 index=%s size=%s try=%d bytes=%d",
-                        key, size, attempt, len(body))
+            logger.info("CDSE 云端栅格成功 label=%s size=%s try=%d bytes=%d",
+                        label, size, attempt, len(body))
             return data, profile
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:300]
@@ -257,22 +306,76 @@ def fetch_index(index: str, bbox: Tuple[float, float, float, float],
                     continue
                 raise ApiError("SYS-06", run_id=run_id,
                                detail=f"CDSE Processing API {exc.code}：{detail}") from exc
-            logger.warning("CDSE 指数请求失败 index=%s try=%d http=%s：%s",
-                           key, attempt, exc.code, detail)
+            logger.warning("CDSE 栅格请求失败 label=%s try=%d http=%s：%s",
+                           label, attempt, exc.code, detail)
         except Exception as exc:  # noqa: BLE001 - 超时/网络抖动 → 重试
             last = exc
-            logger.warning("CDSE 指数请求异常 index=%s try=%d：%s",
-                           key, attempt, type(exc).__name__)
+            logger.warning("CDSE 栅格请求异常 label=%s try=%d：%s",
+                           label, attempt, type(exc).__name__)
         time.sleep(2 ** (attempt - 1))
     raise ApiError(
         "SYS-06", run_id=run_id,
-        detail=f"CDSE 云端指数 {key} 连续 {MAX_RETRIES} 次失败："
+        detail=f"CDSE 云端栅格 {label} 连续 {MAX_RETRIES} 次失败："
                f"{type(last).__name__ if last else 'unknown'}；"
                "可关闭快速模式改用本地检测",
     )
 
 
+def fetch_index(index: str, bbox: Tuple[float, float, float, float],
+                date_from: str, date_to: str, run_id: str,
+                size: int = DEFAULT_SIZE) -> Tuple[np.ndarray, dict]:
+    """云端算单个指数，返回 (data float32, profile)；失败 → SYS-06。
+
+    ``date_from`` / ``date_to`` 为 ISO 日期串（YYYY-MM-DD），取该时相前后
+    各 1 天窗口以锁定具体影像。单波段请求（实测稳定），最多重试 3 次。
+    """
+    key = str(index).upper()
+    if key not in INDEX_BAND_EXPR:
+        raise ApiError("EX12", run_id=run_id,
+                       detail=f"快速模式不支持指数：{index}")
+    data, profile = _request_raster(
+        _evalscript(key), bbox, date_from, date_to, run_id, size,
+        f"指数 {key}", identifier="idx")
+    # 本地二次口径：分母保护 + 物理域裁剪（与 index_calculator 一致）
+    data = np.clip(data, -1.0, 1.0).astype(np.float32)
+    return data, profile
+
+
+# 真彩三波段（与 app.algorithm.composite.true_color 的 R=B04/G=B03/B=B02 同口径）
+TRUE_COLOR_BANDS: Tuple[str, str, str] = ("B04", "B03", "B02")
+
+
+def fetch_true_color(bbox: Tuple[float, float, float, float],
+                     date: str, run_id: str,
+                     size: int = DEFAULT_SIZE) -> Tuple[np.ndarray, dict]:
+    """云端回传真彩三波段反射率，供本地 ``true_color`` 拉伸成 PNG。
+
+    返回 ``(rgb float32 (3,H,W), profile)``；单波段逐次请求（实测稳定），
+    三路并发由调用方负责。云端只做 SCL 粗掩膜，拉伸口径与本地 COG 完全一致。
+    """
+    arrays: Dict[str, np.ndarray] = {}
+    profile: Optional[dict] = None
+    # 三波段并发：与指数请求一样，让偶发断连的重试重叠，不串行累加
+    with ThreadPoolExecutor(max_workers=len(TRUE_COLOR_BANDS),
+                            thread_name_prefix=f"cdse-rgb-{run_id[:8]}") as pool:
+        futures = {
+            pool.submit(_request_raster, _evalscript_band(b), bbox,
+                        date, date, run_id, size, f"真彩 {b}", "band"): b
+            for b in TRUE_COLOR_BANDS
+        }
+        for fut in as_completed(futures):
+            data, prof = fut.result()
+            arrays[futures[fut]] = data
+            if profile is None:
+                profile = prof
+    if profile is None:
+        raise ApiError("SYS-06", run_id=run_id, detail="云端未回传真彩波段")
+    rgb = np.stack([arrays[b] for b in TRUE_COLOR_BANDS], axis=0).astype(np.float32)
+    return rgb, profile
+
+
 __all__ = [
-    "configured", "get_token", "fetch_index",
-    "TOKEN_URL", "PROCESS_URL", "INDEX_BAND_EXPR", "DEFAULT_SIZE",
+    "configured", "get_token", "fetch_index", "fetch_true_color",
+    "TRUE_COLOR_BANDS", "TOKEN_URL", "PROCESS_URL", "INDEX_BAND_EXPR",
+    "DEFAULT_SIZE",
 ]
