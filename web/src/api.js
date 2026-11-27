@@ -8,10 +8,12 @@ import * as demo from './demo.js';
 
 const BASE = '/api/v1';
 const TIMEOUT_MS = 15000; // 重计算接口（POST /scene/match 真实读取 COG 算掩膜）放宽到 15s；constants.py API_TIMEOUT_SEC = 3 仅适用于轻接口，避免 2.5s 误超时降级
-// 同步变化检测 /result/change 走完整管线（读 COG → 掩膜 → Otsu → 渲染），实测 30~35s，
-// 上限预算 90s（constants.py TIME_BUDGET_SEC）。通用 15s 会把它掐断误判成「后端不可用」
-// 而降级到演示数据。这里单独放宽到 120s（90s + 余量），仅作用于同步检测，其余接口仍走 15s。
-const CHANGE_SYNC_TIMEOUT_MS = 120000;
+// 同步变化检测 /result/change 走完整管线（读 COG → 掩膜 → Otsu → 渲染），实测 30~35s；
+// 快速模式（source=cloud）首次云端取数还要叠加 CDSE 4 指数 + 2 真彩，实测 140~182s。
+// 旧值 120s 会把这类正常请求误判成「后端不可用」而静默降级成演示数据 —— 表现就是
+// 「检测完成」但 run_id 是 demo-run-*、统计是固定示例值、地图没有任何彩色图。
+// 这里放到 600s，覆盖最坏情况；其余接口仍走 15s。真正的网络/业务错误仍会立即抛出。
+const CHANGE_SYNC_TIMEOUT_MS = 600000;
 
 // 认证扩展（注册/登录）：统一注入 Bearer token；401 → 清票据回登录页
 export const AUTH = {

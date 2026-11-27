@@ -26,6 +26,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import logging
@@ -35,6 +36,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
@@ -101,6 +103,28 @@ HTTP_TIMEOUT_S = 120
 MAX_RETRIES = 3
 
 _token_cache: Dict[str, object] = {"value": "", "expires_at": 0.0}
+
+# 云端栅格进程内缓存：同一 AOI / 日期 / 脚本 / 尺寸的 Processing API 结果是确定性的，
+# 重复检测（答辩演示反复跑同一组）直接命中，无需再等 CDSE 排队。在在线取数阶段
+# 已取过的指数也会命中，检测端无需重复请求。TTL 与 token 同量级，避免长期占用内存。
+_RASTER_CACHE_TTL = 1800
+_RASTER_CACHE_MAX = 96
+_raster_cache: "OrderedDict[str, Tuple[float, np.ndarray, dict]]" = OrderedDict()
+_raster_cache_lock = threading.Lock()
+
+
+def _raster_cache_key(evalscript: str, bbox: Tuple[float, float, float, float],
+                      date_from: str, date_to: str, size: int,
+                      identifier: str) -> str:
+    raw = "|".join([evalscript, *(str(float(v)) for v in bbox),
+                    date_from, date_to, str(int(size)), identifier])
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def clear_raster_cache() -> None:
+    """清空进程内栅格缓存（测试隔离 / 凭证切换时调用）。"""
+    with _raster_cache_lock:
+        _raster_cache.clear()
 
 # 直连 CDSE：运行环境可能注入 HTTP_PROXY/HTTPS_PROXY（本机调试代理），
 # urllib 默认走代理时实测反复 RemoteDisconnected（每次触发 2s/4s 退避重试，
@@ -252,6 +276,16 @@ def _request_raster(evalscript: str, bbox: Tuple[float, float, float, float],
     指数与真彩波段共用同一套请求骨架，只换 evalscript 与 identifier；
     ``label`` 仅用于日志，不改变业务语义。最多重试 MAX_RETRIES 次。
     """
+    cache_key = _raster_cache_key(evalscript, bbox, date_from, date_to, size, identifier)
+    with _raster_cache_lock:
+        hit = _raster_cache.get(cache_key)
+        if hit and time.time() - float(hit[0]) < _RASTER_CACHE_TTL:
+            _raster_cache.move_to_end(cache_key)
+            logger.info("CDSE 云端栅格命中缓存 label=%s size=%s", label, size)
+            return hit[1].copy(), dict(hit[2])
+        if hit:
+            _raster_cache.pop(cache_key, None)
+
     token = get_token()
     west, south, east, north = [float(v) for v in bbox]
     # CRS84 请求最稳定（UTM 渲染实测 500）；面积口径由本地 metric_profile 注入米制 transform。
@@ -293,6 +327,11 @@ def _request_raster(evalscript: str, bbox: Tuple[float, float, float, float],
             # 用本地米制 profile 覆盖云端度制 profile：面积口径与本地 COG 一致
             profile = metric_profile(bbox, size)
             data[~np.isfinite(data)] = np.float32(np.nan)
+            with _raster_cache_lock:
+                _raster_cache[cache_key] = (time.time(), data.copy(), dict(profile))
+                _raster_cache.move_to_end(cache_key)
+                while len(_raster_cache) > _RASTER_CACHE_MAX:
+                    _raster_cache.popitem(last=False)
             logger.info("CDSE 云端栅格成功 label=%s size=%s try=%d bytes=%d",
                         label, size, attempt, len(body))
             return data, profile

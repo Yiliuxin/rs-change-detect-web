@@ -19,6 +19,7 @@ import inspect
 import json
 import math
 import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -156,7 +157,7 @@ def _stored_cloud_arrays(scenes: Dict[str, dict], needed: set, bbox: BBox,
 
 def _cloud_pair_indexes(key: str, bbox: BBox, sc_t1: dict, sc_t2: dict,
                         run_id: str, snapshot: Dict,
-                        size: int = 512) -> Tuple[Dict, Dict, np.ndarray, dict]:
+                        size: Optional[int] = None) -> Tuple[Dict, Dict, np.ndarray, dict]:
     """快速模式：云端算 NDVI/NDWI/NDBI/NDMI，构造与 local 同构的 pair。
 
     两条路径，返回结构完全相同：
@@ -164,6 +165,9 @@ def _cloud_pair_indexes(key: str, bbox: BBox, sc_t1: dict, sc_t2: dict,
       2. 本地预置影像组无成品 → 现场调 CDSE 取指数（既有快速模式行为不变）。
     """
     from app.service import cdse_service  # 局部导入：local 路径不依赖云端模块
+    # 单一尺寸源：原写死 512 与在线取数 DEFAULT_SIZE=256 不一致；实测同一 AOI
+    # 512 单请求 26~175s、256 仅 5~30s（Sentinel-2 原生 10m，256 已过采样）。
+    size = int(size or cdse_service.DEFAULT_SIZE)
 
     needed = {key, "NDVI", "NDWI", INDEX_AUXILIARY.get(key)}
     needed.discard(None)
@@ -183,10 +187,22 @@ def _cloud_pair_indexes(key: str, bbox: BBox, sc_t1: dict, sc_t2: dict,
             raise ApiError("EX2", run_id=run_id,
                            detail="快速模式无法确定两时相日期，请用在线取数或预置影像")
         arrays = {"t1": {}, "t2": {}}
-        for tag, dt in (("t1", date1), ("t2", date2)):
-            for ik in sorted(needed):
-                data, prof = cdse_service.fetch_index(ik, tuple(bbox.as_tuple()),
-                                                      dt, dt, run_id, size=size)
+        # 提速：原实现「2 时相 × N 指数」双重串行，单请求网络耗时逐次累加，
+        # 实测快速模式仅指数段就 60~120s。改为一次并发提交全部请求；
+        # CDSE 偶发断连的重试（2s/4s 退避）也随之重叠，不串行累加。
+        jobs = [(tag, ik, dt)
+                for tag, dt in (("t1", date1), ("t2", date2))
+                for ik in sorted(needed)]
+        with ThreadPoolExecutor(max_workers=len(jobs),
+                                thread_name_prefix=f"cdse-pair-{run_id[:8]}") as pool:
+            futures = {
+                pool.submit(cdse_service.fetch_index, ik, tuple(bbox.as_tuple()),
+                            dt, dt, run_id, size=size): (tag, ik)
+                for tag, ik, dt in jobs
+            }
+            for fut in as_completed(futures):
+                tag, ik = futures[fut]
+                data, prof = fut.result()
                 arrays[tag][ik] = data
                 if profile is None:
                     profile = prof
@@ -769,10 +785,13 @@ def run_pipeline(run_id: str, index: str = "NDVI", block_size: int = BLOCK_SIZE,
             _src_label = ("在线取数云端指数成品" if snapshot.get("index_source") == "cloud_stored"
                           else "快速模式（云端指数）")
             try:
-                src_t1 = _make_cloud_composite(
-                    sc_t1, "t1", bbox, run_id, snapshot)
-                src_t2 = _make_cloud_composite(
-                    sc_t2, "t2", bbox, run_id, snapshot)
+                # 提速：两期真彩彼此独立，原来串行跑两遍（每遍内部 3 波段并发），
+                # 总耗时仍是单期的 2 倍。并发提交后与指数段一样只付一次网络延迟。
+                with ThreadPoolExecutor(max_workers=2,
+                                        thread_name_prefix=f"cdse-rgbpair-{run_id[:8]}") as pool:
+                    f1 = pool.submit(_make_cloud_composite, sc_t1, "t1", bbox, run_id, snapshot)
+                    f2 = pool.submit(_make_cloud_composite, sc_t2, "t2", bbox, run_id, snapshot)
+                    src_t1, src_t2 = f1.result(), f2.result()
                 if src_t1 and src_t2:
                     snapshot["composite_source"] = (
                         "cloud_stored" if src_t1 == src_t2 == "stored"

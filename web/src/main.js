@@ -869,12 +869,18 @@ function applyChangeResult(data) {
   };
   // 地图叠加优先用纯分类图 change_overlay（尺寸=栅格、无页眉/图例/署名，按 AOI
   // bounds 铺上去正好对齐）；老 run 无该产物时回退 change.png（带制图要素成品图）。
+  // 演示降级数据（run_id=demo-run-*）没有产物图：demoChange.change_png 为空、
+  // 也没有 change_overlay。旧逻辑直接 return，地图上就完全没有彩色块，用户会
+  // 误以为检测失败。这里本地生成 canvas 专题图兜底，保证「检测完成」时地图有图，
+  // 并在 run-done 文案里明确标注这是演示数据，不冒充真实检测结果。
+  const isDemoResult = /^demo-/.test(String((data && data.run_id) || '')) || !!(data && data.demo);
   const rawOverlay = data.change_overlay;
   const rawPngOverlay = rawOverlay && !/^demo:/.test(rawOverlay) ? rawOverlay : '';
   const rawPng = data.change_png;
-  S.changePngUrl = rawPng && /^demo:/.test(rawPng) ? demo.makeChangePngDataUrl() : rawPng;
+  S.changePngUrl = (isDemoResult || (rawPng && /^demo:/.test(rawPng)))
+    ? demo.makeChangePngDataUrl() : rawPng;
   (async () => {
-    const png = await loadImage(rawPngOverlay || rawPng);
+    const png = await loadImage(rawPngOverlay || (isDemoResult ? S.changePngUrl : rawPng));
     if (!png) return;      // 取图失败（缺产物 / 会话过期）→ 不覆盖地图，静默保留上一张
     S.changePngUrl = png;
     if (!S.reclass.preview) S.reclass.basePngUrl = png;  // 批次 K：「还原」用的基准图
@@ -934,11 +940,14 @@ async function runChangeDetection() {
     else setDataBadge(false, '');
     applyChangeResult(res.data);
     $('run-done').hidden = false;
-    $('run-done').textContent = '✓ 检测完成 · ' + METHOD_LABELS[method] + ' · ' + index
+    // 降级演示不是真实检测：文案必须写明，避免「检测完成」+ 固定示例统计误导答辩/验收。
+    $('run-done').textContent = (res.demo ? '⚠ 后端未返回结果，当前为演示数据 · ' : '✓ 检测完成 · ')
+      + METHOD_LABELS[method] + ' · ' + index
       + (res.data.threshold_source ? ' · ' + res.data.threshold_source : '')
       + (res.data.threshold != null ? ' T=' + Number(res.data.threshold).toFixed(2) : '')
       + ' · run_id ' + res.data.run_id;
-    showToast(res.demo ? '变化检测完成（演示数据）' : '变化检测完成', 'ok');
+    showToast(res.demo ? '后端未返回结果，已用本地演示数据（地图为示意色块）' : '变化检测完成',
+      res.demo ? 'warn' : 'ok');
   } catch (e) {
     handleErr(e);
     $('run-status').textContent = '检测失败，可调整参数后重试';
